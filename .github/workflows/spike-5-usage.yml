@@ -1,0 +1,27 @@
+name: spike-5-usage
+on: workflow_dispatch
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-claude
+      - uses: ./.github/actions/trust-workspace
+      - name: burn ~1M tokens via spike-schema x3
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0"
+        run: |
+          mkdir -p .spike
+          for i in 1 2 3; do
+            claude -p "/spike-schema-dispatch" --permission-mode dontAsk --max-turns 5 --output-format json > .spike/usage-$i.json || true
+            jq '.usage' .spike/usage-$i.json
+          done
+          jq -s 'map(.usage.input_tokens + .usage.output_tokens) | add' .spike/usage-*.json | tee .spike/total-tokens
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-5
+          path: .spike/
+          include-hidden-files: true

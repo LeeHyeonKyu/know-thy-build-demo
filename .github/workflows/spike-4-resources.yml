@@ -1,0 +1,42 @@
+name: spike-4-resources
+on: workflow_dispatch
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-claude
+      - uses: ./.github/actions/trust-workspace
+      - name: env up
+        run: |
+          mkdir -p .spike
+          t0=$(date +%s)
+          docker compose -f docker-compose.test.yml up -d --wait
+          npx playwright install --with-deps chromium
+          echo "env_up=$(( $(date +%s) - t0 ))s" | tee -a .spike/timing
+          free -m | tee -a .spike/timing; df -h / | tee -a .spike/timing
+      - name: full (unit+integration)
+        run: |
+          t0=$(date +%s); npm test; echo "full=$(( $(date +%s) - t0 ))s" | tee -a .spike/timing
+      - name: deep (+e2e)
+        run: |
+          t0=$(date +%s); npm run e2e; echo "e2e=$(( $(date +%s) - t0 ))s" | tee -a .spike/timing
+          free -m | tee -a .spike/timing
+      - name: claude drives playwright MCP headless
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          node src/app.js & sleep 1
+          cat > .mcp.json <<'EOF'
+          { "mcpServers": { "playwright": { "command": "npx", "args": ["@playwright/mcp@latest", "--headless"] } } }
+          EOF
+          claude -p "Use the playwright MCP tools to open http://localhost:3000/healthz and reply with exactly the page text you see." \
+            --permission-mode dontAsk --allowedTools "mcp__playwright__*" --max-turns 8 --output-format json > .spike/mcp.json || true
+          jq '.result' .spike/mcp.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-4
+          path: .spike/
+          include-hidden-files: true

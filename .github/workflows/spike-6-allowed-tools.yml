@@ -1,0 +1,28 @@
+name: spike-6-allowed-tools
+on: workflow_dispatch
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-claude
+      - name: dispatch
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0"
+          CLAUDE_PROJECT_DIR: ${{ github.workspace }}
+        run: |
+          mkdir -p .spike
+          claude -p "/spike-restricted" --permission-mode dontAsk --max-turns 8 --output-format json > .spike/out.json || true
+          jq '.result' .spike/out.json
+          echo "--- hooks.log ---"; cat .spike/hooks.log || true
+      - name: observe
+        run: |
+          echo "main bash attempted (hook saw it): $(grep -c 'MAIN_SESSION_BASH_RAN' .spike/hooks.log || true)"
+          echo "worker bash ran (files):            $(ls .spike/worker-*.txt 2>/dev/null | wc -l)"
+          echo "worker bash hook lines:             $(grep -c 'SPIKE_WORKER_BASH' .spike/hooks.log || true)"
+          jq '.permission_denials, .subagent_stats' .spike/out.json || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: spike-6, path: .spike/, include-hidden-files: true }

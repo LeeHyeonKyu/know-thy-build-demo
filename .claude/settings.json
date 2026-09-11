@@ -1,0 +1,7 @@
+{
+  "permissions": { "allow": ["Workflow(spike-hooks)", "Bash(*)", "Read(*)", "Write(*)"] },
+  "hooks": {
+    "SubagentStart": [{ "hooks": [{ "type": "command", "command": ".claude/hooks/record-agents.sh" }] }],
+    "SubagentStop":  [{ "hooks": [{ "type": "command", "command": ".claude/hooks/record-agents.sh" }] }]
+  }
+}

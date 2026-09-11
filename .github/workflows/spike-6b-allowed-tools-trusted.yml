@@ -1,0 +1,45 @@
+name: spike-6b-allowed-tools-trusted
+on: workflow_dispatch
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [frontmatter, cli-allowed, cli-disallowed]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-claude
+      - uses: ./.github/actions/trust-workspace
+      - name: dispatch
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0"
+          CLAUDE_PROJECT_DIR: ${{ github.workspace }}
+        run: |
+          mkdir -p .spike
+          EXTRA=""
+          case "${{ matrix.mode }}" in
+            cli-allowed)    EXTRA='--allowedTools Workflow(spike-hooks)' ;;
+            cli-disallowed) EXTRA='--disallowedTools Bash' ;;
+          esac
+          start=$(date +%s)
+          claude -p "/spike-restricted" --permission-mode dontAsk --max-turns 8 --output-format json $EXTRA > .spike/out.json || true
+          echo "elapsed=$(( $(date +%s) - start ))s" | tee .spike/elapsed
+          grep -c "Ignoring" .spike/out.json || echo "no Ignoring warning"
+          jq '.result' .spike/out.json
+          jq '.permission_denials' .spike/out.json
+          echo "--- hooks.log ---"; cat .spike/hooks.log || true
+      - name: observe
+        run: |
+          echo "main bash hook line (attempted):   $(grep -c 'MAIN_SESSION_BASH_RAN' .spike/hooks.log || true)"
+          echo "main bash in permission_denials:   $(jq '[.permission_denials[]? | select(.tool_name=="Bash")] | length' .spike/out.json)"
+          echo "worker files:                      $(ls .spike/worker-*.txt 2>/dev/null | wc -l)"
+          echo "worker bash hook lines:            $(grep -c 'SPIKE_WORKER_BASH' .spike/hooks.log || true)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-6b-${{ matrix.mode }}
+          path: .spike/
+          include-hidden-files: true

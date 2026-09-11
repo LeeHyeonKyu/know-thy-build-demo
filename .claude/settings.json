@@ -1,6 +1,7 @@
 {
   "permissions": {
-    "allow": ["Workflow(spike-basic)", "Workflow(spike-hooks)", "Workflow(spike-schema)", "Workflow(spike-idle)", "Bash(*)", "Read(*)", "Write(*)"]
+    "allow": ["Workflow(spike-basic)", "Workflow(spike-hooks)", "Workflow(spike-schema)", "Workflow(spike-idle)", "Bash(*)", "Read(*)", "Write(*)"],
+    "deny": ["Bash(git push --force*)", "Bash(git push -f*)"]
   },
   "hooks": {
     "PreToolUse":   [{ "matcher": "Bash|Write|Read", "hooks": [{ "type": "command", "command": ".claude/hooks/log-hook.sh" }] }],

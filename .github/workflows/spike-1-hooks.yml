@@ -1,0 +1,29 @@
+name: spike-1-hooks
+on: workflow_dispatch
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-claude
+      - name: dispatch
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0"
+          CLAUDE_PROJECT_DIR: ${{ github.workspace }}
+        run: |
+          mkdir -p .spike
+          claude -p "/spike-hooks-dispatch" --permission-mode dontAsk --max-turns 5 --output-format json > .spike/out.json || true
+          echo "--- hooks.log ---"; cat .spike/hooks.log || echo "(no hooks.log)"
+          echo "--- worker files ---"; ls .spike/
+      - name: assert
+        run: |
+          jq -e '.result | test("SPIKE_HOOKS_OK")' .spike/out.json
+          test -f .spike/worker-1.txt && test -f .spike/worker-2.txt
+          echo "PreToolUse Bash lines: $(grep -c $'^PreToolUse\tBash' .spike/hooks.log || true)"
+          echo "SubagentStart lines:   $(grep -c '^SubagentStart' .spike/hooks.log || true)"
+          echo "SubagentStop lines:    $(grep -c '^SubagentStop' .spike/hooks.log || true)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: spike-1, path: .spike/ }

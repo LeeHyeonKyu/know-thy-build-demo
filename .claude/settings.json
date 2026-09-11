@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": ["Workflow(spike-basic)", "Workflow(spike-hooks)", "Workflow(spike-schema)", "Workflow(spike-idle)", "Bash(*)", "Read(*)", "Write(*)"]
+  },
+  "hooks": {
+    "PreToolUse":   [{ "matcher": "Bash|Write|Read", "hooks": [{ "type": "command", "command": ".claude/hooks/log-hook.sh" }] }],
+    "SubagentStart": [{ "hooks": [{ "type": "command", "command": ".claude/hooks/log-hook.sh" }] }],
+    "SubagentStop":  [{ "hooks": [{ "type": "command", "command": ".claude/hooks/log-hook.sh" }] }],
+    "Stop":          [{ "hooks": [{ "type": "command", "command": ".claude/hooks/log-hook.sh" }] }]
+  }
+}

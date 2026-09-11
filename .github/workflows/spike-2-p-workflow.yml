@@ -1,0 +1,29 @@
+name: spike-2-p-workflow
+on: workflow_dispatch
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-claude
+      - name: dispatch
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0"
+        run: |
+          mkdir -p .spike
+          start=$(date +%s)
+          claude -p "/spike-dispatch 7" \
+            --permission-mode dontAsk --max-turns 5 \
+            --output-format json > .spike/out.json || echo "exit=$?" > .spike/exit
+          echo "elapsed=$(( $(date +%s) - start ))s" | tee .spike/elapsed
+          cat .spike/out.json
+      - name: assert
+        run: |
+          jq -e '.result | test("SPIKE_BASIC_OK")' .spike/out.json
+          jq -e '.result | test("alpha-7") and test("beta-7")' .spike/out.json
+          jq '.num_turns, .total_cost_usd, .usage' .spike/out.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: spike-2, path: .spike/ }

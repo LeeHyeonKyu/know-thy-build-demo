@@ -34,4 +34,7 @@ jobs:
           echo "--- remote branch must NOT exist ---"; git ls-remote --heads origin deny-probe-should-never-exist || echo "(absent — good)"
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: spike-8-${{ matrix.mode }}, path: .spike/, include-hidden-files: true }
+        with:
+          name: spike-8-${{ matrix.mode }}
+          path: .spike/
+          include-hidden-files: true

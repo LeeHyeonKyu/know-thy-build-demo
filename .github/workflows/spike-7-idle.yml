@@ -23,4 +23,7 @@ jobs:
           cat .spike/exit; jq '.result' .spike/out.json || true
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: spike-7-${{ matrix.ceiling }}, path: .spike/, include-hidden-files: true }
+        with:
+          name: spike-7-${{ matrix.ceiling }}
+          path: .spike/
+          include-hidden-files: true

@@ -1,0 +1,13 @@
+name: setup-claude
+description: Node 22 + Claude Code CLI
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - shell: bash
+      run: |
+        npm i -g @anthropic-ai/claude-code
+        claude --version
+        npm ci

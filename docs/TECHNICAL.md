@@ -37,7 +37,7 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 
 | Component | Responsibility | NOT Responsible For | Depends On |
 |-----------|---------------|---------------------|------------|
-| `src/app.js` | `createApp({db, now})` 팩토리, 라우트 등록, 도메인 code → 상태코드 매핑과 에러 봉투, 진입점 배선(`createDbFromEnv`/`createAppFromEnv`) | 비즈니스 규칙, SQL, 드라이버 오류 해석 | routes |
+| `src/app.js` | `createApp({db, now})` 팩토리, 라우트 등록, 도메인 code → 상태코드 매핑과 에러 봉투, 진입점 배선(`createDbFromEnv`/`createAppFromEnv`) | 비즈니스 규칙, SQL, **pg 오류의 분류**(repo가 한다) | routes, service·repo가 export한 오류 code 상수, 진입점 한정 `pg` 드라이버 로딩 |
 | `src/routes/notes.js` | 요청 파싱, 상태코드 | 검증 규칙, SQL, 저장 순서 | service |
 | `src/service/notes.js` | 노트 규칙(필수 필드·공백·트림, 정렬, 검색어 정규화) | HTTP(상태코드를 오류에 싣지 않는다), SQL 문법 | repository |
 | `src/repo/notes.js` | SQL 실행, 행↔객체 매핑, pg 오류 → 도메인 code 번역 | 검증, 상태코드 | 주입된 실행자 `{query(text, params)}` |
@@ -66,6 +66,8 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 **연결 설정:** 진입점은 `process.env.DATABASE_URL`만 읽는다. 하드코딩 DSN fallback도, 기동 시점 fail-fast도 두지 않는다(후자는 `/healthz` ready 신호를 굶긴다). 설정이 틀리면 요청 시점에 503으로 드러난다 — repo가 연결류 오류를 `db_unavailable`로 번역하고 `src/app.js`가 그 code만 503으로 매핑한다. 연결류가 아닌 예외는 500이다(전면 catch→503은 진짜 장애를 구별 불가능하게 만든다).
 
 **배선의 위치와 드라이버 로딩:** `src/app.js`의 `createDbFromEnv()`가 `DATABASE_URL`로 `pg.Pool`을 만들고 `createAppFromEnv()`가 그것을 `createApp({ db })`에 넘긴다. 진입점 가드(`node src/app.js`)는 그 둘을 부르고 `listen`할 뿐이다 — 이것이 `npm start`가 타는 유일한 배선이며 `test/app.test.js`의 `test_2_started_process_serves_notes_with_db_wired`가 프로세스 밖에서 관측한다. 드라이버는 최상단 `import "pg"`가 아니라 **동적 import**로 부른다: `pg`는 아직 의존성에 없고(`package.json`은 protected — `factory:harness` 대기) 정적 import는 드라이버가 없는 환경에서 모듈 전체를, 즉 `/healthz`와 검증 경로까지 함께 깨뜨린다. 드라이버가 없거나 pool 생성이 실패하면 기동을 막는 대신 `db_unavailable`로 reject하는 실행자를 쓴다 — `/healthz`는 200으로 살아 있고 `POST /notes`는 500이 아니라 503으로 답한다. `pg`가 들어오면 이 경로는 코드 변경 없이 진짜 pool을 쓴다.
+**제거 트리거:** `pg`를 들이는 `factory:harness` PR이 머지되면 그 PR에서 (a) 드라이버 부재용 fallback 실행자(`unavailableDb`)를 남길지 지울지 결정하고, (b) 실제 pool로 `createDbFromEnv`가 도는 첫 경로를 테스트로 한 번 밟는다 — 지금은 어떤 게이트 테스트도 "설치된 pg + 실제 Postgres"를 함께 밟지 않는다(이 사실이 리뷰 qa1·spec1의 근거다).
+**idle client 오류:** 만들어진 pool에는 `error` 리스너를 붙인다. node-postgres의 Pool은 idle client가 죽으면 자기 자신에게 `error`를 emit하고, 리스너가 없는 EventEmitter의 `error`는 Node가 throw해 프로세스를 죽인다 — DB 블립이 요청 시점 503이 아니라 프로세스 사망(그리고 `/healthz` 정지)이 되는 것을 막는다.
 
 ## Interfaces
 
@@ -77,6 +79,8 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 | GET | `/healthz` | 200 `{ok:true}` + 응답 헤더 `Cache-Control: no-store` (#8 — 프록시·브라우저가 헬스체크 응답을 재사용하지 못하게) |
 
 **Error Format:** `{ "error": { "code": "invalid_request", "message": "title is required" } }` — 조용히 버리지 않는다(PROJECT 원칙 3).
+
+**클라이언트 잘못은 4xx로 남는다.** body-parser가 `expose: true`와 4xx 상태코드로 표시한 오류(파싱 실패 400, 지원하지 않는 charset·content-encoding 415, 압축 해제 실패 400)는 그 상태코드를 그대로 쓰고 code는 `invalid_request`다 — 500 `internal_error`로 내리면 사용자가 고칠 수 있는 실수가 서버 장애로 보고된다(`001-create-note.md` "500이 아니다"). 메시지는 요청 본문도 헤더 값도 에코하지 않는 고정 문장이다. 본문 길이 상한과 413 의미론은 여전히 이 프로젝트가 정하지 않고 파서에 위임한다.
 
 ## Testing Strategy
 

@@ -25,7 +25,7 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 | Framework | Express 5 | 라우팅만 필요, 이미 설치됨 |
 | Storage | PostgreSQL 16 | 테스트 환경(`docker-compose.test.yml`)에 이미 존재, 검색을 나중에 full-text로 올릴 여지 |
 | Test runner | vitest 3 | unit + integration 동일 러너 |
-| E2E | Playwright | 이미 설치됨 — M2 승격 전까지 게이트에서 쓰지 않음 |
+| E2E | Playwright | M2 승격(#15) 이후 `[gates].full/deep/required`의 게이트 — 크로미움 없이도 도는 레인 |
 
 **Key Dependencies:** `express` — HTTP, `pg`(001에서 추가 예정) — DB 드라이버
 **Dev Tools:** `vitest`, `@playwright/test`, `docker compose`
@@ -70,19 +70,32 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 |-------|-------|------|-----------|
 | unit | service 규칙(검증·정규화·정렬 키), 순수 함수 | vitest | DB 없이 빠르게 규칙을 고정 |
 | integration | routes→service→repo, 실제 Postgres에 SQL 실행 | vitest + docker compose | SQL·스키마 오류는 unit이 못 잡는다 |
-| e2e | 앱 기동 후 HTTP 표면 | Playwright | 존재하지만 M1에서는 게이트가 아님(M2 승격 대상) |
+| e2e | 앱 기동 후 HTTP 표면 | Playwright | M2(#15)부터 `full`·`deep`·`required` 게이트 — 종료 코드로 판정 |
+
+**e2e와 integration의 경계(#15에서 기록):** e2e 레인은 **CHARTER Preserve가 이름 붙인 관측 가능한 HTTP 응답
+계약**(지금은 `GET /healthz` → 200 + 정확히 `{"ok":true}`)만 단언한다. 그 아래(라우트→서비스→repo, SQL, 검증
+규칙)는 integration이 본다 — 같은 계약을 두 레벨에서 단언하면 깨졌을 때 두 곳이 함께 빨개지고 원인은 어느 쪽도
+말해 주지 않는다. 새 e2e 케이스는 이 기준을 통과할 때만 더한다.
+
+**e2e 레인의 두 실행 모드:** `npm run e2e`(= `[commands].e2e`)는 기본적으로 러너가 `node src/app.js`를 띄우고
+`PORT`(기본 3000)로 말을 건다. `PLAYWRIGHT_TEST_BASE_URL`이 있으면 `webServer` 설정 자체를 내보내지 않고 이미
+떠 있는 그 주소를 상대로 돈다 — 앱을 띄우는 주인이 실행 경로마다 하나여야 하기 때문이다(`[test.env].app_start`를
+켜지 않는 이유도 같다). 두 모드 모두 크로미움 바이너리가 없으면 `page` 픽스처가 필요한 케이스만 빠지고 나머지는
+돈다 — CI 셋업(`[runtime].setup = "npm ci"`)에 브라우저 설치 스텝이 없고, 게이트 명령 안에서 내려받지도 않는다
+(docs/QA.md: 테스트 프로세스는 외부 네트워크 금지). 바이너리가 있으면 전부 돈다.
 
 **e2e 레인의 단언은 `test/`에서 증명된다(#15):** `e2e/**`는 `[test].test_glob` 밖이라 prove-test가 그 스펙의 RED를
 증명하지 않는다. 그래서 `/healthz` 계약 단언(200 **그리고** 정확히 `{"ok":true}`)이 실제로 회귀를 막는다는 사실은
 `test/integration/e2e_suite.test.js`가 지킨다 — 같은 스펙을 127.0.0.1 스텁을 상대로 두 번 돌려 `{"ok":true}`에는 초록,
 `{"ok":"yes"}`에는 빨강(+ 실패 귀속)임을 대조한다. 판정 근거는 종료 코드 하나가 아니라 "몇 개가 돌았고 무엇이 깨졌는가"다.
 
-**아직 M2가 아닌 이유(#15):** 승격에 필요한 두 파일 — `.factory/harness.toml`(`[commands].e2e`, `[gates].full/deep/required`,
-`[harness].maturity`)과 `playwright.config.js`(고정 포트 3000·무조건 `webServer`) — 은 `[protected]`라 에이전트가 쓸 수 없다.
-그리고 `e2e/smoke.spec.js`의 `browser loads`는 크로미움 바이너리를 요구하는데 CI 셋업(`.factory/actions/setup/action.yml`,
-`[runtime].setup`)에 그것을 내려받는 스텝이 없다 — 그 케이스를 지우는 것은 `tests_are_load_bearing`(harness.toml) 때문에
-spec-conformance의 명시 승인 사안이다. 이 셋이 정리되기 전에 `[gates]`에 `e2e`를 넣으면 게이트는 계약이 아니라
-머신 상태 때문에 영구 RED가 된다.
+**M2 승격이 실제로 바꾼 것(#15):** `[commands].e2e` 신설, `[gates].full`·`deep`·`required` 세 곳에 `e2e`,
+`[harness].maturity = "M2"`. 셋이 함께 가야 한다 — `required`에 없으면 `commands.e2e`가 사라져도 `.factory/lib/gates.js`의
+required 교집합 필터가 그 게이트를 MISCONFIGURED가 아니라 GREEN으로 읽고, `maturity` 문자열만 올리면 감지기만 조용해질 뿐
+아무것도 돌지 않는다. `fast`에는 넣지 않았다(docs tier PR까지 앱 기동을 기다리게 된다). 대가는 둘이다:
+`factory doctor`가 `[commands]`를 전부 실행하므로 점검 한 번에 e2e 기동이 얹히고(`--no-run`으로 건너뛴다),
+`[test].e2e_report`를 두지 않으므로 e2e RED의 기계 귀속(어떤 케이스가 깨졌는지)은 사람이 로그를 읽어야 안다 —
+playwright JSON을 vitest 파서에 먹이면 "읽지 못했는데 읽었다"가 되기 때문에 일부러 두지 않았다.
 
 **Coverage Principle:** 변경된 줄 기준 diff coverage 90% — 전체 % 는 쓰지 않는다.
 **What NOT to Test:** Express 내부, pg 드라이버, 라우팅 등록 같은 글루 — 프레임워크가 이미 보장하는 것.

@@ -18,8 +18,8 @@
 | review rounds avg | 0 | 1 |
 | needs-human | 3 | 3 |
 | rejects by role | 없음 | 없음 |
-| cost (usd) | 86.52 | 81.81 |
-| tokens | input 1624419 / output 198695 | input 50 / output 128059 |
+| cost (usd) | 101.80 | 81.81 |
+| tokens | input 1795037 / output 220659 | input 50 / output 128059 |
 | retro cost (usd) | 0.00 | 0.72 |
 | retro tokens | input 0 / output 0 | input 2 / output 2998 |
 | full retros | — | 1 |
@@ -124,6 +124,30 @@
       {
         "role": "qa",
         "text": "Started the real, deployable app exactly the way a user would (`npm start` / `node src/app.js`, PORT=3100) and sent the exact request from the issue's own Scenario (`POST /notes {\"title\":\"pg pool leak\",\"body\":\"max=10 causes starvation\"}`). Every single request fails with 500 `{\"error\":{\"code\":\"internal_error\",\"message\":\"internal error\"}}` — the one feature this issue exists to ship (persist a note and get back `{id,title,body,created_at}`) does not work at all outside of tests. Root cause: the entry-point guard calls `createApp()` with **no `db`** (`createApp().listen(...)`), so `insertNote(undefined, …)` throws a TypeError before ever touching Postgres. There is no `pg.Pool` construction anywhere in `src/`, no read of `process.env.DATABASE_URL`, and `pg` is not even a dependency (`grep -rn \"pg\\.\\|DATABASE_URL\\|Pool(\" src/` → no hits; `pg` absent from package.json and package-lock.json). This directly contradicts the architecture this very diff documents in docs/TECHNICAL.md (added in commit ba00816): '`pg.Pool` 생성은 `src/app.js`의 진입점 가드 안에서만 일어난다' and '연결 설정: 진입점은 `process.env.DATABASE_URL`만 읽는다.' The plan's own non_goals text assumes the same ('주입 이음매를 쓰면 `pg.Pool` 생성은 `src/app.js` 진입점 가드 안 두 줄로 끝난다') and its open_risks explicitly flagged that no gate test exercises this path ('npm start가 실제로 타는 기본 배선... 게이트 안 어떤 테스트도 밟지 않는다') — that risk materialized as a total feature failure, not a theoretical gap. All 8 done_when items pass only because every integration test injects its own test-owned connection (a psql session or a fake executor) directly into `createApp({db})`, bypassing the real wiring entirely; not one test (unit, integration, or the pre-existing smoke test) ever calls `POST /notes` against the actual entry point.",
+        "runs": [
+          2
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "body-parser가 내는 4xx 클라이언트 오류 중 `entity.*`가 아닌 것(`encoding.unsupported`, `charset.unsupported` — 둘 다 status 415, expose=true)이 전부 마지막 fallback으로 떨어져 **500 internal_error**로 응답된다. 스펙 :63 '읽을 수 없는 body → 400, 500이 아니다'와 정면으로 어긋나고, 이 diff 자신이 dw6에서 세운 '클라이언트 잘못을 서버 장애로 보고하지 않는다'는 기준(repo/notes.js:32의 주석 '새벽 당직자가 DB를 30분 들여다보게 된다')도 같은 이유로 깨진다. express 기본 핸들러였다면 415였을 것이므로 이 분기가 상황을 더 나쁘게 만든다.",
+        "runs": [
+          2
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The issue's own Story 1 Acceptance Criteria — '서비스가 떠 있고 DB가 비어 있다' → `POST /notes` → 201 + persisted row — are explicitly tagged `level: full` in docs/features/001-create-note.md, meaning: the real running service against a real DB. The plan silently substitutes `level: integration` done_when (dw1, dw2, dw5) that only ever exercise a test-supplied `{query}` executor (a hand-rolled psql-session shell, per docs/TECHNICAL.md:89) injected directly into `createApp({db})` — none of them ever go through `createDbFromEnv`/`createAppFromEnv`, the only code path `node src/app.js` (= `npm start`) actually runs. Because `pg` is never installed in this diff — `package.json` and `package-lock.json` are both listed in `files_expected` but neither is touched by the diff — the real entrypoint's dynamic `import(\"pg\")` always throws and every `POST /notes` against the actually-deployed app falls back to `unavailableDb`, returning 503 forever, even with a real, reachable, empty Postgres. This is not a builder scope violation — the diff faithfully implements what the plan's done_when actually ask for — but the plan itself fails to deliver the issue's own Story 1, and that gap was not silent: the plan's dissent_log contains a signed, evidence-backed skeptic objection (final entry) stating verbatim that this makes '4 of 8 done_when unbuildable and unverifiable' and offering two concrete remedies — (1) drop package.json/package-lock.json from files_expected and record `pg` as a blocking precondition landed by a human-merged harness PR before implement starts, or (2) split the issue so this round ships only dw3/dw4/dw6/dw7 (all unit, zero new dependency) and defer dw1/dw2/dw5/dw8 to a follow-up gated on the harness PR. The plan's resolution is 'unresolved — proceeding,' adopting neither remedy, and open_risks item 4 explicitly predicted the exact consequence. That predicted failure has now been directly reproduced (see qa1 in this same round): a real, empty, reachable Postgres + `node src/app.js` + `POST /notes {title, body}` → 503 `db_unavailable`, not 201. The feature this issue exists to deliver — being able to actually create and persist a note through the shipped service — does not work, and no done_when in the plan would have caught that, by design.",
+        "runs": [
+          2
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "The shipped, real running application can never actually create a note. `pg` is not installed (not in package.json, not in package-lock.json, not in node_modules), so `createDbFromEnv()`'s dynamic `import(\"pg\")` always throws and every `POST /notes` against the real process falls back to `unavailableDb`, returning 503 forever — even when a real, reachable, empty Postgres is running. I reproduced the issue's own Story 1 scenario literally ('서비스가 떠 있고 DB가 비어 있다' → `POST /notes {title, body}` → expect 201) against the actual `node src/app.js` entrypoint with `docker-compose.test.yml`'s Postgres up and `DATABASE_URL` pointed at it, and got 503 `db_unavailable`, not 201. This directly falsifies done_when dw1 ('유효한 요청이 201과 영속된 id를 반환한다') and the feature's core Acceptance Criteria for the real, deployed system. The only place this passes is inside tests that either (a) inject a fake driver via `loadDriver`, or (b) bypass `pg`/`createDbFromEnv` entirely by handing a hand-rolled `psql`-session executor straight into `createApp({db})` (test/integration/helpers/db.js). No test anywhere exercises 'pg installed + createDbFromEnv + real reachable Postgres' together, because pg genuinely isn't installed. TECHNICAL.md:30 itself says `pg(001에서 추가 예정)` — 'pg is to be added in issue 001' — but this diff does not add it (package.json is protected), so issue #2 ships without the dependency its own architecture doc says it should add. The graceful-degradation engineering (dynamic import, 503-not-500, /healthz preserved) is well done, but it is degrading a capability that has never actually existed yet, not falling back from a real one.",
         "runs": [
           2
         ],
@@ -279,10 +303,10 @@
     "rejects_by_role": {},
     "needs_human": 3,
     "usage": {
-      "cost_usd": 86.515491,
+      "cost_usd": 101.804223,
       "tokens": {
-        "input": 1624419,
-        "output": 198695
+        "input": 1795037,
+        "output": 220659
       }
     }
   },

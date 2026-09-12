@@ -65,6 +65,54 @@ describe("issue #2 — app factory HTTP surface", () => {
     expect(raw).not.toMatch(/at JSON\.parse|SyntaxError|<!DOCTYPE/i);
   });
 
+  // cf1(rework): 파싱 실패만이 "읽을 수 없는 body"가 아니다. body-parser가 클라이언트 잘못이라고
+  // 표시한 나머지 오류(charset.unsupported·encoding.unsupported — 둘 다 415, expose=true, 그리고
+  // 선언된 압축을 풀지 못한 400)도 4xx로 나가야 한다. 500 internal_error로 답하면 사용자가 고칠 수
+  // 있는 실수가 서버 장애로 보고되고(docs/features/001-create-note.md:63 "500이 아니다"),
+  // 새벽 당직자는 자기 서버를 들여다본다.
+  test("test_2_client_body_errors_are_never_500", async () => {
+    const app = await startApp();
+    const marker = makeMarker("client-body-error");
+    const payload = JSON.stringify(makeNote({ title: marker, body: `${marker}-body` }));
+
+    const cases = [
+      {
+        name: "charset the parser does not support",
+        init: { headers: { "content-type": "application/json; charset=iso-8859-1" }, body: payload },
+        // express 기본 핸들러였다면 415였다 — 이 앱이 그보다 나쁜 상태코드를 내지 않는다.
+        status: 415,
+      },
+      {
+        name: "content-encoding the parser does not support",
+        init: { headers: { "content-type": "application/json", "content-encoding": "x-ktb-none" }, body: payload },
+        status: 415,
+      },
+      {
+        name: "body declared br but not brotli",
+        // 압축을 풀 수 없는 body는 읽을 수 없는 body다 — 파서가 정한 400을 그대로 따른다.
+        init: { headers: { "content-type": "application/json", "content-encoding": "br" }, body: payload },
+        status: 400,
+      },
+    ];
+
+    for (const { name, init, status } of cases) {
+      const res = await fetch(`${app.url}/notes`, { method: "POST", ...init });
+      const raw = await res.text();
+
+      expect(res.status, `${name}: ${raw}`).toBe(status);
+      expect(res.status, name).toBeLessThan(500);
+      expect(res.headers.get("content-type"), name).toMatch(/application\/json/);
+      const body = JSON.parse(raw);
+      expect(typeof body.error?.code, name).toBe("string");
+      expect(body.error.code, name).not.toBe("internal_error");
+      expect(typeof body.error?.message, name).toBe("string");
+      expect(body.error.message.length, name).toBeGreaterThan(0);
+      // 요청 본문도 파서 내부 스택도 새지 않는다.
+      expect(raw, name).not.toContain(marker);
+      expect(raw, name).not.toMatch(/at JSON\.parse|SyntaxError|<!DOCTYPE/i);
+    }
+  });
+
   // dw6: DB 장애(503)와 프로그래밍 오류(503이 아니다)를 가른다.
   test("test_2_db_failure_503_but_bug_is_not_503", async () => {
     const secret = makeMarker("never-echoed");
@@ -171,7 +219,8 @@ describe("issue #2 — app factory HTTP surface", () => {
 // ---------------------------------------------------------------------------------------
 
 import { createServer } from "node:net";
-import { createAppFromEnv } from "../src/app.js";
+import { EventEmitter } from "node:events";
+import { createAppFromEnv, createDbFromEnv } from "../src/app.js";
 
 // createApp()이 아니라 진입점이 쓰는 팩토리로 앱을 띄운다(위 startApp과 달리 이미 만들어진 app을 받는다).
 async function listenOn(app) {
@@ -301,6 +350,41 @@ describe("issue #2 — the shipped entrypoint (`node src/app.js`)", () => {
     expect(invalid.status).toBe(400);
     expect(JSON.parse(invalid.raw).error.code).toBe("invalid_request");
     expect(JSON.parse(invalid.raw).error.message).toContain("title");
+  });
+
+  // cs1(rework, 리뷰 should_fix): idle client가 죽으면 node-postgres의 Pool은 자기 자신에게
+  // 'error'를 emit한다. 리스너가 없는 EventEmitter의 'error'는 Node가 그대로 throw하므로,
+  // DB 블립 한 번이 "요청 시점 503"이 아니라 **프로세스 사망**이 되고 /healthz(CHARTER Preserve,
+  // 컴포즈 healthcheck·playwright ready 신호)까지 함께 내려간다.
+  test("test_2_idle_pool_error_does_not_kill_the_process", async () => {
+    const pools = [];
+    class FakePool extends EventEmitter {
+      constructor(config) {
+        super();
+        this.config = config;
+        pools.push(this);
+      }
+
+      async query() {
+        return { rows: [] };
+      }
+    }
+
+    const db = await createDbFromEnv({
+      env: { DATABASE_URL: "postgres://127.0.0.1:5432/ktb_idle_error" },
+      loadDriver: async () => ({ Pool: FakePool }),
+    });
+
+    // fallback 실행자가 아니라 진짜 pool이 돌아왔다(그렇지 않으면 아래 관측이 공허하다).
+    expect(pools).toHaveLength(1);
+    expect(db).toBe(pools[0]);
+
+    const idleFailure = Object.assign(new Error("terminating connection due to administrator command"), {
+      code: "57P01",
+    });
+    // 관측 대상은 결과다: pool이 스스로 error를 알려도 그것이 던져지지 않는다.
+    expect(() => pools[0].emit("error", idleFailure)).not.toThrow();
+    expect(pools[0].listenerCount("error")).toBeGreaterThan(0);
   });
 
   // cf1 · qa1: 관측점을 프로세스 밖으로 옮긴다. `npm start`가 부르는 바로 그 명령을 그대로 띄우고

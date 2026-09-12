@@ -1,4 +1,7 @@
 import { validate } from "./schemas.js";
+import { extractStageArtifact, fencedJsonError } from "./stage-artifact.js";
+
+export { fencedJsonError };
 
 const SCHEMA_OF = { triage: "triage.v1", plan: "plan.v1", implement: "implement.v1", review: "review.v1" };
 
@@ -35,11 +38,29 @@ const listOf = (a) => (a && a.length ? a.join(",") : "none");
  * 워크플로가 handoff에 적은 gates는 파일과 **일치해야만** 인정되고, 비어 있으면 파일 값으로 채운다.
  * (그래서 schema 검증은 data.gates를 채운 뒤에 돈다.)
  */
-export function verifyStage({ stage, out, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates }) {
+export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates }) {
   const reasons = [];
   if (!out || out.is_error) reasons.push("claude -p reported is_error");
-  const data = out ? extractJson(out.result) : null;
-  if (!data) reasons.push("no JSON object in result");
+  /*
+   * 산출물은 디스패처의 최종 텍스트 하나만 믿지 않는다(KTB-7). 트랜스크립트의 Workflow 결과 →
+   * result의 ```json 펜스 → 맨 JSON 순으로 훑고, **스키마를 통과하는 첫 후보**가 이긴다.
+   * 스키마를 채점 기준으로 두는 게 핵심이다 — 파싱만 되는 후보(계획 안의 done_when 한 항목 등)가
+   * 뽑혀 "issue is required; tier is required; …"라는 오진을 만들던 게 데모 #2 plan의 실패였다.
+   *
+   * gates는 스키마보다 먼저 채워 넣는다(implement.v1·review.v1이 요구한다) — 후보 채점 시점에는
+   * 사본에만 채우고, 파일과의 일치 검사는 아래 기존 경로가 선택된 객체를 상대로 다시 한다.
+   */
+  const withGates = (o) => (GATED_STAGES.includes(stage) && gates && o && !o.gates
+    ? { ...o, gates: { status: gates.status, level: gates.level } }
+    : o);
+  const schemaName = SCHEMA_OF[stage];
+  const artifact = extractStageArtifact({
+    envelopeResult: out?.result,
+    transcriptText,
+    validate: schemaName ? (o) => validate(schemaName, withGates(o)) : null,
+  });
+  const data = artifact.ok ? artifact.data : null;
+  if (!artifact.ok) reasons.push(artifact.reason);
   if (GATED_STAGES.includes(stage)) {
     if (!gates) reasons.push("gates file missing");
     // bin/gates.js가 남긴 로컬 진단 결과는 스테이지 판정이 아니다 — 사람이 손으로 만든 GREEN이 머지로 이어지면 안 된다.

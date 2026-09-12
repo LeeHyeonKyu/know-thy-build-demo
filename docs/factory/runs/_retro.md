@@ -14,10 +14,10 @@ _이력 없음_
 | --- | --- | --- |
 | merged | 0 | 0 |
 | review rounds avg | 0 | 0 |
-| needs-human | 2 | 0 |
+| needs-human | 3 | 0 |
 | rejects by role | 없음 | 없음 |
-| cost (usd) | 58.12 | 0.00 |
-| tokens | input 32 / output 94056 | input 0 / output 0 |
+| cost (usd) | 81.50 | 0.00 |
+| tokens | input 48 / output 127670 | input 0 / output 0 |
 | retro cost (usd) | 0.00 | 0.00 |
 | retro tokens | input 0 / output 0 | input 0 / output 0 |
 | full retros | — | 0 |
@@ -85,8 +85,8 @@ _이력 없음_
     "needs_human": [
       {
         "issue": 2,
-        "reason": "stage artifact missing or invalid: gates RED: failing=prove-test",
-        "at": "2026-09-12T14:38:32Z"
+        "reason": "stage artifact missing or invalid: claude -p reported is_error; no candidate matched the stage schema — no JSON object in result",
+        "at": "2026-09-12T15:25:22Z"
       }
     ]
   },
@@ -94,12 +94,12 @@ _이력 없음_
     "merged": 0,
     "review_rounds_avg": 0,
     "rejects_by_role": {},
-    "needs_human": 2,
+    "needs_human": 3,
     "usage": {
-      "cost_usd": 58.123343,
+      "cost_usd": 81.500184,
       "tokens": {
-        "input": 32,
-        "output": 94056
+        "input": 48,
+        "output": 127670
       }
     }
   }

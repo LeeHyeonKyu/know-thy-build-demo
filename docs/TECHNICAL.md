@@ -84,6 +84,8 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 | integration | routes→service→repo, 실제 Postgres에 SQL 실행 | vitest + docker compose | SQL·스키마 오류는 unit이 못 잡는다 |
 | e2e | 앱 기동 후 HTTP 표면 | Playwright | 존재하지만 M1에서는 게이트가 아님(M2 승격 대상) |
 
+**integration이 DB에 붙는 법:** `pg` 드라이버는 설치돼 있지 않고 `package.json`·`package-lock.json`은 protected다. 그래서 integration은 이 저장소가 이미 쓰던 경로(`docker compose exec -T db psql`, `test/integration/db.test.js`)를 **끊기지 않는 psql 세션**으로 확장한 `test/integration/helpers/db.js`를 실행자로 쓴다 — 세션이 하나이므로 `BEGIN` → 단언 → `ROLLBACK`이 한 커넥션 안에서 성립하고, 그 실행자를 그대로 `createApp({ db })`에 주입한다. 드라이버가 들어오면(`factory:harness`) 이 헬퍼만 `pg.Client`로 바뀌고 테스트는 그대로다 — 실행자 계약이 `{query(text, params)}` 하나이기 때문이다.
+
 **Coverage Principle:** 변경된 줄 기준 diff coverage 90% — 전체 % 는 쓰지 않는다.
 **What NOT to Test:** Express 내부, pg 드라이버, 라우팅 등록 같은 글루 — 프레임워크가 이미 보장하는 것.
 단 `/healthz`의 **관측 가능한 응답 계약**(200 / `{ok:true}` / `Cache-Control: no-store`)은 글루가 아니라 계약이므로 회귀 가드를 둔다(#8, `test/smoke.test.js`; #2가 `createApp()` 경로에도 같은 가드를 둔다 — `test/app.test.js`).

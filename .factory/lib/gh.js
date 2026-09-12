@@ -1,4 +1,4 @@
-import { STATES } from "./labels.js";
+import { STATES, TIER_LABELS } from "./labels.js";
 
 /**
  * 머지는 되돌릴 수 없다 — 체크가 하나도 없으면 "전부 통과"가 아니라 "확인 못 함"으로 본다(fail closed).
@@ -79,6 +79,15 @@ export function makeGh({ run, repo }) {
       const args = ["issue", "edit", String(n), "-R", repo, ...current.flatMap((l) => ["--remove-label", l]), "--add-label", label];
       await gh(args);
     },
+    /**
+     * tier 라벨을 정확히 하나로 맞춘다(KTB-9). `setFactoryLabel`을 쓸 수 없다 — 그건 STATES만 보고
+     * tier는 상태와 직교하므로, 그 함수를 태우면 상태 라벨이 떨어져 나간다. 한 호출로 끝낸다
+     * (`gh issue edit`은 remove/add를 한 번에 받는다).
+     */
+    async setTierLabel(n, label) {
+      const stale = (await this.issue(n)).labels.filter((l) => TIER_LABELS.has(l) && l !== label);
+      await gh(["issue", "edit", String(n), "-R", repo, ...stale.flatMap((l) => ["--remove-label", l]), "--add-label", label]);
+    },
     async prChecks(pr) {
       return JSON.parse(await gh(["pr", "checks", String(pr), "-R", repo, "--json", "name,state,bucket"]));
     },
@@ -104,6 +113,14 @@ export function makeGh({ run, repo }) {
     },
     async searchIssues(label) {
       return JSON.parse(await gh(["issue", "list", "-R", repo, "--label", label, "--state", "open", "--limit", "200", "--json", "number,title,updatedAt"]));
+    },
+    /**
+     * 워크플로를 손으로 띄운다(KTB-8). 라벨은 이미 목적 상태에 있어 `labeled` 이벤트를 다시 만들 수
+     * 없으므로, 멈춘 스테이지를 되살리는 경로는 이것뿐이다 — sweeper의 세 번째 팔과
+     * `factory run <stage> <issue> --remote`가 같은 호출을 쓴다.
+     */
+    async dispatchWorkflow(workflow, inputs = {}) {
+      await gh(["workflow", "run", workflow, "-R", repo, ...Object.entries(inputs).flatMap(([k, v]) => ["-f", `${k}=${v}`])]);
     },
     async createIssue({ title, body, labels = [] }) {
       const out = await gh(["issue", "create", "-R", repo, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });

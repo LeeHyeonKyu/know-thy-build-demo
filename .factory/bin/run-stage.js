@@ -14,12 +14,12 @@ import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMer
 import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
 import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
-import { STAGE_OF_TARGET, factoryLabelOf } from "../lib/labels.js";
+import { STAGE_OF_TARGET, factoryLabelOf, TIERS, tierLabel } from "../lib/labels.js";
 import { buildContext } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readAgentsLog } from "../lib/agents-log.js";
 import { verifyStage } from "../lib/verify-stage.js";
-import { transcriptPathFrom } from "../lib/stage-artifact.js";
+import { readTranscript } from "../lib/stage-artifact.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { transition } from "../lib/transition.js";
@@ -41,21 +41,11 @@ export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.j
 // lib/blocked-errors.js (merge-stage.js needs them too) — re-exported here for existing importers.
 export { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON };
 
-/**
- * 이 런의 세션 트랜스크립트 전문. 없으면 빈 문자열 — 산출물 추출은 트랜스크립트 없이도 돌아간다
- * (envelope의 펜스/맨 JSON으로 내려간다). 읽기 실패가 스테이지를 죽이지는 않는다.
- */
-function readTranscript(root, out) {
-  try {
-    const p = transcriptPathFrom({
-      agentsLogText: existsSync(join(root, ".factory/out/agents.jsonl")) ? readFileSync(join(root, ".factory/out/agents.jsonl"), "utf8") : "",
-      sessionId: out?.session_id,
-      cwd: root,
-      home: homedir(),
-    });
-    return p && existsSync(p) ? readFileSync(p, "utf8") : "";
-  } catch { return ""; }
-}
+/** 파일이 없으면 null(예외 아님) — `readTranscript`가 기대하는 주입 모양이다. */
+export const readFileOrNull = (p) => { try { return existsSync(p) ? readFileSync(p, "utf8") : null; } catch { return null; } };
+/** 이 런의 세션 트랜스크립트 전문. 없으면 빈 문자열 — 읽기 실패가 스테이지를 죽이지 않는다. */
+const transcriptTextFor = (root, out) =>
+  readTranscript({ root, home: homedir(), sessionId: out?.session_id, readFile: readFileOrNull }) || "";
 
 /** claude -p 결과를 런 레코드 한 줄로. 무엇을 얼마나 태웠는지는 사후 감사의 1차 증거다. */
 export function usageLine(out) {
@@ -188,6 +178,15 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       const t = await d.transition({ to: "factory:needs-human", reason: `stage artifact missing or invalid: ${v.reasons.join("; ")}` });
       record(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...refusal(t), ...gatesNote, usage]);
       return 2;
+    }
+    // tier 라벨은 triage가 붙인다(스펙 §3.2, KTB-9). `label-catalog.js`가 세 라벨을 만들어 두는데
+    // 붙이는 코드가 어디에도 없었고, tier는 handoff JSON 안에만 있어서 사람이 이슈 목록에서 볼 수
+    // 없었다. **handoff가 검증된 뒤**에만 붙인다 — 검증 전의 tier는 에이전트의 자기 신고일 뿐이다.
+    // 실패해도 스테이지를 죽이지 않는다(라벨은 사람에게 보이는 표식이지 판정의 재료가 아니다 —
+    // 게이트·로스터는 계속 handoff의 tier를 읽는다).
+    if (stage === "triage" && d.setTierLabel && TIERS.includes(v.data?.tier)) {
+      try { await d.setTierLabel(v.data.tier); record([`tier: ${tierLabel(v.data.tier)}`]); }
+      catch (e) { record([`tier: ${tierLabel(v.data.tier)} label failed — ${e?.message || e}`]); }
     }
     // 라운드 번호는 에이전트의 자기 신고가 아니라 이슈에 남은 review handoff 개수에서 센다 — K 한도가 실제로 물리게.
     if (stage === "review" && v.data) {
@@ -457,13 +456,15 @@ async function main() {
       return result;
     },
     verifyStage: ({ out, gates }) => {
-      const v = verifyStage({ stage, out, transcriptText: readTranscript(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates });
+      const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates });
       // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
       // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
       if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
       return v;
     },
     writeHandoff: async ({ data }) => { await gh.comment(issue, renderHandoff({ stage, issue, summary: data.summary || `### ${stage} 완료`, data })); },
+    /** triage 전용(KTB-9): 판정된 tier를 라벨로 내보낸다 — 다른 `factory:tier-*`는 같은 호출에서 떨어진다. */
+    setTierLabel: (tier) => gh.setTierLabel(issue, tierLabel(tier)),
     /** merge stage 전용: PR이 열려 있는지, 충돌은 없는지 — implement handoff에 적힌 PR을 조회한다. */
     prInfo: async () => {
       const h = latestHandoff(await gh.comments(issue), "implement");

@@ -52,8 +52,53 @@ export function createApp({ db, now = () => new Date() } = {}) {
   return app;
 }
 
+// --- 진입점 배선 -----------------------------------------------------------------------
+// `npm start`(= `node src/app.js`)가 타는 유일한 경로다. DB 핸들을 만드는 곳은 여기 하나뿐이고,
+// 만들어진 실행자는 createApp이 라우트에 내려준다(docs/TECHNICAL.md §Architecture "DB 핸들").
+//
+// 드라이버는 **동적으로** 부른다. 최상단 `import "pg"`는 드라이버가 없는 환경에서 모듈 import 자체를
+// 깨뜨려 createApp을 쓰는 모든 테스트와 `/healthz`까지 함께 끌고 내려간다 — 이 저장소에는 아직 pg가
+// 없다(package.json은 protected다. PR 본문 "Harness change needed" 참조).
+
+const DB_DRIVER = "pg";
+
+// 드라이버가 없거나 pool을 만들지 못했을 때 쓰는 실행자. 기동을 막지 않고(= fail-fast 하지 않고)
+// 요청 시점에 "DB에 닿지 못했다"를 말한다 — app.js가 그 code만 503으로 매핑한다.
+// pg 오류 코드를 흉내 내지 않는다: 실패한 것은 연결이 아니라 핸들 자체이고, 사용자가 보는 사실은 같다.
+function unavailableDb(cause) {
+  return {
+    async query() {
+      const err = new Error("database is unavailable");
+      err.code = DB_UNAVAILABLE;
+      err.cause = cause;
+      throw err;
+    },
+  };
+}
+
+export async function createDbFromEnv({ env = process.env, loadDriver = () => import(DB_DRIVER) } = {}) {
+  try {
+    const driver = await loadDriver();
+    const Pool = driver?.Pool ?? driver?.default?.Pool;
+    if (typeof Pool !== "function") {
+      throw new TypeError(`${DB_DRIVER} driver exposes no Pool`);
+    }
+    // 진입점은 DATABASE_URL만 읽는다 — 하드코딩 DSN fallback을 두지 않는다(docs/TECHNICAL.md §Data).
+    return new Pool({ connectionString: env.DATABASE_URL });
+  } catch (cause) {
+    // 조용히 넘어가지 않는다(PROJECT 원칙 3): 기동은 계속하되 그 사실을 한 줄 남긴다.
+    console.warn(`[app] ${DB_DRIVER} pool unavailable — /notes will answer 503: ${cause?.message ?? cause}`);
+    return unavailableDb(cause);
+  }
+}
+
+export async function createAppFromEnv({ env = process.env, loadDriver, now } = {}) {
+  return createApp({ db: await createDbFromEnv({ env, loadDriver }), now });
+}
+
 // 진입점 가드: `node src/app.js`로 실행될 때만 리스닝한다.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const port = process.env.PORT ?? 3000;
-  createApp().listen(port, () => console.log(`listening on ${port}`));
+  const app = await createAppFromEnv();
+  app.listen(port, () => console.log(`listening on ${port}`));
 }

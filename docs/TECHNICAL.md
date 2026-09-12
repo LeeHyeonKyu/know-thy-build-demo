@@ -37,7 +37,7 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 
 | Component | Responsibility | NOT Responsible For | Depends On |
 |-----------|---------------|---------------------|------------|
-| `src/app.js` | `createApp({db, now})` 팩토리, 라우트 등록, 도메인 code → 상태코드 매핑과 에러 봉투 | 비즈니스 규칙, SQL, 드라이버 오류 해석 | routes |
+| `src/app.js` | `createApp({db, now})` 팩토리, 라우트 등록, 도메인 code → 상태코드 매핑과 에러 봉투, 진입점 배선(`createDbFromEnv`/`createAppFromEnv`) | 비즈니스 규칙, SQL, 드라이버 오류 해석 | routes |
 | `src/routes/notes.js` | 요청 파싱, 상태코드 | 검증 규칙, SQL, 저장 순서 | service |
 | `src/service/notes.js` | 노트 규칙(필수 필드·공백·트림, 정렬, 검색어 정규화) | HTTP(상태코드를 오류에 싣지 않는다), SQL 문법 | repository |
 | `src/repo/notes.js` | SQL 실행, 행↔객체 매핑, pg 오류 → 도메인 code 번역 | 검증, 상태코드 | 주입된 실행자 `{query(text, params)}` |
@@ -64,6 +64,8 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 되돌림은 코드로 출하하지 않는다 — 이 PR을 revert해도 `notes` 테이블은 남고(순수 additive라 무해하다), 제거가 필요하면 사람이 `DROP TABLE notes`를 직접 판단해 실행한다(파괴적 스키마 변경은 CHARTER NEVER_AUTOMATE).
 
 **연결 설정:** 진입점은 `process.env.DATABASE_URL`만 읽는다. 하드코딩 DSN fallback도, 기동 시점 fail-fast도 두지 않는다(후자는 `/healthz` ready 신호를 굶긴다). 설정이 틀리면 요청 시점에 503으로 드러난다 — repo가 연결류 오류를 `db_unavailable`로 번역하고 `src/app.js`가 그 code만 503으로 매핑한다. 연결류가 아닌 예외는 500이다(전면 catch→503은 진짜 장애를 구별 불가능하게 만든다).
+
+**배선의 위치와 드라이버 로딩:** `src/app.js`의 `createDbFromEnv()`가 `DATABASE_URL`로 `pg.Pool`을 만들고 `createAppFromEnv()`가 그것을 `createApp({ db })`에 넘긴다. 진입점 가드(`node src/app.js`)는 그 둘을 부르고 `listen`할 뿐이다 — 이것이 `npm start`가 타는 유일한 배선이며 `test/app.test.js`의 `test_2_started_process_serves_notes_with_db_wired`가 프로세스 밖에서 관측한다. 드라이버는 최상단 `import "pg"`가 아니라 **동적 import**로 부른다: `pg`는 아직 의존성에 없고(`package.json`은 protected — `factory:harness` 대기) 정적 import는 드라이버가 없는 환경에서 모듈 전체를, 즉 `/healthz`와 검증 경로까지 함께 깨뜨린다. 드라이버가 없거나 pool 생성이 실패하면 기동을 막는 대신 `db_unavailable`로 reject하는 실행자를 쓴다 — `/healthz`는 200으로 살아 있고 `POST /notes`는 500이 아니라 503으로 답한다. `pg`가 들어오면 이 경로는 코드 변경 없이 진짜 pool을 쓴다.
 
 ## Interfaces
 

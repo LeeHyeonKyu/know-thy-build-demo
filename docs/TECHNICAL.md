@@ -70,12 +70,19 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 |-------|-------|------|-----------|
 | unit | service 규칙(검증·정규화·정렬 키), 순수 함수 | vitest | DB 없이 빠르게 규칙을 고정 |
 | integration | routes→service→repo, 실제 Postgres에 SQL 실행 | vitest + docker compose | SQL·스키마 오류는 unit이 못 잡는다 |
-| e2e | 앱 기동 후 HTTP 표면 | Playwright (`request` 픽스처만) | 존재하지만 M1에서는 게이트가 아님(M2 승격 대상) |
+| e2e | 앱 기동 후 HTTP 표면 | Playwright | 존재하지만 M1에서는 게이트가 아님(M2 승격 대상) |
 
-**e2e 레인에 브라우저를 들이지 않는다(#15):** `e2e/*.spec.js`는 `page`/`browser`/`context` 픽스처를 쓰지 않는다.
-CI 셋업(`.factory/actions/setup/action.yml`, `[runtime].setup`)에 브라우저를 내려받는 스텝이 없으므로, 그런 스펙은
-계약이 아니라 머신 상태 때문에 게이트를 영구 RED로 만든다. 렌더링 결과는 애초에 범위 밖이다(아래 *What NOT to Test*,
-`docs/PROJECT.md` — 웹 UI가 아니라 HTTP JSON API). 회귀 가드는 `test/playwright_config.test.js`.
+**e2e 레인의 단언은 `test/`에서 증명된다(#15):** `e2e/**`는 `[test].test_glob` 밖이라 prove-test가 그 스펙의 RED를
+증명하지 않는다. 그래서 `/healthz` 계약 단언(200 **그리고** 정확히 `{"ok":true}`)이 실제로 회귀를 막는다는 사실은
+`test/integration/e2e_suite.test.js`가 지킨다 — 같은 스펙을 127.0.0.1 스텁을 상대로 두 번 돌려 `{"ok":true}`에는 초록,
+`{"ok":"yes"}`에는 빨강(+ 실패 귀속)임을 대조한다. 판정 근거는 종료 코드 하나가 아니라 "몇 개가 돌았고 무엇이 깨졌는가"다.
+
+**아직 M2가 아닌 이유(#15):** 승격에 필요한 두 파일 — `.factory/harness.toml`(`[commands].e2e`, `[gates].full/deep/required`,
+`[harness].maturity`)과 `playwright.config.js`(고정 포트 3000·무조건 `webServer`) — 은 `[protected]`라 에이전트가 쓸 수 없다.
+그리고 `e2e/smoke.spec.js`의 `browser loads`는 크로미움 바이너리를 요구하는데 CI 셋업(`.factory/actions/setup/action.yml`,
+`[runtime].setup`)에 그것을 내려받는 스텝이 없다 — 그 케이스를 지우는 것은 `tests_are_load_bearing`(harness.toml) 때문에
+spec-conformance의 명시 승인 사안이다. 이 셋이 정리되기 전에 `[gates]`에 `e2e`를 넣으면 게이트는 계약이 아니라
+머신 상태 때문에 영구 RED가 된다.
 
 **Coverage Principle:** 변경된 줄 기준 diff coverage 90% — 전체 % 는 쓰지 않는다.
 **What NOT to Test:** Express 내부, pg 드라이버, 라우팅 등록 같은 글루 — 프레임워크가 이미 보장하는 것.

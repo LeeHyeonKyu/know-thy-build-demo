@@ -70,7 +70,12 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 |-------|-------|------|-----------|
 | unit | service 규칙(검증·정규화·정렬 키), 순수 함수 | vitest | DB 없이 빠르게 규칙을 고정 |
 | integration | routes→service→repo, 실제 Postgres에 SQL 실행 | vitest + docker compose | SQL·스키마 오류는 unit이 못 잡는다 |
-| e2e | 앱 기동 후 HTTP 표면 | Playwright | 존재하지만 M1에서는 게이트가 아님(M2 승격 대상) |
+| e2e | 앱 기동 후 HTTP 표면 | Playwright (`request` 픽스처만) | 존재하지만 M1에서는 게이트가 아님(M2 승격 대상) |
+
+**e2e 레인에 브라우저를 들이지 않는다(#15):** `e2e/*.spec.js`는 `page`/`browser`/`context` 픽스처를 쓰지 않는다.
+CI 셋업(`.factory/actions/setup/action.yml`, `[runtime].setup`)에 브라우저를 내려받는 스텝이 없으므로, 그런 스펙은
+계약이 아니라 머신 상태 때문에 게이트를 영구 RED로 만든다. 렌더링 결과는 애초에 범위 밖이다(아래 *What NOT to Test*,
+`docs/PROJECT.md` — 웹 UI가 아니라 HTTP JSON API). 회귀 가드는 `test/playwright_config.test.js`.
 
 **Coverage Principle:** 변경된 줄 기준 diff coverage 90% — 전체 % 는 쓰지 않는다.
 **What NOT to Test:** Express 내부, pg 드라이버, 라우팅 등록 같은 글루 — 프레임워크가 이미 보장하는 것.

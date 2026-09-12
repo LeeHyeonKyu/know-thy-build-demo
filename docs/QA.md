@@ -38,6 +38,9 @@ date: 2026-09-12
 - `{issue}`는 GitHub 이슈 번호, `{slug}`는 done_when 항목을 소문자 snake로 줄인 것.
 - 회귀 가드도 같은 규칙을 따른다 — 나중에 이슈 번호로 "이 테스트가 왜 있는지"를 되짚을 수 있어야 한다.
 - 파일 위치: unit은 `test/*.test.js`, integration은 `test/integration/*.test.js`. e2e는 `e2e/*.spec.js`(M2 승격 전까지 게이트 밖).
+- e2e 스펙은 `request` 픽스처만 쓴다 — `page`/`browser`/`context`는 금지다(#15, 브라우저 바이너리를 설치하는 CI 스텝이 없다).
+  `e2e/**`는 `test_glob` 밖이라 prove-test가 그 스펙의 RED를 증명해 주지 않는다. 새 e2e 단언을 넣을 때는 고의로 깨뜨린
+  응답을 상대로 한 번 돌려 실패를 확인하고 그 출력을 `.factory/out/qa/`에 남긴다(아래 Evidence).
 
 ## Evidence
 

@@ -60,7 +60,7 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 | POST | `/notes` | 201 `{id,title,body,created_at}` / 400 |
 | GET | `/notes?limit=&offset=` | 200 `{items:[...],total}` |
 | GET | `/notes?q=` | 200 `{items:[...],total}` |
-| GET | `/healthz` | 200 `{ok:true}` |
+| GET | `/healthz` | 200 `{ok:true}` + 응답 헤더 `Cache-Control: no-store` (#8 — 프록시·브라우저가 헬스체크 응답을 재사용하지 못하게) |
 
 **Error Format:** `{ "error": { "code": "invalid_request", "message": "title is required" } }` — 조용히 버리지 않는다(PROJECT 원칙 3).
 
@@ -73,7 +73,8 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 | e2e | 앱 기동 후 HTTP 표면 | Playwright | 존재하지만 M1에서는 게이트가 아님(M2 승격 대상) |
 
 **Coverage Principle:** 변경된 줄 기준 diff coverage 90% — 전체 % 는 쓰지 않는다.
-**What NOT to Test:** Express 내부, pg 드라이버, `/healthz` 같은 글루.
+**What NOT to Test:** Express 내부, pg 드라이버, 라우팅 등록 같은 글루 — 프레임워크가 이미 보장하는 것.
+단 `/healthz`의 **관측 가능한 응답 계약**(200 / `{ok:true}` / `Cache-Control: no-store`)은 글루가 아니라 계약이므로 회귀 가드를 둔다(#8, `test/smoke.test.js`).
 
 ## Constraints
 

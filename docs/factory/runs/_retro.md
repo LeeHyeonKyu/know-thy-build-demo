@@ -16,8 +16,8 @@ _이력 없음_
 | review rounds avg | 0 | 0 |
 | needs-human | 2 | 0 |
 | rejects by role | 없음 | 없음 |
-| cost (usd) | 57.82 | 0.00 |
-| tokens | input 30 / output 93663 | input 0 / output 0 |
+| cost (usd) | 58.12 | 0.00 |
+| tokens | input 32 / output 94056 | input 0 / output 0 |
 | retro cost (usd) | 0.00 | 0.00 |
 | retro tokens | input 0 / output 0 | input 0 / output 0 |
 | full retros | — | 0 |
@@ -96,10 +96,10 @@ _이력 없음_
     "rejects_by_role": {},
     "needs_human": 2,
     "usage": {
-      "cost_usd": 57.824952,
+      "cost_usd": 58.123343,
       "tokens": {
-        "input": 30,
-        "output": 93663
+        "input": 32,
+        "output": 94056
       }
     }
   }

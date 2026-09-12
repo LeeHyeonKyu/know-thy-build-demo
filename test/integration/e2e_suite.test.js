@@ -26,6 +26,9 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+// issue #15(2라운드): 이제는 게이트가 **실제로 돌릴** 명령(`harness.commands.e2e`)을 그대로 실행한다.
+import { createServer as createNetServer } from "node:net";
+import { loadHarness } from "../../.factory/lib/config.js";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const E2E_DIR = join(ROOT, "e2e");
@@ -127,5 +130,139 @@ describe("issue #15 — e2e 레인의 /healthz 계약 단언", () => {
     expect(negative.output).toContain("yes");   // 받은 값
     expect(negative.output).toContain("true");  // 기대한 값
     expect(bad.paths).toContain("/healthz");
+  }, LANE_TIMEOUT_MS);
+});
+
+// ── issue #15(2라운드) — 게이트 명령 그 자체를 돌린다 ─────────────────────────────────────────
+// 위 블록은 **임시 설정**으로 스펙을 돌려 단언의 내용을 증명했다(그때 `playwright.config.js`가
+// 이 역할에게 닫혀 있었다). 이 라운드에는 그 파일이 열렸으므로, 편의 환경을 흉내 내지 않고
+// `.factory/harness.toml`의 `[commands].e2e` **문자열 그대로**를 자식 프로세스로 돌린다 —
+// CI 게이트가 돌릴 명령과 한 글자도 다르지 않은 것만이 "새 required 게이트가 초록이다"를 증명한다.
+const EMPTY_BROWSER_ROOT = "ktb-15-browsers-";
+
+/** 크로미움이 설치되지 않은 환경을 결정적으로 만든다 — 빈 디렉터리를 playwright 브라우저 루트로 준다. */
+const emptyBrowsersPath = () => mkdtemp(join(tmpdir(), EMPTY_BROWSER_ROOT));
+
+/** 127.0.0.1의 빈 포트를 커널에게서 받아 둔다(bind 후 close — TOCTOU는 감수하고 고정 포트는 쓰지 않는다). */
+async function reserveLoopbackPort() {
+  const probe = createNetServer();
+  probe.listen(0, LOOPBACK);
+  await once(probe, "listening");
+  const { port } = probe.address();
+  await new Promise((resolve, reject) => probe.close((err) => (err ? reject(err) : resolve())));
+  return port;
+}
+
+/**
+ * 포트 하나를 점유한 상태를 만든다. 이미 다른 프로세스가 쓰고 있으면(EADDRINUSE) 그 자체로
+ * 전제가 충족된 것이므로 성공으로 친다 — 재시도도, 대기도 하지 않는다(docs/QA.md: No sleep).
+ */
+async function occupyPort(port) {
+  const server = createNetServer((socket) => socket.destroy());
+  server.listen(port, LOOPBACK);
+  const bound = await Promise.race([
+    once(server, "listening").then(() => true),
+    once(server, "error").then(([err]) => {
+      if (err.code === "EADDRINUSE") return false;   // 남이 점유 중 = 우리가 원하던 상태
+      throw err;
+    }),
+  ]);
+  return {
+    heldByUs: bound,
+    release: () => (bound ? new Promise((resolve) => server.close(() => resolve())) : Promise.resolve()),
+  };
+}
+
+/** `harness.commands.e2e`를 게이트와 같은 모양(`bash -lc`)으로 실행한다. */
+async function runHarnessE2eCommand(overrides) {
+  const harness = loadHarness(ROOT);
+  const command = harness.commands.e2e;
+  if (typeof command !== "string" || !command.trim()) {
+    throw new Error(
+      `.factory/harness.toml [commands].e2e is not a command string (got ${JSON.stringify(command)}) — ` +
+      "the e2e gate would be MISCONFIGURED and there is nothing for this test to run",
+    );
+  }
+  // 부모 환경에서 흘러드는 두 값은 지운 뒤 이 실행이 원하는 것만 다시 넣는다 — 실행 모드를 테스트가 정한다.
+  const env = { ...process.env, CI: "1", FORCE_COLOR: "0" };
+  delete env.PLAYWRIGHT_TEST_BASE_URL;
+  delete env.PORT;
+  for (const [k, v] of Object.entries(overrides)) {
+    if (v === undefined) delete env[k];
+    else env[k] = v;
+  }
+  const child = spawn("bash", ["-lc", command], { cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (c) => { output += c; });
+  child.stderr.on("data", (c) => { output += c; });
+  const [code] = await once(child, "close");
+  return { code, output, command };
+}
+
+describe("issue #15 — 게이트가 실제로 돌릴 e2e 명령", () => {
+  // dw2: 새 required 게이트가 태어나자마자 영구 RED가 되지 않는다. 크로미와 고정 포트 3000이
+  // 둘 다 없는 환경에서도 명령이 초록이고, 그 초록이 "아무것도 안 돌아서"가 아니어야 한다.
+  test("test_15_harness_e2e_command_green_without_browser", async () => {
+    const browsersPath = await emptyBrowsersPath();   // 크로미움 바이너리가 존재하지 않는 루트
+    const appPort = await reserveLoopbackPort();
+    const squatter = await occupyPort(3000);          // 3000은 남이 쓰고 있다 — 그래도 같은 결과여야 한다
+    try {
+      const run = await runHarnessE2eCommand({ PLAYWRIGHT_BROWSERS_PATH: browsersPath, PORT: String(appPort) });
+
+      expect(run.output, `browser-free lane must not ask for a chromium binary:\n${run.output}`)
+        .not.toMatch(/Executable doesn't exist|playwright install/i);
+      expect(run.output).toMatch(/\d+ passed/);
+      expect(run.output).not.toMatch(/\b0 passed/);       // 아무것도 선택하지 않은 초록은 초록이 아니다
+      expect(run.output).not.toMatch(/no tests found/i);
+      expect(run.code, `${run.command} must exit 0 without a browser:\n${run.output}`).toBe(0);
+    } finally {
+      await squatter.release();
+    }
+  }, LANE_TIMEOUT_MS);
+
+  // dw4: 그 게이트가 **무엇을 막는가**. 같은 명령, 같은 스펙, 바뀌는 것은 스텁의 body 하나뿐이다.
+  //   200 {"ok":true}  → exit 0
+  //   200 {"ok":"yes"} → exit != 0 이고, 출력이 어느 스펙이 왜 깨졌는지(expected/received) 말한다
+  // 종료 코드만 보면 "환경이 깨져서 non-zero"와 구별되지 않으므로 귀속까지 함께 단언한다.
+  test("test_15_e2e_lane_rejects_healthz_body_regression", async () => {
+    const browsersPath = await emptyBrowsersPath();
+
+    const good = await startHealthzStub({ ok: true });
+    const positive = await runHarnessE2eCommand({
+      PLAYWRIGHT_BROWSERS_PATH: browsersPath,
+      PLAYWRIGHT_TEST_BASE_URL: good.baseURL,
+    });
+    try {
+      expect(positive.output).toMatch(/\d+ passed/);
+      expect(positive.output).not.toMatch(/\b0 passed/);
+      expect(positive.code, `contract-abiding stub must keep the lane green:\n${positive.output}`).toBe(0);
+      // webServer가 끼어들지 않았다: 러너가 말을 건 상대는 우리 스텁이고, 포트 충돌 throw도 없다.
+      expect(good.paths).toContain("/healthz");
+      expect(positive.output).not.toMatch(/is already used/i);
+    } finally {
+      await good.stop();
+    }
+
+    const bad = await startHealthzStub({ ok: "yes" });
+    const negative = await runHarnessE2eCommand({
+      PLAYWRIGHT_BROWSERS_PATH: browsersPath,
+      PLAYWRIGHT_TEST_BASE_URL: bad.baseURL,
+    });
+    try {
+      expect(negative.code, `body regression must turn the e2e gate red:\n${negative.output}`).not.toBe(0);
+      expect(negative.output).toMatch(/\d+ failed/);
+      expect(negative.output).not.toMatch(/no tests found/i);
+      expect(negative.output).not.toMatch(/is already used/i);
+      expect(negative.output).toContain("test_15_healthz_body_is_exactly_ok_true");
+      expect(negative.output).toMatch(/expected/i);
+      expect(negative.output).toMatch(/received/i);
+      expect(negative.output).toContain("yes");    // 받은 값
+      expect(negative.output).toContain("true");   // 기대한 값
+      expect(bad.paths).toContain("/healthz");
+    } finally {
+      await bad.stop();
+    }
   }, LANE_TIMEOUT_MS);
 });

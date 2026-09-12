@@ -159,14 +159,14 @@ async function reserveLoopbackPort() {
  */
 async function occupyPort(port) {
   const server = createNetServer((socket) => socket.destroy());
-  server.listen(port, LOOPBACK);
-  const bound = await Promise.race([
-    once(server, "listening").then(() => true),
-    once(server, "error").then(([err]) => {
-      if (err.code === "EADDRINUSE") return false;   // 남이 점유 중 = 우리가 원하던 상태
-      throw err;
-    }),
-  ]);
+  // `events.once(server, "listening")`는 'error'가 오면 **거절**한다 — EADDRINUSE를 실패로 바꿔 버리므로
+  // 두 이벤트를 한 프로미스에서 직접 받는다. 이 파일은 전체 스위트와 동시에 돌기 때문에(prove-test,
+  // new-test-repeat) "남이 이미 3000을 쥐고 있다"가 정상 경로다.
+  const bound = await new Promise((resolve, reject) => {
+    server.once("listening", () => resolve(true));
+    server.once("error", (err) => (err.code === "EADDRINUSE" ? resolve(false) : reject(err)));
+    server.listen(port, LOOPBACK);
+  });
   return {
     heldByUs: bound,
     release: () => (bound ? new Promise((resolve) => server.close(() => resolve())) : Promise.resolve()),

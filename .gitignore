@@ -1,3 +1,10 @@
 node_modules/
 .spike/
 test-results/
+
+# know-thy-build factory
+.factory/out/
+.factory/node_modules/
+docs/factory/runs/
+coverage/
+.nyc_output/

@@ -1,0 +1,91 @@
+schema = 1
+
+# know-thy-build-demo harness — M1 (DB가 등장해 compose + integration 스모크가 있다, §5.2.1).
+# Sections marked (protected) can only change through a human-merged PR (integrity blocks agents).
+
+[project]
+name           = "know-thy-build-demo"
+spec_dir       = "docs/features"
+runs_dir       = "docs/factory/runs"
+default_branch = "main"
+
+[runtime]
+setup = "npm ci"
+node  = "22"
+
+[commands]                       # all judged by exit code
+# 이 데모에는 린터가 없다(eslint 미설치). 게이트 자리를 비워 두면 `gates.required`가
+# MISCONFIGURED가 되므로, "항상 통과하는 명령"을 명시적으로 둔다 — 린터를 도입하면 이 두 줄만 바뀐다.
+lint       = "node -e 0"
+unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json"
+test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
+test_one   = "npx vitest run {file} -t {name}"   # classify-failure. Scripts quote {file}/{name} — do not add quotes here
+lint_file  = "node -e 0 {file}"                  # lint-touched.sh (logging only). {file}은 doctor가 요구하는 자리표시자 — 여기서는 무시되는 argv다
+
+[harness]
+maturity = "M1"                  # M0 | M1 | M2 — promotion is a factory:harness issue + human merge
+
+[factory]
+orchestration   = "workflow"     # workflow | agent
+required_checks = ["factory/gates", "factory/review", "factory/integrity"]
+
+[commands.proof]                 # fill when the proof gates are actually listed in [gates]
+# coverage        = "npx vitest run --coverage --coverage.reporter=json"
+# coverage_report = ".factory/out/coverage/coverage-final.json"
+# mutation        = "npx stryker run --incremental"
+# mutation_report = "reports/mutation/mutation.json"
+
+[gates]
+required = ["lint", "unit"]
+fast     = ["lint", "unit"]
+full     = ["lint", "unit"]
+deep     = ["lint", "unit"]
+
+[gates.thresholds]               # (protected)
+diff_coverage_pct       = 90
+mutation_score_pct      = 70
+new_test_repeats        = 3
+flaky_isolation_runs    = 3
+flaky_base_runs         = 5
+quarantine_max          = 5
+quarantine_ttl_days     = 28
+quarantine_return_after = 30
+
+[test]
+guide       = "docs/QA.md"
+naming      = "test_{issue}_{slug}"
+smoke       = { unit = "test/smoke.test.js", integration = "test/integration/db.test.js" }
+runtime_budget_min = 12
+test_glob   = ["test/**/*.test.js"]
+source_glob = ["src/**/*.js"]
+unit_report = ".factory/out/unit.json"
+
+[test.env]
+compose   = "docker-compose.test.yml"
+# env_file  = ".env.test"
+# seed      = ""
+# app_start = ""
+# app_ready = "http://localhost:3000/healthz"    # e2e(M2 승격)에서 켠다
+ready_timeout_sec = 90
+
+[test.fakes]
+
+[protected]                      # (protected)
+# 빌드 설정 파일도 보호한다 — [commands]의 게이트 명령(lint/unit/test_files/…)이 전부 이 파일들을
+# 거쳐 해석되므로, 에이전트가 여기를 고치면 "게이트를 통과시키는" 가장 쉬운 길이 코드를 고치는 게
+# 아니라 판정 기준을 고치는 것이 된다(테스트 제외, 린트 규칙 해제, 의존성 교체).
+# 바꿔야 한다면 경로는 하나다: `factory:harness` 이슈 → 사람이 diff를 보고 머지(§5.1).
+factory       = [".factory/**", ".claude/**", ".github/workflows/factory-*.yml", "docs/factory/CHARTER.md",
+                 "package.json", "package-lock.json", "vitest.config.*", "playwright.config.*",
+                 "tsconfig*.json", ".eslintrc*", "eslint.config.*", "docker-compose.test.yml"]
+                 # `.factory/out/qa/**`는 qa 리뷰어의 증거물 저장소다 — 판정의 근거가 되는 스크린샷·로그를
+                 # 남길 수 없으면 §5.2.3의 "증거 없는 재현은 일어나지 않은 재현"이 성립하지 않는다.
+except        = [".factory/lessons/**", "docs/factory/runs/**", ".factory/out/qa/**"]
+additive_only = { ".claude/agents/*.md" = ["## Examples", "## Perspectives"] }
+tests_are_load_bearing = true
+
+[load_bearing]
+paths = []
+
+[evidence]
+qa_artifacts = ".factory/out/qa/**"

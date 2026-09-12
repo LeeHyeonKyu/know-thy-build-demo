@@ -14,14 +14,14 @@
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 1 | 1 |
-| review rounds avg | 1 | 1 |
-| needs-human | 3 | 3 |
+| merged | 0 | 1 |
+| review rounds avg | 0 | 1 |
+| needs-human | 1 | 3 |
 | rejects by role | 없음 | 없음 |
-| cost (usd) | 81.81 | 81.81 |
-| tokens | input 50 / output 128059 | input 50 / output 128059 |
-| retro cost (usd) | 0.72 | 0.72 |
-| retro tokens | input 2 / output 2998 | input 2 / output 2998 |
+| cost (usd) | 0.18 | 81.81 |
+| tokens | input 33038 / output 641 | input 50 / output 128059 |
+| retro cost (usd) | 0.00 | 0.72 |
+| retro tokens | input 0 / output 0 | input 2 / output 2998 |
 | full retros | — | 1 |
 
 <!-- factory-retro-state:v1 -->
@@ -142,26 +142,24 @@
         "issue": 2,
         "reason": "stage artifact missing or invalid: claude -p reported is_error; no candidate matched the stage schema — no JSON object in result",
         "at": "2026-09-12T15:25:22Z"
+      },
+      {
+        "issue": 14,
+        "reason": "prerequisite handoff missing: review handoff missing",
+        "at": "2026-09-12T17:07:36Z"
       }
     ]
   },
   "stats": {
-    "merged": 1,
-    "review_rounds_avg": 1,
+    "merged": 0,
+    "review_rounds_avg": 0,
     "rejects_by_role": {},
-    "needs_human": 3,
+    "needs_human": 1,
     "usage": {
-      "cost_usd": 81.812379,
+      "cost_usd": 0.175824,
       "tokens": {
-        "input": 50,
-        "output": 128059
-      }
-    },
-    "retro_usage": {
-      "cost_usd": 0.722729,
-      "tokens": {
-        "input": 2,
-        "output": 2998
+        "input": 33038,
+        "output": 641
       }
     }
   },

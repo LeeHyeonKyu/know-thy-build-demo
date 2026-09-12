@@ -15,6 +15,14 @@ const STATUS_BY_CODE = {
   [DB_UNAVAILABLE]: 503,
 };
 
+const REJECTED_BODY = "request body was rejected";
+
+// body-parser가 붙인 type별 문장. 헤더 값도 본문도 넣지 않는다 — 무엇을 고쳐야 하는지만 말한다.
+const CLIENT_BODY_MESSAGES = {
+  "charset.unsupported": "request charset is not supported — send UTF-8 JSON",
+  "encoding.unsupported": "request content-encoding is not supported",
+};
+
 // 응답에 실을 것을 여기서 한 번에 정한다. 요청 본문도 내부 메시지도 에코하지 않는다
 // (docs/features/001-create-note.md:78) — 사용자가 고칠 수 있는 검증 오류의 문장만 그대로 나간다.
 function toEnvelope(err) {
@@ -30,6 +38,14 @@ function toEnvelope(err) {
   }
   if (err?.code === DB_UNAVAILABLE) {
     return { status: STATUS_BY_CODE[DB_UNAVAILABLE], code: DB_UNAVAILABLE, message: "database is unavailable" };
+  }
+  // 파싱 실패만이 "읽을 수 없는 body"는 아니다. body-parser는 지원하지 않는 charset·content-encoding에
+  // 415를, 압축을 풀지 못한 body에 400을 주면서 `expose: true`로 "클라이언트에게 말해도 되는 잘못"임을
+  // 표시한다. 그것을 500으로 내리면 사용자가 고칠 수 있는 실수가 서버 장애로 보고된다
+  // (docs/features/001-create-note.md:63 "500이 아니다"). 상태코드는 파서가 정한 것을 따르고,
+  // 메시지는 요청 본문·헤더 값을 에코하지 않는 고정 문장만 쓴다.
+  if (err?.expose === true && Number.isInteger(err.status) && err.status >= 400 && err.status < 500) {
+    return { status: err.status, code: INVALID_REQUEST, message: CLIENT_BODY_MESSAGES[err.type] ?? REJECTED_BODY };
   }
   return { status: 500, code: INTERNAL_ERROR, message: "internal error" };
 }
@@ -84,7 +100,14 @@ export async function createDbFromEnv({ env = process.env, loadDriver = () => im
       throw new TypeError(`${DB_DRIVER} driver exposes no Pool`);
     }
     // 진입점은 DATABASE_URL만 읽는다 — 하드코딩 DSN fallback을 두지 않는다(docs/TECHNICAL.md §Data).
-    return new Pool({ connectionString: env.DATABASE_URL });
+    const pool = new Pool({ connectionString: env.DATABASE_URL });
+    // idle client가 죽으면(DB 재시작, 서버측 연결 종료) pool은 자기 자신에게 'error'를 emit한다.
+    // 리스너가 없는 EventEmitter의 'error'는 Node가 throw해 프로세스를 죽인다 — 요청 시점 503으로
+    // 끝나야 할 DB 블립이 /healthz(CHARTER Preserve)까지 함께 끌고 내려가지 않게 여기서 받는다.
+    pool.on?.("error", (cause) => {
+      console.warn(`[app] idle ${DB_DRIVER} client error — /notes will answer 503 while it lasts: ${cause?.message ?? cause}`);
+    });
+    return pool;
   } catch (cause) {
     // 조용히 넘어가지 않는다(PROJECT 원칙 3): 기동은 계속하되 그 사실을 한 줄 남긴다.
     console.warn(`[app] ${DB_DRIVER} pool unavailable — /notes will answer 503: ${cause?.message ?? cause}`);

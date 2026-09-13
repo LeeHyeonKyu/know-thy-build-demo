@@ -137,6 +137,34 @@ function endpointItems(section) {
   }));
 }
 
+// README가 "이 경로가 저장소에 있다"고 주장하는 토큰을 모은다. 수집원은 셋이다:
+//   (1) 인라인 백틱 스팬 **전체**, (2) 코드펜스 안 명령의 공백 구분 단어
+//       (기여자가 실제로 복붙하는 첫 명령이 펜스 안에 있으므로 펜스를 빼면
+//        `npm start`를 존재하지 않는 `node src/server.js`로 바꿔도 게이트가 침묵한다),
+//   (3) 상대 마크다운 링크 대상.
+// README 본문과 독립적으로 판별력을 측정할 수 있도록 순수 함수로 분리한다
+// (test_18_readme_path_claims_exhaustive가 합성 마크다운으로 직접 먹인다).
+function collectPathClaims(text) {
+  const claims = new Set();
+  const addIfPathClaim = (raw) => {
+    const token = raw.trim().replace(/^['"(<]+|['".,;:)>]+$/g, "");
+    if (!token || token.includes("*")) return;
+    if (/^(src|test|docs|e2e)\/\S*$/.test(token) || /^[A-Za-z0-9_.-]+\.(ya?ml|json|md|js)$/.test(token)) {
+      claims.add(token);
+    }
+  };
+  for (const [, span] of text.matchAll(/`([^`\n]+)`/g)) addIfPathClaim(span);
+  for (const { line, inFence } of annotatedLines(text)) {
+    if (!inFence || /^\s*```/.test(line)) continue;
+    for (const word of line.split(/\s+/)) addIfPathClaim(word);
+  }
+  for (const [, target] of text.matchAll(/\[[^\]\n]*\]\(([^)\s]+)\)/g)) {
+    if (/^([a-z]+:|#|\/\/)/i.test(target)) continue; // 외부 URL·앵커는 fs 대조 대상이 아니다
+    claims.add(target.split("#")[0]);
+  }
+  return claims;
+}
+
 // HTTP 상태코드로 읽히는 3자리 수. `docs/features/001-create-note.md`의 `001`처럼
 // 경로·파일명 안의 숫자는 상태코드가 아니다.
 const HTTP_STATUS = /(?<![\w./-])[1-5]\d{2}(?![\w./-])/;
@@ -178,27 +206,8 @@ describe("issue #18 — README는 저장소에 대해 참인 말만 한다", () 
     }
 
     // (c) 저장소 상대경로 토큰과 상대 마크다운 링크 대상이 전부 fs에 존재한다.
-    //     수집 대상은 (1) 인라인 백틱 스팬 **전체**(그래서 `npm start` 같은 명령 스팬은 경로가 아니다)와
-    //     (2) 코드펜스 안 명령의 공백 구분 단어다 — 기여자가 실제로 복붙하는 첫 명령이 펜스 안에 있으므로
-    //     펜스를 빼면 `npm start`를 존재하지 않는 `node src/server.js`로 바꿔도 게이트가 침묵한다.
-    //     글로브(`*` 포함)는 경로 주장이 아니라 패턴이므로 대상에서 제외한다.
-    const referenced = new Set();
-    const addIfPathClaim = (raw) => {
-      const token = raw.trim().replace(/^['"(<]+|['".,;:)>]+$/g, "");
-      if (!token || token.includes("*")) return;
-      if (/^(src|test|docs|e2e)\/\S*$/.test(token) || /^[A-Za-z0-9_.-]+\.(ya?ml|json|md|js)$/.test(token)) {
-        referenced.add(token);
-      }
-    };
-    for (const [, span] of readme.matchAll(/`([^`\n]+)`/g)) addIfPathClaim(span);
-    for (const { line, inFence } of annotatedLines(readme)) {
-      if (!inFence || /^\s*```/.test(line)) continue;
-      for (const word of line.split(/\s+/)) addIfPathClaim(word);
-    }
-    for (const [, target] of readme.matchAll(/\[[^\]\n]*\]\(([^)\s]+)\)/g)) {
-      if (/^([a-z]+:|#|\/\/)/i.test(target)) continue; // 외부 URL·앵커는 fs 대조 대상이 아니다
-      referenced.add(target.split("#")[0]);
-    }
+    //     수집 규칙은 collectPathClaims에 있다(펜스 안까지 본다).
+    const referenced = collectPathClaims(readme);
     expect(referenced.size, "README가 저장소 경로를 하나도 가리키지 않는다 — 인덱스로서 쓸모가 없다")
       .toBeGreaterThan(0);
     for (const token of referenced) {
@@ -220,6 +229,63 @@ describe("issue #18 — README는 저장소에 대해 참인 말만 한다", () 
     expect(layout, "README.md에 '## Layout' 섹션이 없다").not.toBeNull();
     expect(layout, `'## Layout'이 진입점 '${entry}'(package.json scripts.start)를 언급하지 않는다`)
       .toContain(entry);
+  });
+
+  // dw2(c)의 "모두 / 면제 키워드 없음"을 README 본문과 **독립적으로** 측정한다.
+  // 오늘의 README가 우연히 인용하지 않는 경로(`scripts/build.sh`, `config/nginx.conf`,
+  // `.github/workflows/ci.yml`, `Dockerfile.dev` …)도 경로 주장으로 수집돼야 한다 —
+  // 수집기가 접두사·확장자 목록으로 대상을 좁히면 그 목록 밖의 죽은 경로에 가드가 침묵하고,
+  // 위 references_resolve는 오늘의 README만 보므로 그 침묵을 드러내지 못한다.
+  // 반대로 명령·라우트·글로브·외부 URL·호출식은 경로 주장이 아니다 — 그것까지 fs에서 찾으면
+  // 참인 README가 RED가 된다.
+  test("test_18_readme_path_claims_exhaustive", () => {
+    const markdown = [
+      "루트 파일 `Dockerfile.dev` 와 `scripts/build.sh` 를 인용한다.",
+      "설정은 `config/nginx.conf`, CI 워크플로는 `.github/workflows/ci.yml`, 환경 템플릿은 `.env.example`.",
+      "명령은 `npm start`, 라우트는 `/healthz`, 호출은 `app.listen()`, 헤더는 `Cache-Control: no-store`.",
+      "패턴은 `test/integration/**`, 버전은 `22.11.0`, 플래그는 `--reporter=json`.",
+      "스펙은 [001](docs/features/001-create-note.md), 외부는 [예시](https://example.com/docs/x.md).",
+      "```bash",
+      "node tools/seed.js --url http://localhost:3000/healthz < fixtures/seed.sql",
+      "```",
+    ].join("\n");
+
+    const claims = [...collectPathClaims(markdown)];
+
+    for (const token of [
+      "Dockerfile.dev",
+      "scripts/build.sh",
+      "config/nginx.conf",
+      ".github/workflows/ci.yml",
+      ".env.example",
+      "docs/features/001-create-note.md",
+      "tools/seed.js",
+      "fixtures/seed.sql",
+    ]) {
+      expect(
+        claims,
+        `'${token}'는 저장소 상대경로 주장인데 수집되지 않았다 — 이 경로가 죽어도 가드가 침묵한다`,
+      ).toContain(token);
+    }
+
+    for (const token of [
+      "npm start",
+      "/healthz",
+      "app.listen()",
+      "Cache-Control: no-store",
+      "test/integration/**",
+      "22.11.0",
+      "--reporter=json",
+      "https://example.com/docs/x.md",
+      "http://localhost:3000/healthz",
+      "node",
+      "--url",
+    ]) {
+      expect(
+        claims,
+        `'${token}'은 경로 주장이 아니다(명령·라우트·글로브·버전·플래그·외부 URL) — fs에서 찾으면 참인 README가 RED가 된다`,
+      ).not.toContain(token);
+    }
   });
 
   // dw3: `## Endpoints`의 모든 항목이 상태를 숨기지 않고, 그 상태가 양방향으로 참이다.

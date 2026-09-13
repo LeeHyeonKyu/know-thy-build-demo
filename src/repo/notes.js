@@ -10,9 +10,18 @@ export const DB_UNAVAILABLE = "db_unavailable";
 
 // 연결류 오류는 코드 하나가 아니라 집합이다: libuv 소켓 오류 + PostgreSQL class 08(연결 예외)과
 // 서버가 연결을 받을 수 없다고 말하는 코드들.
+//
+// **연결 수립이 실패하는 흔한 경우는 소켓 오류가 아니라 SQLSTATE로 온다**: 자격증명이 틀리면 28P01,
+// pg_hba가 막으면 28000, DSN이 가리키는 데이터베이스가 없으면 3D000 — 셋 다 TCP는 붙은 뒤 서버가
+// 핸드셰이크에서 거절한 것이라 `ECONNREFUSED`가 아니다. 이것을 500으로 내보내면
+// "503이면 DB에 못 닿는 것, 500이면 이 배포가 마이그레이션을 빠뜨린 것"(docs/TECHNICAL.md §Data
+// 당직 런북)이 거짓이 되고, DSN 오타 한 글자가 당직자에게 우리 코드의 버그로 도착한다.
+// 42P01(테이블 없음)은 여전히 여기 없다 — 그것은 연결이 아니라 스키마의 문제다.
 const CONNECTION_ERROR_CODES = new Set([
   "ECONNREFUSED", "ETIMEDOUT", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "ENOTFOUND", "EPIPE", "EAI_AGAIN",
   "08000", "08001", "08003", "08004", "08006", "08007", "08P01",
+  "28000", "28P01",
+  "3D000",
   "57P01", "57P02", "57P03",
   "53300",
 ]);

@@ -221,6 +221,43 @@ describe("issue #2 — app factory HTTP surface", () => {
     expect(missing.raw).not.toContain("does not exist");
   });
 
+  // review must_fix `cf1`(correctness) 회귀 가드. "DB 연결 실패 → 503"(docs/features/001-create-note.md
+  // Key States)에서 **연결 수립 자체가 실패하는** 가장 흔한 두 경우 — 자격증명이 틀렸다(`28P01`),
+  // 가리키는 데이터베이스가 없다(`3D000`) — 는 소켓이 붙은 뒤 서버가 거절하는 것이라 `ECONNREFUSED`가
+  // 아니라 SQLSTATE로 온다. 그것을 500 `internal_error`로 내보내면 §Data 당직 런북의 갈림길
+  // ("503이면 DB에 못 닿는 것, 500이면 이 배포가 마이그레이션을 빠뜨린 것")이 거짓이 되고,
+  // DSN 오타 한 글자가 당직자에게 "우리 코드의 버그"로 도착한다.
+  // 42P01(테이블 없음)이 계속 500이라는 반대편 절은 dw5(4)가 이미 지킨다 — 여기서는 복사하지 않는다.
+  test("test_2_connection_setup_failures_are_503", async () => {
+    const secret = makeMarker("never-echoed-conn");
+    const note = makeNote({ title: secret, body: `${secret}-body` });
+
+    // 셋 다 "붙지 못했다"이지 "우리 코드가 터졌다"가 아니다.
+    const cases = [
+      { code: "28P01", message: 'password authentication failed for user "notes"' },
+      { code: "28000", message: 'no pg_hba.conf entry for host "10.0.0.7"' },
+      { code: "3D000", message: 'database "notes_prod" does not exist' },
+    ];
+
+    for (const { code, message } of cases) {
+      const app = await startApp({
+        db: failingDb(() => Object.assign(new Error(message), { code, severity: "FATAL" })),
+      });
+      const { status, raw, type } = await postNote(app.url, note);
+
+      expect(status, `${code}: ${raw}`).toBe(503);
+      expect(type, code).toMatch(/application\/json/);
+      const body = JSON.parse(raw);
+      expect(body.error.code, code).toBe(DB_UNAVAILABLE);
+      expect(body.error.code, code).not.toBe(INTERNAL_ERROR);
+      expect(typeof body.error?.message, code).toBe("string");
+      expect(body.error.message.length, code).toBeGreaterThan(0);
+      // 요청 본문도 드라이버가 준 문장(사용자명·호스트·DB 이름이 들어 있다)도 새지 않는다.
+      expect(raw, code).not.toContain(secret);
+      expect(raw, code).not.toContain(message);
+    }
+  });
+
   // 진입점 팩토리가 DATABASE_URL로 만든 실행자를 라우트까지 내려보낸다. 드라이버는 주입한다 —
   // 여기서 관측하는 것은 드라이버 구현이 아니라 **배선**이고, 실제 드라이버 위의 같은 배선은
   // integration의 dw1이 출하 프로세스를 띄워 본다(docs/TECHNICAL.md §Data "연결 설정":

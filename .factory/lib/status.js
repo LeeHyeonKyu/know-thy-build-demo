@@ -52,6 +52,24 @@ export function buildStatus({
   for (const i of issues) {
     if (labelOf(i) === NEEDS_INFO) needsYou.push({ kind: "needs-info", number: i.number, title: i.title, hint: `:clarify ${i.number}` });
   }
+  /**
+   * ADR-020 KTB-30 — factory 라벨은 달고 있는데 **상태 라벨이 하나도 없는** 열린 이슈. 라벨 스왑이
+   * 중간에 실패한 흔적이고(데모 #2 08:52Z·#15 08:55Z), 그 이슈는 상태별 조회 어디에도 안 걸려
+   * 이 화면에서 통째로 사라졌다 — 사람이 "아무 일도 안 일어나는 이슈"를 볼 창구가 필요하다.
+   * sweeper가 대개 먼저 되살리므로 힌트는 사람이 할 일이 아니라 그 사실을 가리킨다.
+   */
+  /**
+   * r2 SF6 — **sweeper 8번 팔과 같은 집합을 본다.** 예전에는 `factory:*` 라벨이 남아 있는 이슈만
+   * 셌는데, 그 팔은 라벨이 **하나도** 없는 이슈도 전이 이력으로 잡는다(`sweeper.js`) — triage가 tier
+   * 라벨을 붙이기 전에 상태 라벨을 잃은 이슈가 정확히 그 모양이다(#2). 사람이 보는 창구가 복구 팔보다
+   * 좁으면, 팔이 고치지 못한 바로 그 이슈가 화면에서도 사라진다. `factoryTransition`은 CLI가 코멘트를
+   * 읽어 세워 주는 플래그다(순수 함수인 이 파일은 gh를 만지지 않는다).
+   */
+  for (const i of issues) {
+    if (labelOf(i) !== null) continue;
+    if (!(i.labels || []).some((l) => String(l).startsWith("factory:")) && i.factoryTransition !== true) continue;
+    needsYou.push({ kind: "no-state-label", number: i.number, title: i.title, hint: "sweeper → label restore" });
+  }
   for (const p of prs.retroProposal || []) {
     needsYou.push({ kind: "retro-proposal", number: p.number, title: p.title, hint: `:proposal ${p.number}` });
   }

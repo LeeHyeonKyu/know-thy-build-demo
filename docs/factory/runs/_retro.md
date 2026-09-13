@@ -16,10 +16,10 @@
 | --- | --- | --- |
 | merged | 0 | 1 |
 | review rounds avg | 0 | 1 |
-| needs-human | 13 | 3 |
+| needs-human | 14 | 3 |
 | rejects by role | 없음 | 없음 |
-| cost (usd) | 372.72 | 81.81 |
-| tokens | input 5937320 / output 722148 | input 50 / output 128059 |
+| cost (usd) | 450.03 | 81.81 |
+| tokens | input 8332938 / output 812482 | input 50 / output 128059 |
 | retro cost (usd) | 0.00 | 0.72 |
 | retro tokens | input 0 / output 0 | input 2 / output 2998 |
 | full retros | — | 1 |
@@ -238,6 +238,38 @@
         "text": "Following CLAUDE.md exactly (npm ci then npx vitest run) on a clean checkout, the three new test files fail immediately at collection time, because .factory/node_modules (smol-toml) is never installed by npm ci. No project doc (CLAUDE.md, docs/QA.md, docs/TECHNICAL.md, docs/PROJECT.md) explains how to populate .factory/node_modules locally -- that install only happens in a separate step of .factory/actions/setup/action.yml (npm install --prefix .factory --no-audit --no-fund), which is not [runtime].setup.",
         "runs": [
           15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "연결 수립 자체가 실패하는 흔한 두 경우 — 잘못된 자격증명(SQLSTATE 28P01)과 존재하지 않는 DB 이름(3D000) — 이 503 db_unavailable이 아니라 500 internal_error로 나간다. 스펙 Key States(docs/features/001-create-note.md:78 'DB 연결 실패 → 503')와 이 diff가 같은 커밋에 쓴 docs/TECHNICAL.md:68('설정이 틀리면 요청 시점에 503으로 드러난다')·:71('503이면 DB에 못 닿는 것이고, 500이면 이 배포가 위 런북을 실행하지 않은 것이다')이 코드와 어긋난다. 당직자는 DSN 오타를 '마이그레이션 미적용'으로 읽는다 — 이 PR이 막겠다고 명시한 바로 그 오진이다.",
+        "runs": [
+          2
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "Re-verified independently this round with fresh commands against the exact commit under review: `git show HEAD:package.json` still shows dependencies = {express only}, `node_modules` still contains no pg, and `git log --oneline HEAD` still does not contain d7f7996 (the human-merged commit that added pg on origin/main) anywhere in its ancestry — confirmed via `git show origin/main:package.json` (has pg ^8.23.0) and `git log --oneline origin/main -5` (shows d7f7996 as a distinct, unabsorbed commit). The branch under review was never rebased onto or merged with the commit that actually landed pg. A clean `npm ci` on this exact commit installs no pg, so `node src/app.js` (the shipped `npm start` path, whose missing-driver fallback this same diff deliberately deletes) crashes at boot with ERR_MODULE_NOT_FOUND, and `test/integration/notes.test.js` (which carries dw1 and dw3) fails to even load. New evidence this round: docs/TECHNICAL.md's own added text now cites a specific artifact as proof the fix was verified — '재현 로그 `.factory/out/qa/2-real-pg-repro-round2.log`' — but `.factory/out/qa/` does not exist in this repo at all (confirmed: `ls .factory/out/qa` → No such file or directory). The diff asserts a repro log exists as evidence that spec1/qa1 are fixed, and that log is not present anywhere in the reviewed tree. This is the same pattern Lens item 5 names for qa artifacts ('파일이 없는데 확인함이라고 적힌 상태는 reject') applied to a doc's own citation of it — an unevidenced claim of verification. I also note, without adopting their lens, that correctness's and architecture's round-1 verified sections report GREEN suites and real-Postgres behavior for this exact commit, which is only possible if their execution environment had a stale `pg` present in `node_modules` from a prior session's manual install (as qa's own must_fix explicitly did for diagnostic purposes and says it reverted) — that would explain the discrepancy without contradicting my fresh, clean re-check of the committed package.json/lock and node_modules state just now.",
+        "runs": [
+          2
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "handoffs.plan.non_goals' final bullet restricts documentation edits to exactly four locations in docs/TECHNICAL.md: ':30, :41/:45, §Interfaces, §Data/§Architecture/§Constraints'. `## Testing Strategy` is not one of the four named locations. Re-running the diff this round confirms roughly 25 lines of new prose were added under that exact heading (six new named subsections plus a materially rewritten `What NOT to Test` paragraph that adds new assertions about error-envelope/code-mapping testing). This is a fifth location, named as out-of-scope by the plan's own non_goals text, still crossed in this commit — unchanged from round 1.",
+        "runs": [
+          2
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "PR head d3a8268 was branched before origin/main's human-merged commit d7f7996 (\"chore(harness): add pg dependency for the notes API\") and was never rebased onto it. As committed, this exact commit's package.json/package-lock.json do NOT list `pg` at all, even though this very issue's shipped entrypoint (src/app.js) and its own integration test import it. A clean install per this project's own [runtime].setup = \"npm ci\" therefore never installs pg, so `npm start` (= `node src/app.js`, exactly the command CLAUDE.md and package.json's `start` script specify) crashes on boot with ERR_MODULE_NOT_FOUND before it ever listens, and the required `unit` gate command (`npx vitest run --reporter=json --outputFile=.factory/out/unit.json`) fails two whole test files. dw1 (`test_2_shipped_entrypoint_persists_note_in_isolated_schema`, level full — the acceptance criterion 'valid request returns 201 with a persisted id') and dw3 (`test_2_created_at_from_injected_clock_and_no_row_on_reject`, level integration) live inside test/integration/notes.test.js, which fails to even load in this state — those two done_when items have not executed successfully even once against this commit.",
+        "runs": [
+          2
         ],
         "source": "must_fix"
       }
@@ -467,6 +499,51 @@
           2
         ],
         "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "[to skeptic] 유휴 pool 오류로 프로세스가 죽지 않는지 확인하는 항목(architect·product-advocate의 dw6/dw7) 자체를 이번 이슈에서 통째로 만들지 말자는 제안은, 이 저장소가 이미 실측으로 확인한 크래시 경로에 대한 유일한 회귀 가드를 없애자는 것과 같다. 이 컨텍스트 자체에 '`pool.on('error')` 등록을 제거하자 `test_2_idle_pool_error_does_not_kill_the_process`가 RED'라는 변이 검증 기록이 있다 — 즉 이 코드 패턴에서 유휴 커넥션의 unhandled `error` 이벤트가 실제로 Node 프로세스를 죽인다는 것은 가설이 아니라 이 저장소에서 이미 관측된 사실이다. docs/TECHNICAL.md:81이 배포를 `npm start` 단일 프로세스로 못박았으므로 그 죽음은 `/notes`뿐 아니라 CHARTER:56의 `/healthz` Preserve까지 함께 지운다. 처음으로 실제 `pg.Pool`을 프로덕션 진입점에 배선하는 바로 이 PR에서 그 회귀 가드를 빼고 후속 이슈로 미루면, 병합 시점부터 후속 이슈가 열릴 때까지 알려진 크래시 벡터가 게이트 커버리지 0인 채로 배포된다. skeptic이 제기한 flake 예산 문제는 정당하지만 해법은 항목 삭제가 아니라 이미 architect·product-advocate가 채택한 결정성 강화(rowCount>=1 선행 단언 + pg_stat_activity 조건 대기)다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "[to product-advocate] dw1은 클라이언트가 받는 503/500 봉투에 원인을 담지 않는 것이 옳다고 정확히 요구했지만(스펙 :78 '요청 본문을 에코하지 않는다'), 세 역할의 어떤 dw5류 항목도 서버 쪽 stdout/stderr에 원인(`err.code`/`err.message`)을 남기라고 요구하지 않는다. 이 저장소에는 확인 가능한 APM·대시보드·알림 채널이 없고(Glob·rg로 확인되지 않음), `src/app.js:5`의 `console.log(\"listening on ...\")` 하나가 유일하게 확인된 출력이다. 새벽 3시 당직자가 `npm start`의 프로세스 출력을 볼 수 있는 유일한 순간에, 503의 원인이 ECONNREFUSED인지 ETIMEDOUT인지 42P01인지를 서버 로그에서 구분할 방법이 이 계획 어디에도 없다 — 클라이언트에게 보내는 `error.code` 문자열을 재사용하는 것은 클라이언트 계약과 운영 진단 채널을 같은 것으로 취급하는 것이라 클라이언트 봉투가 바뀌면 진단 능력도 함께 바뀐다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "product-advocate",
+        "kind": "good",
+        "text": "[to architect] 당신의 7항목 중 어느 것도 '요청이 **끝난다**'를 관측하지 않는다. dw5는 `query`가 **reject할 때만** 분류를 고정하고, pending으로 매달릴 때는 아무 항목도 없다. 그 상태에서 사용자가 보는 것은 503도 스택 트레이스도 아니라 **아무것도 아니고**, 걸린 요청이 쌓이면 docs/TECHNICAL.md:81의 단일 프로세스가 통째로 응답 불가로 넘어간다 — `/healthz`(CHARTER:56)까지 함께. 이것은 스펙이 금지한 '조용히'의 가장 순수한 형태다. dw5 본문에 절 하나(`query`가 영원히 pending이면 응답이 유한 시간 안에 같은 JSON 봉투의 5xx로 끝난다)를 접을 것을 요구한다 — 새 항목·새 파일·새 레벨 없이, DB가 경로에 없으므로 unit 그대로다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "product-advocate",
+        "kind": "good",
+        "text": "[to skeptic] operator op2(응답하지 않는 DB에서 `POST /notes`가 유한 시간 안에 5xx로 끝난다)를 당신의 6항목이 대체하지 않으면서 탈락 사유도 적지 않았다. 당신 자신의 최우선 원칙('integration 표면에서 flake 예산을 한 방울도 낭비하지 않는다')은 이 항목을 배제하지 않는다 — op2는 가짜 `db`의 pending Promise + `listen(0)`이므로 unit이고, docker·자식 프로세스·DDL에 한 번도 닿지 않아 dw1의 격리 예산을 갉아먹지 않는다. 새 파일도 새 의존성도 0이다(test/app.test.js 안).",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "[to architect] 'main은 백지다'는 참이지만 '계획은 백지다'는 거짓이고, 세 역할이 그 구분을 지우고 있다. 이전 계획의 구현은 gates GREEN + verifier `accepted-with-reservations`로 이미 존재하며 review must_fix 둘(spec1·qa1)도 'fixed'로 응답됐다. 그런데 이번 R1 세 입장은 그 계획을 verify id까지 그대로 재유도하면서 절만 늘렸다 — 이것은 새 계획이 아니라 4회차 재심리이고, 비용은 이미 관측된 두 결함을 고치는 시간이다. 제안: 이번 계획을 '이전 done_when + findings 2건을 닫는 형태 수정'으로 좁히고, 이미 4역할 accept로 판정된 항목(handoffs.plan.debate.votes)은 재논의하지 않는다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -488,8 +565,8 @@
       },
       {
         "issue": 15,
-        "reason": "stage artifact missing or invalid: no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | transcript task-notification #1: verdicts must have ≥1 item | result bare JSON: verdicts must have ≥1 item; roster role not completed: correctness; roster role not completed: architecture; roster role not completed: spec-conformance; roster role not completed: qa",
-        "at": "2026-09-13T10:22:35Z"
+        "reason": "blocked (job timed out) — needs human",
+        "at": "2026-09-13T14:27:10Z"
       }
     ]
   },
@@ -497,12 +574,12 @@
     "merged": 0,
     "review_rounds_avg": 0,
     "rejects_by_role": {},
-    "needs_human": 13,
+    "needs_human": 14,
     "usage": {
-      "cost_usd": 372.720262,
+      "cost_usd": 450.031198,
       "tokens": {
-        "input": 5937320,
-        "output": 722148
+        "input": 8332938,
+        "output": 812482
       }
     }
   },

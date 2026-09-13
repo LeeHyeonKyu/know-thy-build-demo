@@ -13,10 +13,11 @@
 // 행이 있는 문장은 서버에서 JSON 한 줄로 접어 받는다 — 클라이언트 쪽 표 파싱이 없다.
 
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { migrate } from "../../../src/repo/schema.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+const MIGRATION_PATH = fileURLToPath(new URL("../../../db/migrations/001_create_notes.sql", import.meta.url));
 const COMPOSE_FILE = fileURLToPath(new URL("../../../docker-compose.test.yml", import.meta.url));
 const MARKER_HEAD = "<<<KTB-END|";
 const MARKER = `\\echo ${MARKER_HEAD}:ERROR|:SQLSTATE|:LAST_ERROR_MESSAGE>>>`;
@@ -148,8 +149,11 @@ class PsqlSession {
   }
 
   async #execute(text, params) {
+    // 판정 입력은 **치환 전** 원문이다(리뷰 cs1). 치환된 문자열로 판정하면 파라미터 **값**에
+    // `returning`이라는 단어가 들어간 INSERT가 json 래핑 CTE로 감싸져 0A000으로 실패하고,
+    // 그 뒤 같은 트랜잭션의 모든 질의가 `current transaction is aborted`로 죽는다.
+    const wantsRows = ROW_RETURNING.test(text) || RETURNING_CLAUSE.test(text);
     const sql = interpolate(text, params);
-    const wantsRows = ROW_RETURNING.test(sql) || RETURNING_CLAUSE.test(sql);
     const lines = await this.#send(wantsRows ? wrapForJson(sql) : sql);
     if (!wantsRows) return { rows: [] };
     const payload = lines.filter((line) => line.length > 0).pop() ?? "[]";
@@ -175,17 +179,34 @@ export async function connect() {
   return session;
 }
 
+// 동시 적용 경쟁에서 "지는 쪽"이 받는 오류들. `CREATE TABLE IF NOT EXISTS`는 원자적이지 않아
+// 두 워커가 같은 순간에 들어오면 한쪽이 아래 형태로 실패한다 — 결과는 이미 원하던 상태(테이블 존재)다.
+// vitest는 파일을 병렬로 돌리므로 이 경쟁은 가정이 아니라 이 스위트의 기본 실행 조건이다.
+const DUPLICATE_TABLE = "42P07";
+const UNIQUE_VIOLATION = "23505";
+const CATALOG_INDEXES = ["pg_type_typname_nsp_index", "pg_class_relname_nsp_index"];
+
+function isConcurrentDuplicate(err) {
+  if (err?.code === DUPLICATE_TABLE) return true;
+  // psql 실행자는 constraint 이름을 따로 주지 않는다 — SQLSTATE + 카탈로그 인덱스 이름으로 판정한다.
+  return err?.code === UNIQUE_VIOLATION && CATALOG_INDEXES.some((name) => String(err.message).includes(name));
+}
+
 /**
- * 스키마를 적용한 세션. **`migrate()`의 유일한 호출자는 이 파일이다** — 부팅 경로에는 붙이지 않는다
- * (docs/TECHNICAL.md §Data, plan non_goals).
+ * 스키마를 적용한 세션. 마이그레이션 SQL은 출하하되(`db/migrations/001_create_notes.sql`)
+ * **적용은 이 헬퍼가 한다** — 제품 호출자가 0인 `migrate()` 모듈을 src/에 두지 않기 위해서다
+ * (plan non_goals, docs/TECHNICAL.md §Data). 동시 적용 경쟁의 패자 오류만 삼키고,
+ * 그 밖의 오류(구문·권한)는 그대로 전파한다 — 전면 catch는 진짜 실패를 조용하게 만든다.
  */
 export async function connectMigrated() {
   const session = await connect();
   try {
-    await migrate(session);
+    await session.query(await readFile(MIGRATION_PATH, "utf8"));
   } catch (err) {
-    await session.close();
-    throw err;
+    if (!isConcurrentDuplicate(err)) {
+      await session.close();
+      throw err;
+    }
   }
   return session;
 }

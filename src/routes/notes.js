@@ -1,7 +1,6 @@
 // 요청 파싱·상태코드. 노트 규칙은 service가, SQL은 repo가 안다(docs/TECHNICAL.md §Architecture).
 import { Router } from "express";
-import { validateNewNote } from "../service/notes.js";
-import { insertNote } from "../repo/notes.js";
+import { createNote } from "../service/notes.js";
 
 // pg의 timestamptz는 Date로 온다. 응답 계약은 ISO-8601 UTC 문자열 하나다.
 function toIsoString(value) {
@@ -13,9 +12,8 @@ export function createNotesRouter({ db, now }) {
 
   router.post("/notes", async (req, res, next) => {
     try {
-      const note = validateNewNote(req.body);
-      // 시각의 출처는 앱이다 — DDL의 default now()가 아니라 주입된 시계가 만든다.
-      const row = await insertNote(db, { ...note, createdAt: now() });
+      // 규칙도 SQL도 아래층이 안다. 이 층이 하는 일은 body를 넘기고 행을 응답 모양으로 바꾸는 것뿐이다.
+      const row = await createNote({ db, now }, req.body);
       res.status(201).json({
         id: row.id,
         title: row.title,

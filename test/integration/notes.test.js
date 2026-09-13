@@ -1,4 +1,4 @@
-// dw1 · dw3 · dw6 — 실제 PostgreSQL 16(docker-compose.test.yml) 위에서 `POST /notes`를 관측한다.
+// dw1 · dw3 — 실제 PostgreSQL 16(docker-compose.test.yml) 위에서 `POST /notes`를 관측한다.
 //
 // 이 파일이 닫는 간극은 세 회차가 게이트 GREEN인 채로 닫지 못한 그것이다: 지금까지 모든 단언은
 // **테스트가 주입한 가짜 실행자**를 보았고, `npm start`(= `node src/app.js`)가 실제로 타는 배선은
@@ -54,9 +54,8 @@ async function reserveLoopbackPort() {
 }
 
 // 출하되는 진입점을 그대로 띄운다 — `package.json`의 start와 playwright webServer가 부르는 바로 그 명령.
-// 테스트가 바꾸는 것은 환경변수뿐이다(PORT · DATABASE_URL · PGOPTIONS · 선택적 PGAPPNAME):
-// 코드 경로는 프로덕션과 같다.
-async function startShippedEntrypoint(extraEnv = {}) {
+// 테스트가 바꾸는 것은 환경변수 셋뿐이다(PORT · DATABASE_URL · PGOPTIONS): 코드 경로는 프로덕션과 같다.
+async function startShippedEntrypoint() {
   const port = await reserveLoopbackPort();
   const child = spawn(process.execPath, [APP_ENTRYPOINT], {
     env: {
@@ -67,7 +66,6 @@ async function startShippedEntrypoint(extraEnv = {}) {
       // PGOPTIONS를 쓴다(node_modules/pg/lib/connection-parameters.js:83) — 구현이 Pool config에
       // `options`를 직접 넣으면 이 격리가 깨지고 dw1 (b)·(c)가 함께 떨어진다.
       PGOPTIONS: `-c search_path=${SCHEMA}`,
-      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -136,8 +134,16 @@ beforeAll(async () => {
 
 afterAll(async () => {
   // 정리는 이 한 줄뿐이다 — `public.notes`도, 다른 실행의 스키마도 건드리지 않는다.
-  if (admin) {
+  if (!admin) return;
+  try {
+    // 이 diff에서 유일하게 되돌릴 수 없는 행위이고, 드롭할 이름이 **런타임에 계산된다**.
+    // 그래서 이름이 이 파일이 만든 형태가 아니면 드롭하지 않고 실패한다 — 변수 하나가 빈 문자열이
+    // 되거나 누군가 SCHEMA의 출처를 바꾸는 날, 조용히 남의 스키마를 지우는 대신 소리를 낸다.
+    // (실측: `unique("test_2")`를 `unique("public_oops")`로 바꾸면 이 줄이 드롭 전에 RED가 되고
+    //  그 스키마는 실제로 남는다 — 가드가 공허하지 않다.)
+    expect(SCHEMA, "테스트 소유 스키마가 아닌 이름은 드롭하지 않는다").toMatch(/^test_2_/);
     await admin.query(`drop schema if exists ${SCHEMA} cascade`);
+  } finally {
     await admin.end();
   }
 });
@@ -194,10 +200,9 @@ describe("issue #2 — POST /notes on real PostgreSQL", () => {
       expect(created.created_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
       expect(Number.isNaN(Date.parse(created.created_at))).toBe(false);
 
-      // (e) 같은 프로세스의 헬스 신호가 살아 있다(CHARTER Preserve).
-      const health = await fetch(`${app.url}/healthz`);
-      expect(health.status).toBe(200);
-      expect(await health.json()).toEqual({ ok: true });
+      // (e) 정리는 `afterAll`의 `drop schema <schema> cascade` 하나뿐이고 `/^test_2_/` 가드가 붙는다.
+      //     `/healthz`는 여기서 다시 단언하지 않는다 — test/smoke.test.js가 출하 진입점 프로세스를
+      //     상대로 required 게이트 안에서 이미 더 강하게 지킨다(001 plan handoff non_goals).
     } finally {
       await app.stop();
     }
@@ -260,65 +265,9 @@ describe("issue #2 — POST /notes on real PostgreSQL", () => {
     }
   }, BOOT_TIMEOUT_MS);
 
-  // dw6: 유휴 커넥션이 서버에서 강제 종료돼도 출하 프로세스가 죽지 않는다.
-  // node-postgres의 Pool은 idle client가 죽으면 자기 자신에게 'error'를 emit하고, 리스너가 없는
-  // EventEmitter의 'error'는 Node가 throw해 프로세스를 죽인다 — 그러면 DB 블립 한 번이
-  // `/healthz`(CHARTER Preserve)까지 프로덕션에서 지운다.
-  test("test_2_idle_pool_error_does_not_kill_the_process", async () => {
-    const appName = unique("dw6_app");
-    // 케이스 간에 자식을 공유하지 않는다(순서 의존 금지, docs/QA.md "Order randomization").
-    const app = await startShippedEntrypoint({ PGAPPNAME: appName });
-    try {
-      // 요청 한 번으로 pool이 실제 커넥션을 연다.
-      const first = await postNote(app.url, makeNote({ title: unique("dw6_first") }));
-      expect(first.status, `${first.raw}\n${app.stderr}`).toBe(201);
-
-      const backends = () =>
-        admin.query("select pid from pg_stat_activity where application_name = $1", [appName]);
-
-      // (1) 무엇인가를 실제로 종료했다. 이 단언이 없으면 — 구현이 Pool config나 DSN에
-      //     application_name을 직접 넣어 WHERE가 0행을 잡으면 — 뒤따르는 생존 단언이
-      //     `pool.on("error")` 없이도 영원히 초록이다.
-      const killed = await admin.query(
-        "select pg_terminate_backend(pid) from pg_stat_activity where application_name = $1",
-        [appName],
-      );
-      expect(killed.rowCount, "앱의 백엔드를 하나도 찾지 못했다 — 이 케이스는 공허하다").toBeGreaterThanOrEqual(1);
-
-      // (2) 백엔드가 실제로 사라질 때까지 **조건 대기**한다. pg_terminate_backend는 신호만 보내고
-      //     즉시 반환하므로, 이 대기가 없으면 FATAL이 앱의 이벤트 루프에 닿기도 전에 단언이 끝나
-      //     크래시하는 구현이 통과한다.
-      await vi.waitFor(
-        async () => {
-          const remaining = await backends();
-          if (remaining.rowCount !== 0) {
-            throw new Error(`backend for ${appName} still alive: ${remaining.rowCount}`);
-          }
-        },
-        { timeout: 20000, interval: 50 },
-      );
-
-      // (3) pool을 반드시 통과하는 요청 하나. 복구(201)를 요구하지는 않지만 — 그것은 드라이버
-      //     내부 의미론이다 — 프로세스가 죽은 구현은 여기서 fetch 자체가 ECONNREFUSED로 throw한다.
-      const after = await postNote(app.url, makeNote({ title: unique("dw6_after") }));
-      expect([201, 503], `${after.status}: ${after.raw}`).toContain(after.status);
-      expect(after.type).toMatch(/application\/json/);
-      const body = JSON.parse(after.raw);
-      if (after.status === 503) {
-        expect(typeof body.error?.code).toBe("string");
-        expect(typeof body.error?.message).toBe("string");
-      } else {
-        expect(Object.keys(body).sort()).toEqual(["body", "created_at", "id", "title"]);
-      }
-
-      // (4) 프로세스가 살아 있고 헬스 신호가 그대로다.
-      expect(app.child.exitCode, `stderr: ${app.stderr}`).toBeNull();
-      expect(app.child.signalCode).toBeNull();
-      const health = await fetch(`${app.url}/healthz`);
-      expect(health.status).toBe(200);
-      expect(await health.json()).toEqual({ ok: true });
-    } finally {
-      await app.stop();
-    }
-  }, BOOT_TIMEOUT_MS + 30000);
+  // (이 파일에 없는 것) 유휴 커넥션이 서버에서 강제 종료된 뒤에도 출하 프로세스가 사는지를
+  // 관측하는 케이스는 **이번 이슈가 만들지 않는다**(001 plan handoff non_goals, dissent_log에
+  // operator의 반대가 원문으로 남아 있다). `src/app.js`는 계속 `pool.on("error")`를 등록하지만,
+  // 그 사실을 지키는 게이트는 없다 — 잃는 사용자 사실은 §Constraints 한 줄과 open_risks에 있다:
+  // 유휴 커넥션 오류 한 번이 `npm start` 단일 프로세스를 죽여 `/notes`와 `/healthz`를 함께 지울 수 있다.
 });

@@ -18,8 +18,8 @@
 | review rounds avg | 0 | 1 |
 | needs-human | 7 | 3 |
 | rejects by role | 없음 | 없음 |
-| cost (usd) | 246.14 | 81.81 |
-| tokens | input 3637805 / output 481342 | input 50 / output 128059 |
+| cost (usd) | 254.59 | 81.81 |
+| tokens | input 3863949 / output 497909 | input 50 / output 128059 |
 | retro cost (usd) | 0.00 | 0.72 |
 | retro tokens | input 0 / output 0 | input 2 / output 2998 |
 | full retros | — | 1 |
@@ -188,6 +188,22 @@
       {
         "role": "qa",
         "text": "I independently reproduced this as a live user-facing failure of the issue's core promise, not just a static code-reading concern: I built a real git worktree at the reviewed commit (e9e2c04), injected exactly one false backtick claim into the shipped README.md's Layout table (`| \\`Makefile\\` | 편의 명령 모음 |`, a file that does not exist anywhere in the repo), changed nothing else, ran `npm ci` + `npx vitest run test/readme.test.js` in that worktree, and all 5 tests — including test_18_readme_references_resolve, the one whose job is exactly 'every backtick repo-relative path resolves on disk' — stayed green. The guard's own source comments (lines 161-164) admit this is deliberate: bare, separator-less, extension-less single-word tokens (`Makefile`, `LICENSE`) are structurally never added to the `claims` set, so a README that lies about such a file is indistinguishable from one that doesn't mention it. This directly contradicts the done_when dw2(c) text as given to me in context.json: '(c) README 전체의 백틱 저장소 상대경로 토큰과 상대 마크다운 링크 대상이 모두 fs에 존재한다(면제 키워드 없음)' — 'Makefile' is a syntactically valid repo-relative path token; excluding it by token *shape* rather than by a named keyword list still leaves an entire class of false claims silently unverified, which is the exact failure mode this done_when exists to close (and the same failure mode round-1 already forced two rounds of rework on: whitelist-by-prefix, then whitelist-by-extension, now shape-based).",
+        "runs": [
+          18
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The 'bidirectional' status tripwire only sees `app.<method>(\"...\"` literals, so it is unsound for the router/mount style the repo's own architecture prescribes: a README that keeps lying stays GREEN, and the honest fix (flipping `planned` -> `implemented`) is the RED path. The test's header comment (lines 8-11) declares exactly this failure mode as the thing it avoids.",
+        "runs": [
+          18
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "엔드포인트 상태 판정이 `app.<method>(\"<전체 경로>\")`라는 등록 구문 한 형태에 묶여 있다. TECHNICAL.md §Architecture가 001~003에 대해 처방한 routes 층(`src/routes/notes.js` + Router 마운트)으로 구현하면 라우트가 실제로 201을 응답하는데도 가드는 미등록으로 읽는다 — README의 거짓 `planned`이 GREEN이고 정직한 `implemented`가 RED가 된다. 다음 PR의 유일한 GREEN 경로가 거짓 문서다.",
         "runs": [
           18
         ],
@@ -388,10 +404,10 @@
     "rejects_by_role": {},
     "needs_human": 7,
     "usage": {
-      "cost_usd": 246.137392,
+      "cost_usd": 254.588656,
       "tokens": {
-        "input": 3637805,
-        "output": 481342
+        "input": 3863949,
+        "output": 497909
       }
     }
   },

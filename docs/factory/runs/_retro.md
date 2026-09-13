@@ -16,10 +16,10 @@
 | --- | --- | --- |
 | merged | 0 | 1 |
 | review rounds avg | 0 | 1 |
-| needs-human | 7 | 3 |
+| needs-human | 9 | 3 |
 | rejects by role | 없음 | 없음 |
-| cost (usd) | 254.59 | 81.81 |
-| tokens | input 3863949 / output 497909 | input 50 / output 128059 |
+| cost (usd) | 276.97 | 81.81 |
+| tokens | input 4294250 / output 537100 | input 50 / output 128059 |
 | retro cost (usd) | 0.00 | 0.72 |
 | retro tokens | input 0 / output 0 | input 2 / output 2998 |
 | full retros | — | 1 |
@@ -372,14 +372,50 @@
           2
         ],
         "source": "dissent"
+      },
+      {
+        "role": "product-advocate",
+        "kind": "good",
+        "text": "[to architect] dw6(b)('`src/routes/notes.js`가 `src/repo/**`를 import하지 않는다')와 dw6(c)('`src/**`에 `child_process`·`docker`·`psql` 문자열이 없다')는 구현을 서술하는 조건이다 — 둘 다 참인데도 사용자가 여전히 노트를 저장하지 못하는 상태가 가능하다. 그 자리에 예산을 쓰면서, 사용자가 서비스 전체를 잃는 경로(유휴 커넥션 오류로 프로세스 사망)를 또 코드 리뷰로 넘기는 거래는 사용자 관점에서 정확히 뒤집혀 있다. 경계 단언은 open_risks나 리뷰 체크로 내리고, skeptic dw5/operator op2를 그 자리에 넣어야 한다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "product-advocate",
+        "kind": "good",
+        "text": "[to skeptic] dw5가 관측하는 것이 '자식 프로세스가 살아 있다 + `/healthz` 200'뿐이라, 이 조건이 참인데도 Mina는 이후 모든 `POST /notes`가 실패하는 서비스를 볼 수 있다. Story 1의 관측점은 헬스 신호가 아니라 저장이다 — 최소한 커넥션 강제 종료 직후의 유효한 `POST /notes`가 201이라는 절을 같은 케이스에 붙여야 한다(operator op2가 그 형태를 이미 적었다).",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "architect",
+        "kind": "good",
+        "text": "[to skeptic] '제품 코드가 셸로 DB에 접근하지 않는다'(`src/**/*.js`에 `child_process`·`docker`·`psql` 문자열 없음)를 항목에서 완전히 지우면, psql 서브프로세스로 INSERT하는 구현이 skeptic의 5개 조건을 **전부** 통과한다. 새 done_when 없이 dw2가 사는 `test/app.test.js` 안의 단언 한 줄로 접어야 한다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "[to architect] risks에서 'DATABASE_URL이 저장소 전체에 0건'이라고 정확히 진단하고도, 이를 닫는 done_when이 없다 — dw7(app factory·레이어 경계)에도 이 값 부재 시의 신호를 요구하는 조항이 없다. 이 값은 boot을 실패시키지 않고도(즉 `test/smoke.test.js`를 깨지 않고도) stderr 경고 한 줄로 조용한 기본값을 시끄럽게 바꿀 수 있는 값싼 조치인데, dw7의 정적 판정(child_process/docker/psql 문자열 부재)에는 이 조항이 들어갈 자리가 있었음에도 비어 있다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
     "needs_human": [
       {
         "issue": 2,
-        "reason": "verifier rejected",
-        "at": "2026-09-13T05:00:16Z"
+        "reason": "blocked (environment/credentials) — needs human",
+        "at": "2026-09-13T05:44:58Z"
       },
       {
         "issue": 14,
@@ -388,8 +424,8 @@
       },
       {
         "issue": 18,
-        "reason": "stage artifact missing or invalid: claude -p reported is_error; no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | no JSON object in result",
-        "at": "2026-09-12T20:19:29Z"
+        "reason": "blocked (environment/credentials) — needs human",
+        "at": "2026-09-13T05:43:35Z"
       },
       {
         "issue": 15,
@@ -402,12 +438,12 @@
     "merged": 0,
     "review_rounds_avg": 0,
     "rejects_by_role": {},
-    "needs_human": 7,
+    "needs_human": 9,
     "usage": {
-      "cost_usd": 254.588656,
+      "cost_usd": 276.974092,
       "tokens": {
-        "input": 3863949,
-        "output": 497909
+        "input": 4294250,
+        "output": 537100
       }
     }
   },

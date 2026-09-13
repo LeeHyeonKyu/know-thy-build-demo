@@ -220,7 +220,13 @@ describe("issue #2 — app factory HTTP surface", () => {
 
 import { createServer } from "node:net";
 import { EventEmitter } from "node:events";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { createAppFromEnv, createDbFromEnv } from "../src/app.js";
+
+const SRC_DIR = fileURLToPath(new URL("../src", import.meta.url));
+// 제품 코드가 셸을 통해 DB에 닿는 모든 형태의 이름. 문자열로 찾는다 — 주석에 적혀 있어도 걸린다.
+const SHELL_TOKENS = ["child_process", "docker", "psql"];
 
 // createApp()이 아니라 진입점이 쓰는 팩토리로 앱을 띄운다(위 startApp과 달리 이미 만들어진 app을 받는다).
 async function listenOn(app) {
@@ -386,6 +392,68 @@ describe("issue #2 — the shipped entrypoint (`node src/app.js`)", () => {
     expect(() => pools[0].emit("error", idleFailure)).not.toThrow();
     expect(pools[0].listenerCount("error")).toBeGreaterThan(0);
   });
+
+  // dw7: 제품 코드의 정적 사실 두 가지 + import가 포트를 잡지 않는다는 사실.
+  // DB도 docker도 필요 없다 — 1초에 판정된다.
+  //
+  // 진입점 가드의 나머지 세 계약(PORT 존중 · stdout `listening on <port>` · DATABASE_URL 없이 기동)은
+  // test/smoke.test.js:33-72가 required 게이트 안에서 이미 실제 spawn으로 강제한다. 여기서 네 번째
+  // spawn 사본을 만들지 않는다 — 새 계약을 만드는 것이 아니라 깨지 않는 것만 요구하기 때문이다.
+  test("test_2_app_factory_binds_no_port_and_no_shell_in_src", async () => {
+    // (a) 모듈을 import하기만 한 프로세스는 스스로 끝난다. 자식에게 PORT=0을 주는 이유:
+    //     최상단 listen이 남아 있으면 임의 포트에 **반드시 성공**해서 프로세스가 살아남는다.
+    //     고정 포트였다면 그 포트가 이미 쓰이는 날 EADDRINUSE로 죽어 회귀가 조용히 통과한다.
+    const child = spawn(
+      process.execPath,
+      ["--input-type=module", "-e", 'const m = await import(process.env.APP_MODULE_PATH);\nif (typeof m.createApp !== "function") process.exit(3);\n'],
+      { env: { ...process.env, APP_MODULE_PATH: APP_MODULE, PORT: "0" }, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    try {
+      await vi.waitFor(
+        () => {
+          if (child.exitCode === null && child.signalCode === null) {
+            throw new Error("importing src/app.js kept the process alive — a listener was bound at import time");
+          }
+        },
+        { timeout: 15000, interval: 20 },
+      );
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit");
+        child.kill();
+        await exited;
+      }
+    }
+    expect(child.exitCode).toBe(0); // 3이면 createApp export가 없다
+    expect(stdout).not.toContain("listening on");
+
+    // (b) 제품 코드는 셸로 DB에 닿지 않는다. `docker compose exec … psql`을 실행자로 삼아 201을
+    //     만드는 가장 게으른 구현이 여기서 떨어지고, 사용자의 운영 배포가 docker 소켓에 묶이지 않는다
+    //     (docs/TECHNICAL.md §Architecture — repo의 Depends On은 pg pool이지 셸이 아니다).
+    const sources = (await readdir(SRC_DIR, { recursive: true })).filter((name) => name.endsWith(".js")).sort();
+    expect(sources.length, "src/**/*.js가 하나도 안 잡히면 이 단언은 공허하다").toBeGreaterThan(0);
+    const offenders = [];
+    for (const relative of sources) {
+      const text = await readFile(join(SRC_DIR, relative), "utf8");
+      for (const token of SHELL_TOKENS) {
+        if (text.includes(token)) offenders.push(`src/${relative.replaceAll("\\", "/")} → ${token}`);
+      }
+    }
+    expect(offenders, "제품 코드가 셸·docker·psql로 DB에 접근한다").toEqual([]);
+
+    // (c) 각 층은 아래층만 안다(docs/TECHNICAL.md §Architecture). routes가 repo를 직접 부르면
+    //     service가 비켜서 있는 경로가 생기고, 002·003의 정렬·검색어 정규화가 어디 사는지를
+    //     동전 던지기로 정하게 된다. 파일을 읽어 판정한다 — 호출 구조를 mock으로 베끼지 않는다.
+    const routes = await readFile(join(SRC_DIR, "routes", "notes.js"), "utf8");
+    const repoImports = [...routes.matchAll(/from\s+["']([^"']+)["']/g)]
+      .map(([, specifier]) => specifier)
+      .filter((specifier) => specifier.includes("/repo/"));
+    expect(repoImports, "routes는 아래층 service만 안다").toEqual([]);
+    expect(routes).toMatch(/from\s+["']\.\.\/service\/notes\.js["']/);
+  }, 30000);
 
   // cf1 · qa1: 관측점을 프로세스 밖으로 옮긴다. `npm start`가 부르는 바로 그 명령을 그대로 띄우고
   // HTTP 응답만 본다 — db를 인자 없이 부르는 진입점은 여기서 500 internal_error로 떨어진다.

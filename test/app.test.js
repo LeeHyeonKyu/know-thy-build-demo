@@ -77,6 +77,19 @@ describe("issue #2 — app factory HTTP surface", () => {
 
     const cases = [
       {
+        // dw5 (a): JSON으로 파싱되지 않는 body는 **정확히** 400이다(4xx 아무거나가 아니다,
+        // docs/features/001-create-note.md:63). 이 절은 dw5의 verify id를 가진 이 테스트 안에
+        // 있어야 한다 — 다른 이름의 테스트에 있으면 done_when ↔ verify의 1:1이 어긋나고,
+        // 이 테스트만 되돌려 보는 사람은 "정확히 400"이 어디서 지켜지는지 알 수 없다(리뷰 지적).
+        name: "body that is not JSON at all",
+        init: {
+          headers: { "content-type": "application/json" },
+          // 마커를 본문에 실어 보낸다: 에코 금지 단언이 이 케이스에서 실제 판별력을 갖는다.
+          body: `{"title": "${marker}`, // 닫히지 않았다
+        },
+        status: 400,
+      },
+      {
         name: "charset the parser does not support",
         init: { headers: { "content-type": "application/json; charset=iso-8859-1" }, body: payload },
         // express 기본 핸들러였다면 415였다 — 이 앱이 그보다 나쁜 상태코드를 내지 않는다.
@@ -127,6 +140,20 @@ describe("issue #2 — app factory HTTP surface", () => {
       return { status: res.status, raw: await res.text(), type: res.headers.get("content-type") };
     };
 
+    // dw6 (c): **그 상태의 같은 서버**에서 /healthz가 200 {ok:true}를 유지한다.
+    // db를 아예 주지 않은 다른 앱의 /healthz는 이 절을 증명하지 못한다 — 부분 장애가 전면
+    // 장애가 되지 않는다는 사실은 "DB가 실패하고 있는 그 프로세스"에서만 관측된다
+    // (docs/factory/CHARTER.md:56 Preserve, 컴포즈 healthcheck·playwright ready 신호).
+    const healthzSurvives = async (app, label) => {
+      const res = await fetch(`${app.url}/healthz`);
+      const raw = await res.text();
+      expect(res.status, `${label}: ${raw}`).toBe(200);
+      expect(res.headers.get("content-type"), label).toMatch(/application\/json/);
+      expect(JSON.parse(raw), label).toEqual({ ok: true });
+      // #8의 계약도 DB 장애 중에 흔들리지 않는다.
+      expect(res.headers.get("cache-control"), label).toBe("no-store");
+    };
+
     // (1) 연결류 오류는 코드 하나가 아니라 집합이다.
     for (const code of ["ECONNREFUSED", "ETIMEDOUT"]) {
       const app = await startApp({ db: failingDb(() => pgError(code)) });
@@ -139,6 +166,9 @@ describe("issue #2 — app factory HTTP surface", () => {
       expect(typeof body.error?.message, code).toBe("string");
       // 요청 본문은 에코하지 않는다(docs/features/001-create-note.md:78).
       expect(raw, code).not.toContain(secret);
+
+      // /notes가 503을 답한 바로 그 서버가 여전히 건강하다고 말한다.
+      await healthzSurvives(app, `${code} — healthz on the same server`);
     }
 
     // (2) 평범한 TypeError는 DB 장애가 아니다 — 전면 catch→503 구현은 여기서 떨어진다.
@@ -155,6 +185,9 @@ describe("issue #2 — app factory HTTP surface", () => {
     expect(typeof body.error?.message).toBe("string");
     expect(raw).not.toContain(secret);
     expect(raw).not.toContain("rows is not iterable"); // 내부 메시지도 새지 않는다
+
+    // 500을 답한 서버도 헬스 신호를 잃지 않는다 — 에러 핸들러가 앱 전체를 무너뜨리지 않는다.
+    await healthzSurvives(buggy, "TypeError — healthz on the same server");
   });
 
   // dw7: import는 포트를 잡지 않고, DB 없이도 /healthz Preserve 계약이 산다(CHARTER:56, #8).
@@ -218,7 +251,6 @@ describe("issue #2 — app factory HTTP surface", () => {
 // db가 undefined라 500 internal_error로 끝났다. 아래 두 케이스가 그 경로를 게이트 안으로 끌어온다.
 // ---------------------------------------------------------------------------------------
 
-import { createServer } from "node:net";
 import { EventEmitter } from "node:events";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -251,17 +283,6 @@ async function postNote(url, note) {
   });
   const raw = await res.text();
   return { status: res.status, raw, type: res.headers.get("content-type") };
-}
-
-// 127.0.0.1의 빈 포트를 확보한다. 고정 포트는 금지다 — new-test-repeat이 이 파일을 전체 스위트와
-// 동시에 돌리므로 진입점 자식 프로세스가 한 번에 둘 이상 살아 있을 수 있다.
-async function reserveLoopbackPort() {
-  const probe = createServer();
-  probe.listen(0, "127.0.0.1");
-  await once(probe, "listening");
-  const { port } = probe.address();
-  await new Promise((resolve, reject) => probe.close((err) => (err ? reject(err) : resolve())));
-  return port;
 }
 
 describe("issue #2 — the shipped entrypoint (`node src/app.js`)", () => {
@@ -427,67 +448,13 @@ describe("issue #2 — the shipped entrypoint (`node src/app.js`)", () => {
     expect(routes).toMatch(/from\s+["']\.\.\/service\/notes\.js["']/);
   }, 30000);
 
-  // cf1 · qa1: 관측점을 프로세스 밖으로 옮긴다. `npm start`가 부르는 바로 그 명령을 그대로 띄우고
-  // HTTP 응답만 본다 — db를 인자 없이 부르는 진입점은 여기서 500 internal_error로 떨어진다.
-  test("test_2_started_process_serves_notes_with_db_wired", async () => {
-    const marker = makeMarker("started-process");
-    const port = await reserveLoopbackPort();
-    const child = spawn(process.execPath, [APP_MODULE], {
-      // 도달할 수 없는 DSN을 명시한다(크리덴셜 없음). 드라이버가 있든 없든 결과는 하나다:
-      // 요청 시점에 "DB에 닿지 못했다"가 503으로 도착한다. 실제 DB에 붙지 않으므로 결정적이다.
-      env: { ...process.env, PORT: String(port), DATABASE_URL: "postgres://127.0.0.1:1/ktb_unreachable" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-
-    const dead = () => child.exitCode !== null || child.signalCode !== null;
-    const stop = async () => {
-      if (dead()) return;
-      const exited = once(child, "exit");
-      child.kill();
-      await exited;
-    };
-
-    try {
-      // 조건 대기만 한다(docs/QA.md: No sleep).
-      await vi.waitFor(
-        () => {
-          if (dead()) throw new Error(`entrypoint stopped before listening: ${stderr}${stdout}`);
-          if (!stdout.includes(`listening on ${port}`)) {
-            throw new Error(`entrypoint has not bound ${port} yet: ${JSON.stringify(stdout)}`);
-          }
-        },
-        { timeout: 20000, interval: 20 },
-      );
-
-      const url = `http://127.0.0.1:${port}`;
-
-      // (1) DB가 없어도 헬스는 산다(CHARTER Preserve).
-      const health = await fetch(`${url}/healthz`);
-      expect(health.status).toBe(200);
-      expect(await health.json()).toEqual({ ok: true });
-
-      // (2) 출하되는 경로의 POST /notes는 "DB에 닿지 못했다"를 말한다 — 프로그래밍 오류(500)가 아니다.
-      const { status, raw, type } = await postNote(url, makeNote({ title: marker, body: `${marker}-body` }));
-      expect(status, raw).toBe(503);
-      expect(type).toMatch(/application\/json/);
-      const envelope = JSON.parse(raw);
-      expect(envelope.error?.code).not.toBe("internal_error");
-      expect(typeof envelope.error?.message).toBe("string");
-      expect(raw).not.toContain(marker);
-
-      // (3) 같은 프로세스에서 검증 경로도 계약대로다.
-      const invalid = await postNote(url, { title: "   ", body: `${marker}-body` });
-      expect(invalid.status).toBe(400);
-      expect(JSON.parse(invalid.raw).error.code).toBe("invalid_request");
-      expect(JSON.parse(invalid.raw).error.message).toContain("title");
-    } finally {
-      await stop();
-    }
-  }, 40000);
+  // (제거됨) `test_2_started_process_serves_notes_with_db_wired` — 진입점을 스폰해 503을 단언하던
+  // 케이스다. 판별력이 0이었다: `pg`가 이 저장소에 없으므로 DSN이 무엇이든 `createDbFromEnv`의
+  // 동적 import가 실패해 fallback 실행자를 타고, 주석이 주장한 "도달할 수 없는 DSN"은 한 번도
+  // dial되지 않았다(src/app.js `createDbFromEnv`의 catch). 제품 코드의 DSN 처리를 통째로 지워도
+  // 초록이었고, 그래서 plan handoff non_goals가 이름으로 금지한 "드라이버 부재 → 503이 정상"을
+  // 형태만 바꿔 게이트에 고정하고 있었다(verifier 지적, tests_are_load_bearing=true).
+  // 이 관측은 dw1(`test_2_shipped_entrypoint_persists_note_with_real_driver`)로만 가능하고,
+  // dw1은 `pg`가 dependencies에 있어야 작성 가능하다 — PR 본문 "Harness change needed" 참조.
+  // 진입점이 기동하고 리스닝한다는 사실은 test/smoke.test.js:33-72가 계속 지킨다.
 });

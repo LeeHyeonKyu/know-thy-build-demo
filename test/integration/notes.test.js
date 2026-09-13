@@ -2,8 +2,8 @@
 //
 // 이 파일이 닫는 간극은 세 회차가 게이트 GREEN인 채로 닫지 못한 그것이다: 지금까지 모든 단언은
 // **테스트가 주입한 가짜 실행자**를 보았고, `npm start`(= `node src/app.js`)가 실제로 타는 배선은
-// 한 번도 실제 드라이버·실제 DB 앞에 서지 않았다(review must_fix spec1·qa1, 재현 로그
-// `.factory/out/qa/2-real-pg-repro-round2.log`: 503 db_unavailable, count(*) = 0).
+// 한 번도 실제 드라이버·실제 DB 앞에 서지 않았다(#2 review의 must_fix spec1·qa1 — 두 리뷰어가
+// 실제 Postgres 앞에서 503 db_unavailable과 `count(*) = 0`을 독립으로 재현했다).
 // `pg`는 사람이 머지했다(커밋 d7f7996) — 따라서 이 파일에는 "드라이버가 없으면"이라는 조건절이 없다.
 //
 // 격리: 케이스들은 **테스트가 만든 자기 소유 스키마**(`test_2_<pid>_<rand>`) 안에서만 돈다.

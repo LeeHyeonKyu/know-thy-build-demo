@@ -177,15 +177,23 @@ describe("issue #18 — README는 저장소에 대해 참인 말만 한다", () 
       expect(scriptNames, `README가 존재하지 않는 npm 스크립트 '${name}'를 안내한다`).toContain(name);
     }
 
-    // (c) 백틱 저장소 상대경로 토큰 + 상대 마크다운 링크 대상이 전부 fs에 존재한다.
+    // (c) 저장소 상대경로 토큰과 상대 마크다운 링크 대상이 전부 fs에 존재한다.
+    //     수집 대상은 (1) 인라인 백틱 스팬 **전체**(그래서 `npm start` 같은 명령 스팬은 경로가 아니다)와
+    //     (2) 코드펜스 안 명령의 공백 구분 단어다 — 기여자가 실제로 복붙하는 첫 명령이 펜스 안에 있으므로
+    //     펜스를 빼면 `npm start`를 존재하지 않는 `node src/server.js`로 바꿔도 게이트가 침묵한다.
     //     글로브(`*` 포함)는 경로 주장이 아니라 패턴이므로 대상에서 제외한다.
     const referenced = new Set();
-    for (const [, span] of readme.matchAll(/`([^`\n]+)`/g)) {
-      const token = span.trim();
-      if (token.includes("*")) continue;
+    const addIfPathClaim = (raw) => {
+      const token = raw.trim().replace(/^['"(<]+|['".,;:)>]+$/g, "");
+      if (!token || token.includes("*")) return;
       if (/^(src|test|docs|e2e)\/\S*$/.test(token) || /^[A-Za-z0-9_.-]+\.(ya?ml|json|md|js)$/.test(token)) {
         referenced.add(token);
       }
+    };
+    for (const [, span] of readme.matchAll(/`([^`\n]+)`/g)) addIfPathClaim(span);
+    for (const { line, inFence } of annotatedLines(readme)) {
+      if (!inFence || /^\s*```/.test(line)) continue;
+      for (const word of line.split(/\s+/)) addIfPathClaim(word);
     }
     for (const [, target] of readme.matchAll(/\[[^\]\n]*\]\(([^)\s]+)\)/g)) {
       if (/^([a-z]+:|#|\/\/)/i.test(target)) continue; // 외부 URL·앵커는 fs 대조 대상이 아니다

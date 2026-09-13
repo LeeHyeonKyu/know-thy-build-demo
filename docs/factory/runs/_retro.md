@@ -16,10 +16,10 @@
 | --- | --- | --- |
 | merged | 0 | 1 |
 | review rounds avg | 0 | 1 |
-| needs-human | 6 | 3 |
+| needs-human | 7 | 3 |
 | rejects by role | 없음 | 없음 |
-| cost (usd) | 151.48 | 81.81 |
-| tokens | input 2303315 / output 284807 | input 50 / output 128059 |
+| cost (usd) | 246.14 | 81.81 |
+| tokens | input 3637805 / output 481342 | input 50 / output 128059 |
 | retro cost (usd) | 0.00 | 0.72 |
 | retro tokens | input 0 / output 0 | input 2 / output 2998 |
 | full retros | — | 1 |
@@ -168,6 +168,30 @@
           2
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "done_when dw2(c)는 'README 전체의 백틱 저장소 상대경로 토큰과 상대 마크다운 링크 대상이 모두 fs에 존재한다(면제 키워드 없음)'을 요구하지만, 구현은 백틱 토큰에 한해 하드코딩된 접두사/확장자 화이트리스트로 대상을 좁혀 놓아 그 범위 밖의 진짜 저장소-상대경로 토큰은 조용히 검사 대상에서 빠진다 — '면제 키워드 없음'이라는 문구와 어긋나는 구조적 면제다.",
+        "runs": [
+          18
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw2(c) requires that ALL backtick repo-relative path tokens in the README resolve on disk, 'exemption-keyword-free' (모두 fs에 존재한다, 면제 키워드 없음). The rework (commit e9e2c04) removed the prior hardcoded prefix/extension whitelist (spec1 from round 2) and replaced it with a shape rule — a bare token is only treated as a path claim if it contains a '/' separator or a file extension. This closes the specific whitelist gaps previously found (scripts/build.sh, config/nginx.conf, .github/workflows/ci.yml now resolve), but it re-introduces the same class of defect for a different, undisclosed-to-the-plan subset: bare, extensionless, single-word repo-relative filenames (e.g. `Makefile`, `LICENSE`) are still structurally excluded from the check by design, not by accident. This is admitted in the code's own comments (lines 161-164: '남는 틈은 하나이며 목록이 아니라 형태의 모호성이다... 그것까지 경로 주장으로 보면... 수집하지 않는다 — open risk로 PR 본문에 적는다') and in the rework_response ('남는 틈(확장자·구분자 없는 한 단어 Makefile/LICENSE)은... 화이트리스트가 아니라 산문 어휘와의 형태 모호성이며... open risk로 명시했다'). The new test that is supposed to measure dw2(c) exhaustively (test_18_readme_path_claims_exhaustive) deliberately does not assert on any bare extensionless token — its positive list (lines 276-289) contains only tokens with a separator or extension (Dockerfile.dev, scripts/build.sh, config/nginx.conf, .github/workflows/ci.yml, .env.example, docs/features/001-create-note.md, tools/seed.js, fixtures/seed.sql). A test whose name promises to measure exhaustiveness but whose assertions skip exactly the class of token known to defeat it does not verify what dw2(c)'s text says.",
+        "runs": [
+          18
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "I independently reproduced this as a live user-facing failure of the issue's core promise, not just a static code-reading concern: I built a real git worktree at the reviewed commit (e9e2c04), injected exactly one false backtick claim into the shipped README.md's Layout table (`| \\`Makefile\\` | 편의 명령 모음 |`, a file that does not exist anywhere in the repo), changed nothing else, ran `npm ci` + `npx vitest run test/readme.test.js` in that worktree, and all 5 tests — including test_18_readme_references_resolve, the one whose job is exactly 'every backtick repo-relative path resolves on disk' — stayed green. The guard's own source comments (lines 161-164) admit this is deliberate: bare, separator-less, extension-less single-word tokens (`Makefile`, `LICENSE`) are structurally never added to the `claims` set, so a README that lies about such a file is indistinguishable from one that doesn't mention it. This directly contradicts the done_when dw2(c) text as given to me in context.json: '(c) README 전체의 백틱 저장소 상대경로 토큰과 상대 마크다운 링크 대상이 모두 fs에 존재한다(면제 키워드 없음)' — 'Makefile' is a syntactically valid repo-relative path token; excluding it by token *shape* rather than by a named keyword list still leaves an entire class of false claims silently unverified, which is the exact failure mode this done_when exists to close (and the same failure mode round-1 already forced two rounds of rework on: whitelist-by-prefix, then whitelist-by-extension, now shape-based).",
+        "runs": [
+          18
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -296,14 +320,50 @@
           15
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "[to architect] architect의 dw1(진입점 spawn + 별도 psql 조회 + 커밋된 행 + 자기 마커만 DELETE)은 이 계획에서 유일하게 docs/QA.md:19의 두 절을 동시에 어기는 항목이고, 'dw1만의 예외'가 아니다. 하네스가 같은 테스트 두 벌을 동시에 돌린다 — 고정 마커 리터럴이면 '정확히 1건'이 거짓이 되고, POST와 정리 DELETE 사이에 커밋된 행은 다른 워커의 커넥션에 그대로 보인다. (근거: docs/QA.md:19, .factory/lib/prove-test.js:38, .factory/harness.toml:47 new_test_repeats=3, :85 tests_are_load_bearing=true)",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "[to architect, 예산] 이슈 본문과 docs/features/001-create-note.md:82-84의 draft done_when은 3개인데 architect의 files_expected는 14개·done_when 6개다 — docs/factory/CHARTER.md:52가 diff를 files_expected 안으로 묶으므로 plan에서 붙은 살은 review에서 뗄 수 없다. 요구: 다섯을 넘지 않게 하고, 나머지는 같은 테스트 파일 안의 추가 단언으로 접거나 open_risks로 내린다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "[to product-advocate] precondition PR이 랜딩하지 못했을 때 'dw1·dw2는 후속 이슈로 넘기고 unit 슬라이스는 출하하되 done이라 부르지 않는다'는 중간 상태를 제안하지만, 이 하네스에는 그런 중간 상태가 없다. docs/factory/CHARTER.md:48의 Definition of Done은 'plan handoff의 done_when 전항목이 verify 테스트로 증명됨'이고, '완료라 부르지 않는다'는 PR 텍스트상의 다짐일 뿐 게이트나 리뷰 로스터가 강제하지 못한다. precondition이 없으면 dw1·dw2·dw5류 항목은 이번 done_when에서 아예 제거되어야 한다(skeptic의 분할안) — 남겨 둔 채 진행하면 같은 reject 사이클이 세 번째로 반복된다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "[to architect, skeptic] pg.Pool 도입이 낳는 유휴 커넥션 오류(idle pool error) 크래시 경로에 대한 요구가 어느 done_when에도 없다 — 이 이슈의 실제 직전 라운드에서 관측되고 고쳐진 바로 그 결함이다(handoffs.implement.summary '진입점 pool의 idle error 리스너 부재(프로세스 사망 경로)를 함께 닫았다', tests_added에 test_2_idle_pool_error_does_not_kill_the_process). 'pg가 있는 상태에서'를 전제한 dw-s1은 프로세스가 살아 있다는 것만 확인할 뿐 pool의 error 이벤트 처리 여부는 관측하지 않고, docs/TECHNICAL.md에도 관련 절이 없다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
     "needs_human": [
       {
         "issue": 2,
-        "reason": "stage artifact missing or invalid: claude -p reported is_error; no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | transcript task-notification #1: head_sha is required; pr is required; gates is required; verifier.verdict is required; gates file missing",
-        "at": "2026-09-12T20:19:17Z"
+        "reason": "verifier rejected",
+        "at": "2026-09-13T05:00:16Z"
       },
       {
         "issue": 14,
@@ -326,12 +386,12 @@
     "merged": 0,
     "review_rounds_avg": 0,
     "rejects_by_role": {},
-    "needs_human": 6,
+    "needs_human": 7,
     "usage": {
-      "cost_usd": 151.484447,
+      "cost_usd": 246.137392,
       "tokens": {
-        "input": 2303315,
-        "output": 284807
+        "input": 3637805,
+        "output": 481342
       }
     }
   },

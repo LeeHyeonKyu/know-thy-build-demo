@@ -186,6 +186,15 @@ function collectPathClaims(text) {
   return claims;
 }
 
+// 수집된 경로 주장 중 디스크에서 해석되지 않는 것들. references_resolve가 토큰마다 거는 것과
+// 같은 해석(REPO_ROOT 기준 existsSync)이며, 이 목록이 비어 있지 않다는 것은 README가 죽은
+// 경로를 가리킨다는 뜻이다.
+function unresolvedPathClaims(text) {
+  return [...collectPathClaims(text)].filter(
+    (token) => !existsSync(REPO_ROOT + token.replace(/\/$/, "")),
+  );
+}
+
 // HTTP 상태코드로 읽히는 3자리 수. `docs/features/001-create-note.md`의 `001`처럼
 // 경로·파일명 안의 숫자는 상태코드가 아니다.
 const HTTP_STATUS = /(?<![\w./-])[1-5]\d{2}(?![\w./-])/;
@@ -307,6 +316,80 @@ describe("issue #18 — README는 저장소에 대해 참인 말만 한다", () 
         `'${token}'은 경로 주장이 아니다(명령·라우트·글로브·버전·플래그·외부 URL) — fs에서 찾으면 참인 README가 RED가 된다`,
       ).not.toContain(token);
     }
+  });
+
+  // dw2(c)의 "면제 없음"을 **구분자도 확장자도 없는 한 단어 파일명**(`Makefile`, `LICENSE`,
+  // `Dockerfile`)에 대해 측정한다. 직전 판본은 이 모양을 설계상 수집에서 뺐고, 그래서 README가
+  // 없는 루트 파일을 백틱으로 주장해도 가드가 침묵했다(리뷰 must_fix spec1 / qa1의 라이브 재현:
+  // Layout 표에 `| `Makefile` | … |` 한 줄을 넣어도 5 passed였다).
+  //
+  // 반대편 경계도 같은 테스트가 잡는다: **코드펜스 안의 맨 단어는 명령의 문법**(동사·서브커맨드·
+  // 플래그)이지 저장소에 대한 주장이 아니다. dw2(c)가 계약한 대상은 "백틱 저장소 상대경로 토큰과
+  // 상대 마크다운 링크 대상"이고, 펜스 안 수집은 dw2(a)(명령 검사 범위)를 위해 그 위에 얹은
+  // 것이므로 거기서는 경로 인자(구분자·확장자를 가진 토큰)만 본다 — `npm ci`의 `ci`,
+  // `docker compose … up -d`의 `up`을 경로로 읽으면 참인 README가 RED가 된다.
+  test("test_18_readme_bare_name_path_claims", () => {
+    const markdown = [
+      "| `Makefile` | 편의 명령 모음 |",
+      "라이선스는 `LICENSE`, 컨테이너 정의는 `Dockerfile`.",
+      "명령은 `npm start`, 라우트는 `/healthz`, 패턴은 `test/integration/**`,",
+      "버전은 `22.11.0`, 플래그는 `--reporter=json`.",
+      "```bash",
+      "npm ci && docker compose -f docker-compose.test.yml up -d",
+      "```",
+    ].join("\n");
+
+    const claims = [...collectPathClaims(markdown)];
+
+    for (const token of ["Makefile", "LICENSE", "Dockerfile", "docker-compose.test.yml"]) {
+      expect(
+        claims,
+        `'${token}'는 저장소 파일에 대한 주장인데 수집되지 않았다 — 그 파일이 없어도 가드가 침묵한다`,
+      ).toContain(token);
+    }
+
+    for (const token of [
+      "npm",
+      "ci",
+      "docker",
+      "compose",
+      "up",
+      "-d",
+      "npm start",
+      "/healthz",
+      "test/integration/**",
+      "22.11.0",
+      "--reporter=json",
+    ]) {
+      expect(
+        claims,
+        `'${token}'은 경로 주장이 아니다(펜스 안 명령 문법·라우트·글로브·버전·플래그) — fs에서 찾으면 참인 README가 RED가 된다`,
+      ).not.toContain(token);
+    }
+  });
+
+  // qa1의 재현을 그대로 테스트로 굳힌다: 실제 README에 존재하지 않는 루트 파일 한 줄을 주입하면
+  // 경로 해석이 그것을 미해결로 보고해야 한다. 오늘의 README는 미해결이 0이어야 하므로,
+  // 이 테스트는 "주입 전 0, 주입 후 그 토큰"이라는 차이로 판별력을 측정한다 —
+  // 단언이 통과하는 가장 게으른 구현(아무 토큰도 수집하지 않기)이 여기서 죽는다.
+  test("test_18_readme_false_bare_path_claim_is_caught", () => {
+    const readme = readReadme();
+    expect(
+      unresolvedPathClaims(readme),
+      "오늘의 README가 이미 존재하지 않는 경로를 가리킨다",
+    ).toEqual([]);
+
+    // 디스크에서 파생한다 — 나중에 누가 진짜 Makefile을 추가해도 이 테스트가 거짓 RED가 되지 않는다.
+    const absent = ["Makefile", "LICENSE", "NOTICE", "CODEOWNERS"].find(
+      (name) => !existsSync(REPO_ROOT + name),
+    );
+    expect(absent, "후보 루트 파일이 전부 실재한다 — 다른 이름으로 이 테스트를 갱신해야 한다").toBeTruthy();
+
+    const mutated = `${readme}\n| \`${absent}\` | 존재하지 않는 루트 파일에 대한 거짓 주장 |\n`;
+    expect(
+      unresolvedPathClaims(mutated),
+      `README가 없는 루트 파일 '${absent}'를 백틱으로 주장하는데 가드가 미해결로 보고하지 않는다`,
+    ).toContain(absent);
   });
 
   // dw3: `## Endpoints`의 모든 항목이 상태를 숨기지 않고, 그 상태가 양방향으로 참이다.

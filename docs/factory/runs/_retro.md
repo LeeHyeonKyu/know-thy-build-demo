@@ -16,10 +16,10 @@
 | --- | --- | --- |
 | merged | 0 | 1 |
 | review rounds avg | 0 | 1 |
-| needs-human | 9 | 3 |
+| needs-human | 13 | 3 |
 | rejects by role | 없음 | 없음 |
-| cost (usd) | 293.64 | 81.81 |
-| tokens | input 4473808 / output 571901 | input 50 / output 128059 |
+| cost (usd) | 372.72 | 81.81 |
+| tokens | input 5937320 / output 722148 | input 50 / output 128059 |
 | retro cost (usd) | 0.00 | 0.72 |
 | retro tokens | input 0 / output 0 | input 2 / output 2998 |
 | full retros | — | 1 |
@@ -206,6 +206,38 @@
         "text": "엔드포인트 상태 판정이 `app.<method>(\"<전체 경로>\")`라는 등록 구문 한 형태에 묶여 있다. TECHNICAL.md §Architecture가 001~003에 대해 처방한 routes 층(`src/routes/notes.js` + Router 마운트)으로 구현하면 라우트가 실제로 201을 응답하는데도 가드는 미등록으로 읽는다 — README의 거짓 `planned`이 GREEN이고 정직한 `implemented`가 RED가 된다. 다음 PR의 유일한 GREEN 경로가 거짓 문서다.",
         "runs": [
           18
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "dw3 가드가 **참인 README**에 대해 RED를 내고, 그 메시지는 파일 내용과 반대되는 진단을 말한다. (a) install과 dbUp이 같은 줄이면 `!(install < dbUp)`이 참이 되어 '설치 단계가 DB 기동 단계보다 뒤에 있다'고 말한다 — 실제로는 앞에 있다. (b) `runTests` 정규식이 `vitest run`을 테스트 실행으로 세므로, README 자신이 가르치는 DB 불필요 명령(`npx vitest run --exclude 'test/integration/**'`)이나 섹션 인트로의 `npm test` 언급이 dbUp보다 앞서면 '그 순서로 따라 하면 통합 테스트가 터진다'는 거짓 진단으로 RED가 된다. 같은 설계 때문에 반대 방향(거짓 음성)도 열려 있다: 올바른 블록 뒤에 `npm test` → `up -d`(--wait 없음) 순서의 두 번째 quickstart를 덧붙이면 GREEN이다 — 이슈가 막으려던 증상이 게이트를 통과한다.",
+        "runs": [
+          18
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "이 diff가 처음으로 프로젝트 테스트 레이어를 벤더링된 factory 런타임(.factory/lib/**)에 묶었고, 그 런타임의 의존성은 저장소의 선언된 설치 경로(`npm ci`)로 설치되지 않는다 — 깨끗한 클론에서 문서가 안내하는 `npx vitest run`(= `[commands].unit` 문자열 그대로)이 5개 테스트 파일 중 3개에서 import 실패한다.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "머지 시점에 반드시 있어야 한다고 plan 스스로 못 박은 qa 증거 파일이 diff/저장소 어디에도 없다 — 이 이슈가 켜는 required e2e 게이트(webServer 모드, `node src/app.js` 실 기동)는 어떤 done_when에서도 CI green으로 관측되지 않는다(M1 상한 때문에 구조적으로 불가능하다는 것을 plan 스스로 인정한다).",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "Following CLAUDE.md exactly (npm ci then npx vitest run) on a clean checkout, the three new test files fail immediately at collection time, because .factory/node_modules (smol-toml) is never installed by npm ci. No project doc (CLAUDE.md, docs/QA.md, docs/TECHNICAL.md, docs/PROJECT.md) explains how to populate .factory/node_modules locally -- that install only happens in a separate step of .factory/actions/setup/action.yml (npm install --prefix .factory --no-audit --no-fund), which is not [runtime].setup.",
+        "runs": [
+          15
         ],
         "source": "must_fix"
       }
@@ -408,6 +440,33 @@
           2
         ],
         "source": "dissent"
+      },
+      {
+        "role": "product-advocate",
+        "kind": "good",
+        "text": "[to architect] '강제 종료 직후의 `POST /notes`가 201인지는 요구하지 않는다'의 근거로 `docs/TECHNICAL.md:76`(What NOT to Test: pg 드라이버)을 드는 것은 같은 문서 `:77`의 자기 예외와 충돌한다 — `:77`은 '관측 가능한 응답 계약은 글루가 아니라 계약이므로 회귀 가드를 둔다'고 이미 적었다. 커넥션이 끊긴 뒤 '저장이 다시 된다'는 드라이버 내부가 아니라 응답 계약이다. 현재 dw6은 '프로세스가 살아 있다 + `/healthz` 200'만 보므로, 살아 있지만 모든 저장이 영구히 실패하는 서비스가 초록으로 통과한다 — Story 1의 관측점은 헬스 신호가 아니라 저장이다. 타이밍 의존이라는 반박은 형태로 해소된다: 고정 대기가 아니라 조건 대기로 `POST /notes`가 201이 될 때까지 폴링하고, 전용 스키마에서 그 행을 확인한다. 구현이 복구하지 못하면 타임아웃 RED이지 flake가 아니다. 새 항목·새 파일 없이 dw6 본문에 절 하나다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "[to architect] `docs/QA.md:16`을 이 diff에서 고치지 않기로 한 결정은 같은 입장 안의 다른 결정과 비대칭이다. 당신은 `docs/TECHNICAL.md:41`/`:45`(검증 위치) 모순은 '침묵하지 않고 문서를 고친다'고 하면서, 이 계획이 정면으로 위반할 결정성 규칙은 별도 이슈로 미룬다. 그 결과 이 diff는 `.factory/harness.toml:55`가 테스트 가이드의 단일 출처로 지목한 파일을 거짓인 채 남기고, 002가 그 거짓 규칙 위에 integration AC를 얹는다. QA.md는 protected가 아니므로 한 줄 수정이 실행 가능하다 — 고치든지, 아니면 TECHNICAL.md 편집도 같은 이유로 별도 이슈여야 한다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "[to skeptic] dw1의 스키마 격리(`PGOPTIONS=-c search_path=<schema>`)를 채택하면, 이번 계획에서 spec1/qa1(0건 저장 사고)을 닫는 유일한 통합 테스트가 '프로덕션이 실제로 쓰는 구성'(search_path 미설정, 기본값 public)을 한 번도 실행하지 않게 된다. product-advocate·architect의 dw1(공유 public 테이블에 커밋 + 마커 cleanup)은 PGOPTIONS를 전혀 설정하지 않아 프로덕션과 동일한 구성을 그대로 검증하는데, skeptic의 대안은 이 회차가 가장 되돌리기 비싸다고 지목한 그 사고를 '테스트 전용 환경변수가 걸린 구성'에서만 재현한다 — 배포되는 형태와 게이트가 실행하는 형태가 갈라진다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -415,7 +474,7 @@
       {
         "issue": 2,
         "reason": "blocked (environment/credentials) — needs human",
-        "at": "2026-09-13T05:44:58Z"
+        "at": "2026-09-13T10:35:59Z"
       },
       {
         "issue": 14,
@@ -425,12 +484,12 @@
       {
         "issue": 18,
         "reason": "blocked (environment/credentials) — needs human",
-        "at": "2026-09-13T05:43:35Z"
+        "at": "2026-09-13T10:38:57Z"
       },
       {
         "issue": 15,
-        "reason": "stage artifact missing or invalid: claude -p reported is_error; no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | transcript task-notification #1: gates is required; verifier.verdict is required; gates file missing",
-        "at": "2026-09-12T20:19:11Z"
+        "reason": "stage artifact missing or invalid: no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | transcript task-notification #1: verdicts must have ≥1 item | result bare JSON: verdicts must have ≥1 item; roster role not completed: correctness; roster role not completed: architecture; roster role not completed: spec-conformance; roster role not completed: qa",
+        "at": "2026-09-13T10:22:35Z"
       }
     ]
   },
@@ -438,12 +497,12 @@
     "merged": 0,
     "review_rounds_avg": 0,
     "rejects_by_role": {},
-    "needs_human": 9,
+    "needs_human": 13,
     "usage": {
-      "cost_usd": 293.639517,
+      "cost_usd": 372.720262,
       "tokens": {
-        "input": 4473808,
-        "output": 571901
+        "input": 5937320,
+        "output": 722148
       }
     }
   },

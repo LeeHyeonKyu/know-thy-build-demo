@@ -2,7 +2,13 @@
 //
 // 지키는 것은 "헤딩 네 개가 있다"가 아니라 "README의 진술이 저장소와 대조해 참이다"이다.
 // 헤딩 네 줄만 있는 빈 README, 존재하지 않는 `POST /notes`를 구현된 것처럼 적은 README,
-// 아직 없는 `src/routes/` 트리를 현재 구조로 그린 README는 전부 여기서 RED가 된다.
+// 이미 구현된 엔드포인트를 `planned`로 남겨 둔 README, 죽은 경로·없는 npm 스크립트를 안내하는
+// README는 전부 여기서 RED가 된다.
+//
+// 단언의 기준값은 어느 것도 이 파일에 하드코딩되지 않는다 — 진입점은 package.json `scripts.start`에서,
+// 라우트는 src/**/*.js의 등록 리터럴에서, compose 파일·경로는 디스크에서 파생한다. 오늘 참인 사실을
+// 테스트에 박아 두면(예: 문자열 "src/app.js") 진입점이 리네임되는 날 "정직하게 고치면 RED"가 되어
+// 유일한 GREEN 경로가 거짓말이 된다(이 가드의 직전 판본이 실제로 그랬다).
 //
 // 파일은 cwd가 아니라 import.meta.url 기준으로 읽는다(선례: test/smoke.test.js:14,
 // 근거: docs/QA.md "Order randomization" — `--sequence.shuffle`로도 같은 결과여야 한다).
@@ -19,8 +25,6 @@ const SRC_DIR = fileURLToPath(new URL("../src/", import.meta.url));
 
 const REQUIRED_SECTIONS = ["## What", "## Endpoints", "## Run tests", "## Layout"];
 const STATUS_MARKERS = ["implemented", "planned"];
-// npm의 내장 서브커맨드 중 README가 쓸 수 있는 것 — 이것만 package.json scripts 대조에서 면제된다.
-const NPM_BUILTINS = ["ci", "install"];
 
 // README.md가 없으면 skip이 아니라 이 단언에서 시끄럽게 실패한다. 이 이슈의 증상 자체가
 // "파일이 없다"이므로, 조용한 skip은 게이트가 그 증상을 초록으로 승인하는 것과 같다.
@@ -32,14 +36,28 @@ function readReadme() {
   return readFileSync(README_PATH, "utf8");
 }
 
-// `## X` 헤딩 아래 본문을 돌려준다. 코드펜스 안의 `## ...` 줄은 헤딩으로 세지 않는다.
+function packageScripts() {
+  return JSON.parse(readFileSync(PACKAGE_JSON_PATH, "utf8")).scripts ?? {};
+}
+
+// 코드펜스 안인지 표시한 줄 목록. 펜스 안의 `## ...`는 헤딩이 아니고, 펜스 안의 `GET /x`는
+// 엔드포인트 "항목"이 아니라 예시다. 반대로 명령·경로 해석은 펜스 안까지 본다(dw2(a)).
+function annotatedLines(text) {
+  let inFence = false;
+  return text.split("\n").map((line) => {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      return { line, inFence: true }; // 펜스 구분선 자체도 본문이 아니다
+    }
+    return { line, inFence };
+  });
+}
+
+// `## X` 헤딩 아래 본문을 돌려준다. 없으면 null.
 function sectionBody(readme, heading) {
-  const lines = readme.split("\n");
   const body = [];
   let inSection = false;
-  let inFence = false;
-  for (const line of lines) {
-    if (/^\s*```/.test(line)) inFence = !inFence;
+  for (const { line, inFence } of annotatedLines(readme)) {
     const isHeading = !inFence && /^#{1,2} /.test(line);
     if (isHeading) {
       if (line.trim() === heading) {
@@ -54,7 +72,7 @@ function sectionBody(readme, heading) {
   return inSection ? body.join("\n") : null;
 }
 
-function readSourceText() {
+function sourceFiles() {
   const files = [];
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -64,21 +82,67 @@ function readSourceText() {
     }
   };
   walk(SRC_DIR); // .factory/harness.toml [test].source_glob = ["src/**/*.js"]
-  expect(files.length, "src/**/*.js 가 비어 있다 — 소스 대조의 전제가 무너졌다").toBeGreaterThan(0);
-  return files.map((f) => readFileSync(f, "utf8")).join("\n");
+  return files;
 }
 
-// `GET /healthz` 처럼 method + path 로 시작하는 줄을 엔드포인트 항목으로 본다.
-// 항목 검출은 상태 마커와 독립이어야 한다 — 마커가 있는 줄만 항목으로 세면
+// src/**/*.js에 등장하는 라우트 등록 리터럴 `app.<method>("<path>"` 를 모은다.
+// 경로를 부분문자열로 찾지 않는 이유: `GET /health`를 implemented로 적어도
+// src/app.js의 `/healthz` 때문에 통과해 버린다(리뷰에서 세 번 재발견된 구멍).
+// 여기서는 따옴표로 닫힌 리터럴 **전체**가 경로와 같아야 한다.
+const ROUTE_REGISTRATION = /\bapp\s*\.\s*(get|post|put|patch|delete|all)\s*\(\s*(["'`])([^"'`\n]*)\2/g;
+
+function normalizePath(path) {
+  return path.length > 1 ? path.replace(/\/+$/, "") : path;
+}
+
+function registeredRoutes() {
+  const files = sourceFiles();
+  expect(files.length, "src/**/*.js 가 비어 있다 — 소스 대조의 전제가 무너졌다").toBeGreaterThan(0);
+  const text = files.map((f) => readFileSync(f, "utf8")).join("\n");
+  const routes = new Set();
+  for (const [, method, , path] of text.matchAll(ROUTE_REGISTRATION)) {
+    routes.add(`${method.toUpperCase()} ${normalizePath(path)}`);
+  }
+  return routes;
+}
+
+function isRegistered(routes, method, path) {
+  const p = normalizePath(path);
+  return routes.has(`${method} ${p}`) || routes.has(`ALL ${p}`);
+}
+
+// 항목 검출은 상태 마커와 **독립**이다 — 마커가 있는 줄만 항목으로 세면
 // "모든 항목이 마커를 갖는다"가 동어반복이 되어 아무것도 증명하지 못한다.
-const ENDPOINT_ITEM = /\b(GET|POST|PUT|PATCH|DELETE)\s+(\/[A-Za-z0-9_\-./{}:]*)/;
+// `| GET | /healthz |` 같은 표 행도 항목으로 받는다(서식 재배치가 false-RED가 되지 않도록).
+const ENDPOINT_ITEM = /\b(GET|POST|PUT|PATCH|DELETE)\s*\|?\s+(\/[A-Za-z0-9_\-./{}:]*)/;
 
 function endpointItems(section) {
-  return section
-    .split("\n")
-    .map((line) => ({ line, match: line.match(ENDPOINT_ITEM) }))
-    .filter((item) => item.match !== null)
-    .map((item) => ({ line: item.line.trim(), method: item.match[1], path: item.match[2] }));
+  const lines = annotatedLines(section);
+  const items = [];
+  lines.forEach(({ line, inFence }, index) => {
+    if (inFence) return; // 펜스 안의 curl 예시는 "이 엔드포인트가 있다"는 주장이 아니다
+    const match = line.match(ENDPOINT_ITEM);
+    if (!match) return;
+    items.push({ line: line.trim(), index, method: match[1], path: match[2] });
+  });
+  // 항목의 "블록" = 그 줄부터 다음 항목 직전까지. 계약 토큰을 한 물리적 줄에서 찾지 않으므로
+  // 하위 불릿으로 쪼개거나 표로 재배치하는 순전한 서식 변경이 RED가 되지 않고,
+  // 그러면서도 다른 항목이 공급한 토큰을 빌려 쓰는 false-GREEN은 막는다.
+  return items.map((item, i) => ({
+    ...item,
+    block: lines
+      .slice(item.index, i + 1 < items.length ? items[i + 1].index : lines.length)
+      .map((l) => l.line)
+      .join("\n"),
+  }));
+}
+
+// HTTP 상태코드로 읽히는 3자리 수. `docs/features/001-create-note.md`의 `001`처럼
+// 경로·파일명 안의 숫자는 상태코드가 아니다.
+const HTTP_STATUS = /(?<![\w./-])[1-5]\d{2}(?![\w./-])/;
+
+function squash(text) {
+  return text.toLowerCase().replace(/[\s`"'*|]/g, "");
 }
 
 describe("issue #18 — README는 저장소에 대해 참인 말만 한다", () => {
@@ -95,82 +159,31 @@ describe("issue #18 — README는 저장소에 대해 참인 말만 한다", () 
     }
   });
 
-  // dw2: `## Run tests`를 위에서 아래로 따라 하면 막히지 않는다.
-  // 설치 → compose 기동 → 테스트 실행이 이 순서로 있어야 하고, 거기 적힌 명령·파일이 전부 해석돼야 한다.
-  test("test_18_readme_run_tests_resolves", () => {
+  // dw2: README가 가리키는 것 중 죽은 것이 없다. 검사 범위는 한 섹션이 아니라 README 전체이며
+  // 코드펜스 안을 포함한다 — 기여자가 복붙하는 첫 명령이 펜스 안에 있기 때문이다.
+  test("test_18_readme_references_resolve", () => {
     const readme = readReadme();
-    const section = sectionBody(readme, "## Run tests");
-    expect(section, "README.md에 '## Run tests' 섹션이 없다").not.toBeNull();
+    const scripts = packageScripts();
+    const scriptNames = Object.keys(scripts);
 
-    const installAt = section.search(/\bnpm ci\b/);
-    expect(installAt, "'## Run tests'에 설치 명령(`npm ci`)이 없다").toBeGreaterThanOrEqual(0);
-
-    // test/integration/db.test.js:4 가 무조건 `docker compose ... psql`을 부르고
-    // harness test_glob이 그 파일을 같은 실행에 넣으므로, compose 선행 단계가 없는 README는
-    // 기여자를 첫 명령부터 RED로 보낸다.
-    const composeMatch = section.match(/docker compose\s+(?:-f|--file)\s+(\S+)[^\n]*\bup\b/);
-    expect(composeMatch, "'## Run tests'에 `docker compose -f <file> ... up` 기동 단계가 없다").not.toBeNull();
-    const composeAt = section.indexOf(composeMatch[0]);
-    expect(installAt, "설치 명령이 compose 기동 단계보다 뒤에 있다").toBeLessThan(composeAt);
-
-    const after = section.slice(composeAt);
-    const runMatch = after.match(/\b(npm (?:run )?test\b|npx vitest run\b)/);
-    expect(runMatch, "compose 기동 뒤에 테스트 실행 명령(`npm test` / `npx vitest run`)이 없다").not.toBeNull();
-
-    // 부수 조건: 적힌 npm 스크립트와 compose 파일이 실재한다.
-    const scripts = Object.keys(JSON.parse(readFileSync(PACKAGE_JSON_PATH, "utf8")).scripts ?? {});
-    for (const [, name] of section.matchAll(/\bnpm (?:run )?([a-zA-Z][\w:-]*)/g)) {
-      if (NPM_BUILTINS.includes(name)) continue;
-      expect(scripts, `README가 존재하지 않는 npm 스크립트 '${name}'를 안내한다`).toContain(name);
-    }
-    for (const [, file] of section.matchAll(/docker compose\s+(?:-f|--file)\s+(\S+)/g)) {
-      expect(existsSync(REPO_ROOT + file), `README가 없는 compose 파일 '${file}'을 가리킨다`).toBe(true);
-    }
-  });
-
-  // dw3: `## Endpoints`의 모든 항목이 상태를 숨기지 않는다.
-  test("test_18_readme_endpoints_status_honest", () => {
-    const readme = readReadme();
-    const section = sectionBody(readme, "## Endpoints");
-    expect(section, "README.md에 '## Endpoints' 섹션이 없다").not.toBeNull();
-
-    const items = endpointItems(section);
-    // 항목이 하나도 없는 Endpoints 섹션이 공허하게 통과해서는 안 된다.
-    expect(items.length, "'## Endpoints'에 `METHOD /path` 형태의 항목이 하나도 없다").toBeGreaterThan(0);
-
-    const sourceText = readSourceText();
-    for (const item of items) {
-      const markers = STATUS_MARKERS.filter((m) => new RegExp(`\\b${m}\\b`).test(item.line));
-      // 마커가 없으면 독자는 그 줄이 오늘 되는 일인지 계획인지 구분할 수 없다.
-      expect(markers, `'${item.method} ${item.path}' 항목에 상태 마커(${STATUS_MARKERS.join(" / ")})가 정확히 하나 있어야 한다: ${item.line}`)
-        .toHaveLength(1);
-      if (markers[0] === "implemented") {
-        expect(
-          sourceText.includes(item.path),
-          `README가 '${item.method} ${item.path}'를 implemented로 적었지만 그 경로가 src/**/*.js 어디에도 없다`,
-        ).toBe(true);
-      }
+    // (b) `npm run <x>` 와 고정 단축 `npm test`/`npm start` 만 본다 — 그래서 손으로 유지하는
+    //     npm 빌트인 면제 목록이 필요 없다(`npm ci`/`npm i`는 애초에 수집되지 않는다).
+    const invoked = new Set();
+    for (const [, name] of readme.matchAll(/\bnpm\s+run\s+([A-Za-z][\w:-]*)/g)) invoked.add(name);
+    for (const [, name] of readme.matchAll(/\bnpm\s+(test|start)\b/g)) invoked.add(name);
+    expect(invoked.size, "README가 npm 스크립트를 하나도 안내하지 않는다 — 실행법이 없다는 뜻이다")
+      .toBeGreaterThan(0);
+    for (const name of invoked) {
+      expect(scriptNames, `README가 존재하지 않는 npm 스크립트 '${name}'를 안내한다`).toContain(name);
     }
 
-    // GET /healthz 의 응답 서술은 보존 계약과 일치해야 한다
-    // (docs/factory/CHARTER.md Preserve, docs/TECHNICAL.md §Interfaces, test/smoke.test.js:81-90).
-    const healthz = items.find((item) => item.path === "/healthz");
-    expect(healthz, "'## Endpoints'에 `GET /healthz` 항목이 없다 — 오늘 유일하게 구현된 엔드포인트다").toBeDefined();
-    expect(healthz.method).toBe("GET");
-    const contract = healthz.line.toLowerCase().replace(/[\s`"'*]/g, "");
-    expect(contract, `/healthz 항목이 상태코드 200을 적지 않았다: ${healthz.line}`).toContain("200");
-    expect(contract, `/healthz 항목의 body 서술이 {ok:true} 계약과 다르다: ${healthz.line}`).toContain("ok:true");
-    expect(contract, `/healthz 항목이 Cache-Control: no-store를 적지 않았다: ${healthz.line}`)
-      .toContain("cache-control:no-store");
-  });
-
-  // dw4: README가 가리키는 곳이 전부 실재한다.
-  test("test_18_readme_paths_resolve", () => {
-    const readme = readReadme();
-
+    // (c) 백틱 저장소 상대경로 토큰 + 상대 마크다운 링크 대상이 전부 fs에 존재한다.
+    //     글로브(`*` 포함)는 경로 주장이 아니라 패턴이므로 대상에서 제외한다.
     const referenced = new Set();
-    for (const [, token] of readme.matchAll(/`([^`\n]+)`/g)) {
-      if (/^(src|test|docs|e2e)\/\S*$/.test(token) || /^[A-Za-z0-9_.-]+\.ya?ml$/.test(token)) {
+    for (const [, span] of readme.matchAll(/`([^`\n]+)`/g)) {
+      const token = span.trim();
+      if (token.includes("*")) continue;
+      if (/^(src|test|docs|e2e)\/\S*$/.test(token) || /^[A-Za-z0-9_.-]+\.(ya?ml|json|md|js)$/.test(token)) {
         referenced.add(token);
       }
     }
@@ -180,7 +193,6 @@ describe("issue #18 — README는 저장소에 대해 참인 말만 한다", () 
     }
     expect(referenced.size, "README가 저장소 경로를 하나도 가리키지 않는다 — 인덱스로서 쓸모가 없다")
       .toBeGreaterThan(0);
-
     for (const token of referenced) {
       const target = REPO_ROOT + token.replace(/\/$/, "");
       expect(existsSync(target), `README가 존재하지 않는 경로 '${token}'를 가리킨다`).toBe(true);
@@ -189,9 +201,104 @@ describe("issue #18 — README는 저장소에 대해 참인 말만 한다", () 
       }
     }
 
-    // 산문으로만 넘어가는 회피를 막는다 — Layout은 최소한 진입점 파일을 명시해야 한다.
+    // (d) `## Layout`은 package.json `scripts.start`가 **실제로 실행하는 파일**을 언급한다.
+    //     리터럴을 박지 않으므로 진입점이 리네임돼도 정직한 수정이 GREEN이다.
+    const startScript = scripts.start;
+    expect(typeof startScript, "package.json에 scripts.start가 없다").toBe("string");
+    const entry = (startScript.match(/(?:^|\s)([\w./-]+\.[cm]?js)(?=\s|$)/) ?? [])[1];
+    expect(entry, `package.json scripts.start에서 진입점 파일을 찾지 못했다: ${startScript}`).toBeTruthy();
+    expect(existsSync(REPO_ROOT + entry), `scripts.start가 실행하는 '${entry}'가 디스크에 없다`).toBe(true);
     const layout = sectionBody(readme, "## Layout");
     expect(layout, "README.md에 '## Layout' 섹션이 없다").not.toBeNull();
-    expect(layout, "'## Layout'이 진입점 `src/app.js`를 명시하지 않는다").toContain("src/app.js");
+    expect(layout, `'## Layout'이 진입점 '${entry}'(package.json scripts.start)를 언급하지 않는다`)
+      .toContain(entry);
+  });
+
+  // dw3: `## Endpoints`의 모든 항목이 상태를 숨기지 않고, 그 상태가 양방향으로 참이다.
+  test("test_18_readme_endpoints_status_honest", () => {
+    const readme = readReadme();
+    const section = sectionBody(readme, "## Endpoints");
+    expect(section, "README.md에 '## Endpoints' 섹션이 없다").not.toBeNull();
+
+    const items = endpointItems(section);
+    // 항목이 하나도 없는 Endpoints 섹션이 공허하게 통과해서는 안 된다.
+    expect(items.length, "'## Endpoints'에 `METHOD /path` 형태의 항목이 하나도 없다").toBeGreaterThan(0);
+
+    const routes = registeredRoutes();
+    for (const item of items) {
+      const markers = STATUS_MARKERS.filter((m) => new RegExp(`\\b${m}\\b`).test(item.line));
+      // 마커가 없으면 독자는 그 줄이 오늘 되는 일인지 계획인지 구분할 수 없다.
+      expect(
+        markers,
+        `'${item.method} ${item.path}' 항목에 상태 마커(${STATUS_MARKERS.join(" / ")})가 정확히 하나 있어야 한다: ${item.line}`,
+      ).toHaveLength(1);
+      const registered = isRegistered(routes, item.method, item.path);
+      if (markers[0] === "implemented") {
+        expect(
+          registered,
+          `README가 '${item.method} ${item.path}'를 implemented로 적었지만 src/**/*.js에 그 라우트 등록(app.${item.method.toLowerCase()}("${item.path}"...)이 없다`,
+        ).toBe(true);
+      } else {
+        // 양방향 — 001/002가 머지되어 실제로 응답하는 날 README의 `planned`가 RED가 되고,
+        // 그 PR의 저자는 마커 한 단어를 뒤집어야 한다. 의도된 트립와이어다.
+        expect(
+          registered,
+          `README가 '${item.method} ${item.path}'를 planned로 적었지만 src/**/*.js에 그 라우트가 이미 등록돼 있다 — README.md의 '## Endpoints' 마커를 implemented로 고쳐야 한다`,
+        ).toBe(false);
+      }
+    }
+
+    // (e) `planned`가 적힌 줄은 HTTP 상태코드를 약속하지 않는다 — "호출하면 404가 온다" 류의 문장은
+    //     그 엔드포인트가 구현되는 날 거짓이 되는데, 어떤 소스와도 대조할 수 없다.
+    for (const { line, inFence } of annotatedLines(section)) {
+      if (inFence || !/\bplanned\b/.test(line)) continue;
+      expect(
+        HTTP_STATUS.test(line),
+        `'planned'가 적힌 줄이 HTTP 상태코드를 약속한다 — 구현되는 날 거짓이 된다: ${line.trim()}`,
+      ).toBe(false);
+    }
+
+    // (f) GET /healthz 항목의 응답 서술이 보존 계약과 일치해야 한다
+    //     (docs/TECHNICAL.md:63/:77, test/smoke.test.js). 계약 문자열은 README가 아니라 그 계약에서 왔다.
+    const healthz = items.find((item) => normalizePath(item.path) === "/healthz");
+    expect(healthz, "'## Endpoints'에 `GET /healthz` 항목이 없다 — 오늘 유일하게 구현된 엔드포인트다").toBeDefined();
+    expect(healthz.method).toBe("GET");
+    const contract = squash(healthz.block);
+    expect(contract, `/healthz 항목이 상태코드 200을 적지 않았다:\n${healthz.block}`).toContain("200");
+    expect(contract, `/healthz 항목의 body 서술이 {ok:true} 계약과 다르다:\n${healthz.block}`).toContain("ok:true");
+    expect(contract, `/healthz 항목이 Cache-Control: no-store를 적지 않았다:\n${healthz.block}`)
+      .toContain("cache-control:no-store");
+  });
+
+  // dw4: `## Run tests`를 위에서 아래로 따라 한 기여자가 막히지 않는다.
+  // 설치 → DB 기동 → 테스트 실행이 이 순서여야 한다. `docker compose -f ... up`이라는 리터럴
+  // 명령 형태는 요구하지 않는다 — 지켜야 할 사실은 "기동 단계가 테스트보다 앞에 온다 +
+  // 실재하는 compose 파일을 가리킨다"이고, 형태를 못 박으면 기동을 래퍼로 감싸는 날
+  // 참인 문서가 RED가 된다(의도적 하향 조정 — PR 본문에 기록).
+  test("test_18_readme_run_tests_resolves", () => {
+    const readme = readReadme();
+    const section = sectionBody(readme, "## Run tests");
+    expect(section, "README.md에 '## Run tests' 섹션이 없다").not.toBeNull();
+
+    const installAt = section.search(/\bnpm\s+(?:ci|install)\b/);
+    expect(installAt, "'## Run tests'에 설치 단계(`npm ci` / `npm install`)가 없다").toBeGreaterThanOrEqual(0);
+
+    // test/integration/db.test.js가 가용성 체크 없이 `docker compose ... psql`을 부르고
+    // harness test_glob이 그 파일을 unit 게이트의 같은 실행에 넣으므로, DB 기동 단계가
+    // 설치 뒤·테스트 앞에 없는 README는 기여자를 첫 명령부터 RED로 보낸다.
+    const composeStep = [...section.matchAll(/[A-Za-z0-9_.\/-]+\.ya?ml/g)]
+      .filter((m) => existsSync(REPO_ROOT + m[0]))
+      .find((m) => m.index > installAt);
+    expect(
+      composeStep,
+      "'## Run tests'에 설치 단계 뒤로 DB 기동 단계가 없다 — 디스크에 실재하는 compose 파일을 이름으로 가리켜야 한다",
+    ).toBeDefined();
+
+    const after = section.slice(composeStep.index + composeStep[0].length);
+    const runMatch = after.match(/\bnpm\s+(?:run\s+)?test\b|\bnpx\s+vitest\s+run\b/);
+    expect(
+      runMatch,
+      "DB 기동 단계 뒤에 테스트 실행 명령(`npm test` / `npx vitest run`)이 없다 — 순서가 뒤집혔거나 명령이 없다",
+    ).not.toBeNull();
   });
 });

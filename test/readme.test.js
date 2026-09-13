@@ -1,812 +1,323 @@
-// --- issue #18 회귀 가드: 루트 README가 저장소에 대해 참인 말만 하게 만든다 ------------------
+import { describe, expect, it } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
+
+// #18 — README.md 회귀 가드.
 //
-// 지키는 것은 "헤딩 네 개가 있다"가 아니라 "README의 진술이 저장소와 대조해 참이다"이다.
-// 헤딩 네 줄만 있는 빈 README, 존재하지 않는 `POST /notes`를 구현된 것처럼 적은 README,
-// 이미 구현된 엔드포인트를 `planned`로 남겨 둔 README, 죽은 경로·없는 npm 스크립트를 안내하는
-// README는 전부 여기서 RED가 된다.
+// 이 가드가 재는 것은 **파일 내용 + 디스크 조회**뿐이다: 자식 프로세스 0, 소켓 0,
+// `src/**` 파싱 0, 모듈 import 0. 엔드포인트 "등록 사실"은 정적으로도 라이브로도
+// 판정하지 않는다 — docs/TECHNICAL.md §Testing Strategy의 "What NOT to Test"가
+// "라우팅 등록 같은 글루"를 범주로 금지하고, docs/QA.md의 수동 체크리스트가
+// "문서의 curl 스니펫이 그대로 동작하는가"를 이미 사람 판단으로 분류했다.
 //
-// 단언의 기준값은 어느 것도 이 파일에 하드코딩되지 않는다 — 진입점은 package.json `scripts.start`에서,
-// 라우트는 src/**/*.js의 등록 리터럴에서, compose 파일·경로는 디스크에서 파생한다. 오늘 참인 사실을
-// 테스트에 박아 두면(예: 문자열 "src/app.js") 진입점이 리네임되는 날 "정직하게 고치면 RED"가 되어
-// 유일한 GREEN 경로가 거짓말이 된다(이 가드의 직전 판본이 실제로 그랬다).
-//
-// 파일은 cwd가 아니라 import.meta.url 기준으로 읽는다(선례: test/smoke.test.js:14,
-// 근거: docs/QA.md "Order randomization" — `--sequence.shuffle`로도 같은 결과여야 한다).
-// 프로세스를 띄우지 않고 파일만 읽으므로 unit 레벨이고, 시계·랜덤·네트워크를 쓰지 않는다.
+// 각 테스트는 실제 README.md에 더해 **합성 입력**으로 자기 판별력을 같은 실행 안에서
+// 잰다(구현을 그대로 옮겨 적은 단언으로는 통과할 수 없게).
 
-import { describe, expect, test } from "vitest";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+const repoRoot = new URL("../", import.meta.url);
+const readmeUrl = new URL("README.md", repoRoot);
 
-const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
-const README_PATH = fileURLToPath(new URL("../README.md", import.meta.url));
-const PACKAGE_JSON_PATH = fileURLToPath(new URL("../package.json", import.meta.url));
-const SRC_DIR = fileURLToPath(new URL("../src/", import.meta.url));
+/** `## Layout`에서만 쓰는 단 하나의 "아직 없다" 마커. 새 상태 어휘를 만들지 않는다. */
+const PLANNED_MARKER = "(아직 없음)";
+const REQUIRED_HEADINGS = ["## What", "## Endpoints", "## Run tests", "## Layout"];
+/** 반환 시점에 DB 준비 완료를 보장하는 형태임을 문서에서 판정할 수 있는 토큰. */
+const READINESS_TOKENS = ["--wait", "pg_isready", "healthy"];
+const PATH_EXT = /\.(js|mjs|cjs|json|md|yml|yaml|toml|sh|sql|ts)$/i;
 
-const REQUIRED_SECTIONS = ["## What", "## Endpoints", "## Run tests", "## Layout"];
-const STATUS_MARKERS = ["implemented", "planned"];
+const readReadme = () => readFileSync(readmeUrl, "utf8");
+const readPkg = () => JSON.parse(readFileSync(new URL("package.json", repoRoot), "utf8"));
 
-// README.md가 없으면 skip이 아니라 이 단언에서 시끄럽게 실패한다. 이 이슈의 증상 자체가
-// "파일이 없다"이므로, 조용한 skip은 게이트가 그 증상을 초록으로 승인하는 것과 같다.
-function readReadme() {
-  expect(
-    existsSync(README_PATH),
-    "README.md가 저장소 루트에 없다 (issue #18의 증상 그 자체) — " + README_PATH,
-  ).toBe(true);
-  return readFileSync(README_PATH, "utf8");
-}
+/** 저장소 루트 기준 실재 여부. 가드는 경로 문자열을 하드코딩하지 않고 이 함수만 쓴다. */
+const existsInRepo = (p) => existsSync(new URL(p, repoRoot));
 
-function packageScripts() {
-  return JSON.parse(readFileSync(PACKAGE_JSON_PATH, "utf8")).scripts ?? {};
-}
+const realEnv = () => {
+  const pkg = readPkg();
+  return { scripts: pkg.scripts ?? {}, exists: existsInRepo };
+};
 
-// 코드펜스 안인지 표시한 줄 목록. 펜스 안의 `## ...`는 헤딩이 아니고, 펜스 안의 `GET /x`는
-// 엔드포인트 "항목"이 아니라 예시다. 반대로 명령·경로 해석은 펜스 안까지 본다(dw2(a)).
-function annotatedLines(text) {
-  let inFence = false;
-  return text.split("\n").map((line) => {
-    if (/^\s*```/.test(line)) {
-      inFence = !inFence;
-      return { line, inFence: true }; // 펜스 구분선 자체도 본문이 아니다
+/** README를 줄 단위로 훑어 `## ` 섹션으로 자른다. 코드펜스 안의 `#`은 헤딩이 아니다. */
+function sections(text) {
+  const out = new Map();
+  let current = null;
+  let fenced = false;
+  text.split("\n").forEach((line, i) => {
+    if (/^\s*```/.test(line)) fenced = !fenced;
+    const heading = !fenced && /^##\s+\S/.test(line);
+    if (heading) {
+      current = line.trim().replace(/\s+/g, " ");
+      out.set(current, []);
+      return;
     }
-    return { line, inFence };
+    if (current) out.get(current).push({ text: line, lineNo: i + 1 });
   });
+  return out;
 }
 
-// `## X` 헤딩 아래 본문을 돌려준다. 없으면 null.
-function sectionBody(readme, heading) {
-  const body = [];
-  let inSection = false;
-  for (const { line, inFence } of annotatedLines(readme)) {
-    const isHeading = !inFence && /^#{1,2} /.test(line);
-    if (isHeading) {
-      if (line.trim() === heading) {
-        inSection = true;
-        continue;
-      }
-      if (inSection) break;
-      continue;
-    }
-    if (inSection) body.push(line);
+const bodyOf = (text, heading) => sections(text).get(heading) ?? null;
+const joinBody = (rows) => (rows ?? []).map((r) => r.text).join("\n");
+
+// ---------------------------------------------------------------- dw1
+
+function sectionProblems(text) {
+  const secs = sections(text);
+  const problems = [];
+  for (const heading of REQUIRED_HEADINGS) {
+    const rows = secs.get(heading);
+    if (!rows) problems.push(`README.md: '${heading}' 섹션이 없다`);
+    else if (!rows.some((r) => r.text.trim() !== "")) problems.push(`README.md: '${heading}' 섹션에 본문이 한 줄도 없다 (헤딩만 있다)`);
   }
-  return inSection ? body.join("\n") : null;
+  return problems;
 }
 
-function sourceFiles() {
-  const files = [];
-  const walk = (dir) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = dir + entry.name;
-      if (entry.isDirectory()) walk(full + "/");
-      else if (entry.name.endsWith(".js")) files.push(full);
-    }
-  };
-  walk(SRC_DIR); // .factory/harness.toml [test].source_glob = ["src/**/*.js"]
-  return files;
+// ---------------------------------------------------------------- dw2
+
+/** 토큰이 "저장소 상대경로 주장"인가. 낱말(PORT, express)과 URL과 글로브는 주장이 아니다. */
+function isPathClaim(token) {
+  if (!token || /\s/.test(token)) return false;
+  if (token.includes("*")) return false; // 글로브는 경로 주장이 아니다
+  if (token.includes("://") || token.startsWith("/") || token.startsWith("~") || token.startsWith("-") || token.startsWith("$")) return false;
+  if (token.startsWith("#") || token.startsWith("mailto:")) return false;
+  return token.includes("/") || PATH_EXT.test(token);
 }
 
-// src/**/*.js를 저장소 상대경로 → 텍스트 맵으로 읽는다. 라우트 해석기(resolveRoutes)가
-// 합성 트리로도 측정될 수 있도록, 디스크 접근은 여기서 끝난다.
-function readSourceTree() {
-  const tree = new Map();
-  for (const full of sourceFiles()) {
-    tree.set(full.slice(REPO_ROOT.length), readFileSync(full, "utf8"));
-  }
-  return tree;
-}
+const trimToken = (t) => t.replace(/^[('"`\[]+/, "").replace(/[)'"`\],;:.]+$/, "");
 
-// 라우트 등록 리터럴 `<ident>.<method>("<path>"` — 호스트 식별자(app/router/…)와 경로를 같이 잡는다.
-// 경로를 부분문자열로 찾지 않는 이유: `GET /health`를 implemented로 적어도
-// src/app.js의 `/healthz` 때문에 통과해 버린다(리뷰에서 세 번 재발견된 구멍).
-// 여기서는 따옴표로 닫힌 리터럴 **전체**가 (마운트 접두사와 합쳐진 뒤) 경로와 같아야 한다.
-const METHOD_NAMES = "get|post|put|patch|delete|all";
-const REGISTRATION = new RegExp(
-  `\\b([A-Za-z_$][\\w$]*)\\s*\\.\\s*(${METHOD_NAMES})\\s*\\(\\s*(["'\`])([^"'\`\\n]*)\\3`,
-  "g",
-);
-const MOUNT_HEAD = /\b([A-Za-z_$][\w$]*)\s*\.\s*use\s*\(/g;
-const DEFAULT_IMPORT = /\bimport\s+([A-Za-z_$][\w$]*)(?:\s*,[^;\n]*?)?\s+from\s*["']([^"'\n]+)["']/g;
-const REQUIRE_BINDING =
-  /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\s*\(\s*["']([^"'\n]+)["']\s*\)/g;
-
-function normalizePath(path) {
-  return path.length > 1 ? path.replace(/\/+$/, "") : path;
-}
-
-// 마운트 접두사와 라우터 안의 상대 경로를 합친다. `/notes` + `/` = `/notes`.
-function joinPath(base, sub) {
-  const head = base === "/" ? "" : base.replace(/\/+$/, "");
-  const tail = sub.startsWith("/") ? sub : `/${sub}`;
-  return normalizePath(`${head}${tail}`.replace(/\/{2,}/g, "/")) || "/";
-}
-
-// 주석은 코드가 아니다 — 주석 안의 `app.post("/notes"`를 등록으로 읽으면, 그 경로를 정직하게
-// `planned`로 적은 README가 RED가 되고 저자는 다시 거짓으로 몰린다.
-// `http://…`처럼 `:` 뒤에 오는 `//`는 주석이 아니다.
-function stripComments(text) {
-  return text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:"'`\\])\/\/[^\n]*/gm, "$1");
-}
-
-// `f(` 의 여는 괄호에서 시작해 최상위 인자들을 문자열로 돌려준다(중첩 괄호·문자열 보존).
-function callArguments(text, openIndex) {
-  const args = [];
-  let current = "";
-  let depth = 0;
-  let quote = null;
-  for (let i = openIndex; i < text.length; i++) {
-    const ch = text[i];
-    if (quote) {
-      current += ch;
-      if (ch === quote && text[i - 1] !== "\\") quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === "`") {
-      quote = ch;
-      current += ch;
-      continue;
-    }
-    if (ch === "(" || ch === "[" || ch === "{") {
-      depth += 1;
-      if (!(depth === 1 && ch === "(")) current += ch;
-      continue;
-    }
-    if (ch === ")" || ch === "]" || ch === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        args.push(current);
-        return args;
-      }
-      current += ch;
-      continue;
-    }
-    if (ch === "," && depth === 1) {
-      args.push(current);
-      current = "";
-      continue;
-    }
-    current += ch;
-  }
-  return args; // 닫히지 않은 호출 — 잡은 데까지만 본다
-}
-
-function stringLiteral(arg) {
-  const match = (arg ?? "").match(/^\s*(["'`])([^"'`]*)\1\s*$/);
-  return match ? match[2] : null;
-}
-
-function identifierOf(arg) {
-  const match = (arg ?? "").match(/^\s*([A-Za-z_$][\w$]*)\s*$/);
-  return match ? match[1] : null;
-}
-
-// 상대 import 스펙을 소스 트리 안의 파일로 해석한다. 외부 패키지(`express`)는 대상이 아니다.
-function resolveModule(fileMap, importerPath, spec) {
-  if (!spec.startsWith(".")) return null;
-  const stack = importerPath.split("/").slice(0, -1);
-  for (const part of spec.split("/")) {
-    if (part === "" || part === ".") continue;
-    else if (part === "..") stack.pop();
-    else stack.push(part);
-  }
-  const base = stack.join("/");
-  return [base, `${base}.js`, `${base}/index.js`].find((candidate) => fileMap.has(candidate)) ?? null;
-}
-
-// 소스 트리(상대경로 → 텍스트)와 진입점에서 "이 저장소가 실제로 등록하는 라우트" 집합을 만든다.
-//
-// 등록 구문 한 형태(`app.<method>("<전체 경로>"`)만 보면, docs/TECHNICAL.md §Architecture가
-// 001~003에 대해 처방한 라우터 마운트 형태에서 가드가 뒤집힌다(review round 4 must_fix cf1/arch1):
-// 라우트가 실제로 응답하는데 거짓 `planned`이 GREEN이고 정직한 `implemented`가 RED가 된다.
-// 그래서 형태를 세지 않고 **진입점에서 도달 가능한 마운트 그래프**를 따라가며 접두사를 합친다.
-//   · `app.get("/healthz", …)`            → GET /healthz
-//   · `app.use("/notes", r)` + `r.post("/")` → POST /notes   (같은 파일이든 import된 파일이든)
-//   · 마운트되지 않은 라우터 파일          → 등록 아님 (실제로 응답하지 않는다)
-function resolveRoutes(fileMap, entryPath) {
-  const routes = new Set();
-  if (!entryPath || !fileMap.has(entryPath)) return routes;
-
-  const visited = new Set();
-  const queue = [[entryPath, ""]];
-  while (queue.length > 0) {
-    const [filePath, base] = queue.shift();
-    const key = `${filePath} ${base}`;
-    if (visited.has(key)) continue;
-    visited.add(key);
-
-    const text = stripComments(fileMap.get(filePath) ?? "");
-
-    const imported = new Map();
-    for (const [, ident, spec] of text.matchAll(DEFAULT_IMPORT)) {
-      const target = resolveModule(fileMap, filePath, spec);
-      if (target) imported.set(ident, target);
-    }
-    for (const [, ident, spec] of text.matchAll(REQUIRE_BINDING)) {
-      const target = resolveModule(fileMap, filePath, spec);
-      if (target) imported.set(ident, target);
-    }
-
-    const registrations = new Map();
-    for (const [, ident, method, , path] of text.matchAll(REGISTRATION)) {
-      if (!registrations.has(ident)) registrations.set(ident, []);
-      registrations.get(ident).push({ method: method.toUpperCase(), path });
-    }
-
-    const mounts = [];
-    for (const match of text.matchAll(MOUNT_HEAD)) {
-      const args = callArguments(text, match.index + match[0].length - 1);
-      const prefix = stringLiteral(args[0]);
-      for (const arg of prefix === null ? args : args.slice(1)) {
-        const target = identifierOf(arg);
-        if (target) mounts.push({ host: match[1], prefix: prefix ?? "/", target });
-      }
-    }
-
-    // 마운트된 로컬 식별자는 접두사를 물려받고, 그 밖의 식별자는 이 파일의 base에 있다.
-    const localTargets = new Set(mounts.filter((m) => !imported.has(m.target)).map((m) => m.target));
-    const identBase = new Map();
-    for (const ident of [
-      ...registrations.keys(),
-      ...mounts.map((m) => m.host),
-      ...mounts.map((m) => m.target),
-    ]) {
-      if (!localTargets.has(ident)) identBase.set(ident, base);
-    }
-    for (let pass = 0; pass <= mounts.length; pass += 1) {
-      for (const mount of mounts) {
-        if (imported.has(mount.target)) continue;
-        const hostBase = identBase.get(mount.host);
-        if (hostBase === undefined) continue;
-        identBase.set(mount.target, joinPath(hostBase, mount.prefix));
-      }
-    }
-
-    for (const [ident, list] of registrations) {
-      const root = identBase.get(ident) ?? base;
-      for (const { method, path } of list) routes.add(`${method} ${joinPath(root, path)}`);
-    }
-    for (const mount of mounts) {
-      const target = imported.get(mount.target);
-      if (target) queue.push([target, joinPath(identBase.get(mount.host) ?? base, mount.prefix)]);
-    }
-  }
-  return routes;
-}
-
-// package.json `scripts.start`가 실제로 실행하는 파일 = 라우트 그래프의 뿌리.
-// 리터럴 "src/app.js"를 박지 않는다(진입점 리네임 시 정직한 수정이 RED가 되지 않도록).
-function entryPath() {
-  const startScript = packageScripts().start ?? "";
-  return (startScript.match(/(?:^|\s)([\w./-]+\.[cm]?js)(?=\s|$)/) ?? [])[1];
-}
-
-function registeredRoutes() {
-  const tree = readSourceTree();
-  expect(tree.size, "src/**/*.js 가 비어 있다 — 소스 대조의 전제가 무너졌다").toBeGreaterThan(0);
-  const entry = entryPath();
-  // 진입점을 못 찾으면 라우트 집합이 조용히 비고, 모든 implemented 항목이 엉뚱한 이유로 RED가 된다.
-  expect(
-    tree.has(entry),
-    `package.json scripts.start가 실행하는 진입점 '${entry}'가 src/**/*.js에 없다 — 라우트 그래프의 뿌리가 없다`,
-  ).toBe(true);
-  return resolveRoutes(tree, entry);
-}
-
-function isRegistered(routes, method, path) {
-  const p = normalizePath(path);
-  return routes.has(`${method} ${p}`) || routes.has(`ALL ${p}`);
-}
-
-// 테스트용 소스 트리 팩토리: `METHOD /path`를 docs/TECHNICAL.md §Architecture가 처방한
-// 라우터 마운트 형태(`src/routes/<name>.js`의 상대 등록 + 진입점의 `app.use("<prefix>", router)`)로
-// 구현한 트리를 만든다. 디스크를 건드리지 않으므로 결정적이고, 실제 src/**는 한 줄도 바뀌지 않는다.
-function routerMountTree(method, path) {
-  const segments = normalizePath(path).split("/").filter(Boolean);
-  const head = segments[0] ?? "";
-  const prefix = head ? `/${head}` : "/";
-  const sub = segments.length > 1 ? `/${segments.slice(1).join("/")}` : "/";
-  const routerFile = `src/routes/${head || "root"}.js`;
-  return new Map([
-    [
-      "src/app.js",
-      [
-        'import express from "express";',
-        `import mounted from "./routes/${head || "root"}.js";`,
-        "const app = express();",
-        'app.get("/healthz", (_req, res) => res.status(200).json({ ok: true }));',
-        `app.use(${JSON.stringify(prefix)}, mounted);`,
-        "app.listen(process.env.PORT ?? 3000);",
-      ].join("\n"),
-    ],
-    [
-      routerFile,
-      [
-        'import { Router } from "express";',
-        "const router = Router();",
-        `router.${method.toLowerCase()}(${JSON.stringify(sub)}, (_req, res) => res.status(200).json({}));`,
-        "export default router;",
-      ].join("\n"),
-    ],
-  ]);
-}
-
-// 항목 검출은 상태 마커와 **독립**이다 — 마커가 있는 줄만 항목으로 세면
-// "모든 항목이 마커를 갖는다"가 동어반복이 되어 아무것도 증명하지 못한다.
-// `| GET | /healthz |` 같은 표 행도 항목으로 받는다(서식 재배치가 false-RED가 되지 않도록).
-const ENDPOINT_ITEM = /\b(GET|POST|PUT|PATCH|DELETE)\s*\|?\s+(\/[A-Za-z0-9_\-./{}:]*)/;
-
-function endpointItems(section) {
-  const lines = annotatedLines(section);
-  const items = [];
-  lines.forEach(({ line, inFence }, index) => {
-    if (inFence) return; // 펜스 안의 curl 예시는 "이 엔드포인트가 있다"는 주장이 아니다
-    const match = line.match(ENDPOINT_ITEM);
-    if (!match) return;
-    items.push({ line: line.trim(), index, method: match[1], path: match[2] });
-  });
-  // 항목의 "블록" = 그 줄부터 다음 항목 직전까지. 계약 토큰을 한 물리적 줄에서 찾지 않으므로
-  // 하위 불릿으로 쪼개거나 표로 재배치하는 순전한 서식 변경이 RED가 되지 않고,
-  // 그러면서도 다른 항목이 공급한 토큰을 빌려 쓰는 false-GREEN은 막는다.
-  return items.map((item, i) => ({
-    ...item,
-    block: lines
-      .slice(item.index, i + 1 < items.length ? items[i + 1].index : lines.length)
-      .map((l) => l.line)
-      .join("\n"),
-  }));
-}
-
-// README가 "이 경로가 저장소에 있다"고 주장하는 토큰을 모은다. 수집원은 셋이다:
-//   (1) 인라인 백틱 스팬 **전체**, (2) 코드펜스 안 명령의 공백 구분 단어
-//       (기여자가 실제로 복붙하는 첫 명령이 펜스 안에 있으므로 펜스를 빼면
-//        `npm start`를 존재하지 않는 `node src/server.js`로 바꿔도 게이트가 침묵한다),
-//   (3) 상대 마크다운 링크 대상.
-// README 본문과 독립적으로 판별력을 측정할 수 있도록 순수 함수로 분리한다
-// (test_18_readme_path_claims_exhaustive가 합성 마크다운으로 직접 먹인다).
-//
-// 한 토큰이 "경로 주장"인지는 **이름이 아니라 형태와 출처**로 판정한다 — 접두사 목록(src|test|docs|e2e)이나
-// 확장자 목록(yml|json|md|js)으로 대상을 좁히면 그 목록 밖의 진짜 경로(`scripts/build.sh`,
-// `config/nginx.conf`, `.github/workflows/ci.yml`)가 조용히 검사에서 빠진다 —
-// dw2(c)가 금지한 구조적 면제다(spec-conformance must_fix spec1).
-//   · 경로 문자만으로 이뤄진 토큰만 후보다([A-Za-z0-9._/-]) → 명령·헤더·호출식·객체·URL·
-//     플래그(`npm start`, `Cache-Control: no-store`, `app.listen()`, `{"ok":true}`,
-//     `http://…`, `--reporter=json`)는 다른 문자를 갖고 있어 여기서 이미 빠진다.
-//   · `/`로 시작하면 라우트·절대경로이지 저장소 *상대* 경로가 아니다(`/healthz`).
-//   · 글로브(`*`·`?`)는 경로 주장이 아니라 패턴이다(`test/integration/**`).
-//   · 숫자와 점만으로 된 토큰은 버전이다(`22.11.0`).
-//
-// 출처에 따라 갈리는 것은 **구분자도 확장자도 없는 한 단어**(`Makefile`, `LICENSE`)뿐이다.
-//   · 인라인 백틱 스팬 = 저장소에 대한 주장이다(dw2(c)가 계약한 대상 그 자체:
-//     "README 전체의 백틱 저장소 상대경로 토큰"). 그러므로 한 단어 파일명도 **수집한다** —
-//     직전 판본은 이것을 설계상 빼서, Layout 표에 `| \`Makefile\` | … |` 한 줄을 넣어도
-//     가드가 5 passed였다(review must_fix spec1 / qa1의 라이브 재현).
-//     대가는 명시적이다: 저장소에 없는 것을 백틱으로 적을 수 없다 — 환경변수·상태 어휘 같은
-//     비경로 단어는 백틱 없이(또는 굵게) 적는다. 정직한 출구가 항상 열려 있고,
-//     "면제 키워드"를 하나도 만들지 않는다.
-//   · 코드펜스 안 = 실행할 **명령**이고, 그 맨 단어는 셸 문법(동사·서브커맨드·플래그)이지
-//     저장소에 대한 주장이 아니다(`npm ci`의 `ci`, `docker compose … up -d`의 `up`).
-//     펜스 수집은 dw2(a)(명령까지 검사 범위를 넓힌다)를 위해 계약 위에 얹은 것이므로
-//     거기서는 경로 인자 — 구분자나 확장자를 가진 토큰 — 만 본다.
-function isPathShaped(raw) {
-  const token = raw.trim().replace(/^['"(<]+|['".,;:)>]+$/g, "");
-  if (!token) return null;
-  if (!/^[A-Za-z0-9._/-]+$/.test(token)) return null; // 명령·헤더·호출식·URL·플래그·글로브
-  if (token.startsWith("/") || token.startsWith("-")) return null; // 라우트·절대경로·플래그
-  if (/^[\d.]+$/.test(token)) return null; // 버전 번호
-  return token;
-}
-
-function looksLikePathArgument(token) {
-  return token.includes("/") || /\.[A-Za-z0-9]+$/.test(token);
-}
-
+/** 코드펜스 안을 포함한 README 전역에서 경로 주장을 모은다. */
 function collectPathClaims(text) {
-  const claims = new Set();
-  for (const [, span] of text.matchAll(/`([^`\n]+)`/g)) {
-    const token = isPathShaped(span);
-    if (token) claims.add(token); // 한 단어 파일명도 여기서는 주장이다
-  }
-  for (const { line, inFence } of annotatedLines(text)) {
-    if (!inFence || /^\s*```/.test(line)) continue;
-    for (const word of line.split(/\s+/)) {
-      const token = isPathShaped(word);
-      if (token && looksLikePathArgument(token)) claims.add(token);
+  const claims = [];
+  let fenced = false;
+  text.split("\n").forEach((line, i) => {
+    if (/^\s*```/.test(line)) {
+      fenced = !fenced;
+      return;
     }
-  }
-  for (const [, target] of text.matchAll(/\[[^\]\n]*\]\(([^)\s]+)\)/g)) {
-    if (/^([a-z]+:|#|\/\/)/i.test(target)) continue; // 외부 URL·앵커는 fs 대조 대상이 아니다
-    claims.add(target.split("#")[0]);
-  }
+    const push = (raw) => {
+      const token = trimToken(raw);
+      if (isPathClaim(token)) claims.push({ token, line, lineNo: i + 1 });
+    };
+    if (fenced) {
+      for (const word of line.split(/\s+/)) push(word);
+      return;
+    }
+    for (const m of line.matchAll(/`([^`\n]+)`/g)) push(m[1]);
+    for (const m of line.matchAll(/\[[^\]\n]*\]\(([^)\s]+)\)/g)) push(m[1]);
+  });
   return claims;
 }
 
-// 수집된 경로 주장 중 디스크에서 해석되지 않는 것들. references_resolve가 토큰마다 거는 것과
-// 같은 해석(REPO_ROOT 기준 existsSync)이며, 이 목록이 비어 있지 않다는 것은 README가 죽은
-// 경로를 가리킨다는 뜻이다.
-function unresolvedPathClaims(text) {
-  return [...collectPathClaims(text)].filter(
-    (token) => !existsSync(REPO_ROOT + token.replace(/\/$/, "")),
-  );
+/** README가 부르는 npm 스크립트. `npm run <x>`와 고정 단축 `npm test`/`npm start`만 본다. */
+function collectScriptCalls(text) {
+  const calls = [];
+  for (const m of text.matchAll(/\bnpm\s+run\s+([A-Za-z0-9:_-]+)/g)) calls.push(m[1]);
+  for (const m of text.matchAll(/\bnpm\s+(test|start)\b/g)) calls.push(m[1]);
+  return calls;
 }
 
-// HTTP 상태코드로 읽히는 3자리 수. `docs/features/001-create-note.md`의 `001`처럼
-// 경로·파일명 안의 숫자는 상태코드가 아니다.
-const HTTP_STATUS = /(?<![\w./-])[1-5]\d{2}(?![\w./-])/;
-
-function squash(text) {
-  return text.toLowerCase().replace(/[\s`"'*|]/g, "");
+/** `scripts.start`가 실제로 실행하는 파일 — 리터럴 `src/app.js`를 가드에 박지 않는다. */
+function entrypointOf(scripts) {
+  const start = scripts?.start ?? "";
+  const hit = start.split(/\s+/).map(trimToken).find((w) => isPathClaim(w) && PATH_EXT.test(w));
+  return hit ?? null;
 }
 
-describe("issue #18 — README는 저장소에 대해 참인 말만 한다", () => {
-  // dw1: 네 섹션이 존재하고, 각 섹션에 비공백 본문이 최소 한 줄 있다.
-  test("test_18_readme_sections", () => {
-    const readme = readReadme();
-    for (const heading of REQUIRED_SECTIONS) {
-      const body = sectionBody(readme, heading);
-      expect(body, `README.md에 '${heading}' 섹션이 없다`).not.toBeNull();
-      const filled = body.split("\n").filter((line) => line.trim().length > 0);
-      // 헤딩 네 줄만 있는 빈 README가 통과하지 못하게 하는 절이다.
-      expect(filled.length, `'${heading}' 섹션의 본문이 비어 있다 — 헤딩만으로는 아무도 돕지 못한다`)
-        .toBeGreaterThan(0);
+function referenceProblems(text, env) {
+  const problems = [];
+
+  for (const { token, line, lineNo } of collectPathClaims(text)) {
+    if (line.includes(PLANNED_MARKER)) continue; // 같은 줄에서 "아직 없다"고 밝힌 경로는 주장이 아니다
+    if (!env.exists(token)) problems.push(`README.md:${lineNo}: 존재하지 않는 경로 '${token}'을 가리킨다`);
+  }
+
+  for (const name of collectScriptCalls(text)) {
+    if (!(name in env.scripts)) problems.push(`README.md: package.json에 없는 스크립트 'npm run ${name}'을 안내한다`);
+  }
+
+  const entry = entrypointOf(env.scripts);
+  if (!entry) problems.push("package.json scripts.start에서 진입점 파일을 찾을 수 없다");
+  else {
+    const layout = joinBody(bodyOf(text, "## Layout"));
+    if (layout === "" || !layout.includes(entry)) problems.push(`README.md: '## Layout'이 진입점 '${entry}'(scripts.start)를 언급하지 않는다`);
+    if (!env.exists(entry)) problems.push(`진입점 '${entry}'이 디스크에 없다`);
+  }
+
+  return problems;
+}
+
+/** "아직 없음" 마커는 README 전체에서 한 벌이고 `## Layout`에만 나타난다. */
+function markerProblems(text) {
+  const layoutLines = new Set((bodyOf(text, "## Layout") ?? []).map((r) => r.lineNo));
+  return text
+    .split("\n")
+    .map((line, i) => ({ line, lineNo: i + 1 }))
+    .filter((r) => r.line.includes(PLANNED_MARKER) && !layoutLines.has(r.lineNo))
+    .map((r) => `README.md:${r.lineNo}: '${PLANNED_MARKER}' 마커는 '## Layout' 밖에서 쓸 수 없다`);
+}
+
+// ---------------------------------------------------------------- dw3
+
+const firstIndex = (rows, re) => rows.findIndex((r) => re.test(r.text));
+
+function runTestsProblems(text) {
+  const rows = bodyOf(text, "## Run tests");
+  if (!rows) return ["README.md: '## Run tests' 섹션이 없다"];
+
+  const install = firstIndex(rows, /\bnpm\s+(ci|install)\b/);
+  const dbUp = firstIndex(rows, /docker-compose\.test\.yml/);
+  const runTests = firstIndex(rows, /\bnpm\s+test\b|\bnpm\s+run\s+test\b|\bvitest\s+run\b/);
+
+  const problems = [];
+  if (install < 0) problems.push("README.md '## Run tests': 설치 단계(`npm ci`/`npm install`)가 없다");
+  if (dbUp < 0) problems.push("README.md '## Run tests': `docker-compose.test.yml`을 이름으로 가리키는 DB 기동 단계가 없다");
+  if (runTests < 0) problems.push("README.md '## Run tests': 테스트 실행 명령이 없다");
+  if (problems.length) return problems;
+
+  if (!(install < dbUp)) problems.push("README.md '## Run tests': 설치 단계가 DB 기동 단계보다 뒤에 있다");
+  if (!(dbUp < runTests)) problems.push("README.md '## Run tests': 첫 테스트 실행 명령이 DB 기동 단계보다 앞에 있다 — 그 순서로 따라 하면 통합 테스트가 터진다");
+  if (problems.length) return problems;
+
+  const window = rows.slice(dbUp, runTests).map((r) => r.text).join("\n");
+  if (!READINESS_TOKENS.some((t) => window.includes(t))) {
+    problems.push(`README.md '## Run tests': DB 기동 단계가 준비 완료를 보장하지 않는다 — ${READINESS_TOKENS.map((t) => `'${t}'`).join("/")} 중 하나가 필요하다`);
+  }
+  if (/\bsleep\b/.test(window)) problems.push("README.md '## Run tests': 고정 대기(`sleep`)는 준비 완료를 보장하지 않는다 (docs/QA.md 결정성 규칙)");
+  return problems;
+}
+
+// ---------------------------------------------------------------- dw4
+
+const METHOD_PATH = /\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\/[A-Za-z0-9/_.:{}-]*)/g;
+const TODAYS_ROUTE = { method: "GET", path: "/healthz" };
+const FEATURE_SPEC = /docs\/features\/[A-Za-z0-9._-]+\.md/;
+
+function endpointProblems(text, env) {
+  const rows = bodyOf(text, "## Endpoints");
+  if (!rows) return ["README.md: '## Endpoints' 섹션이 없다"];
+
+  const entries = [];
+  for (const row of rows) {
+    for (const m of row.text.matchAll(METHOD_PATH)) entries.push({ method: m[1], path: m[2], line: row.text, lineNo: row.lineNo });
+  }
+
+  const problems = [];
+  if (entries.length === 0) return ["README.md '## Endpoints': 엔드포인트를 METHOD+경로로 하나도 적지 않았다"];
+  if (!entries.some((e) => e.method === TODAYS_ROUTE.method && e.path === TODAYS_ROUTE.path)) {
+    problems.push(`README.md '## Endpoints': 오늘 실제로 응답하는 '${TODAYS_ROUTE.method} ${TODAYS_ROUTE.path}'가 이름으로 적혀 있지 않다`);
+  }
+
+  for (const e of entries) {
+    if (e.method === TODAYS_ROUTE.method && e.path === TODAYS_ROUTE.path) continue;
+    const spec = e.line.match(FEATURE_SPEC);
+    if (!spec) {
+      problems.push(`README.md:${e.lineNo}: 아직 없는 엔드포인트 '${e.method} ${e.path}'가 어떤 docs/features/*.md에도 귀속되지 않았다`);
+    } else if (!env.exists(spec[0])) {
+      problems.push(`README.md:${e.lineNo}: '${e.method} ${e.path}'가 존재하지 않는 스펙 '${spec[0]}'을 가리킨다`);
     }
+  }
+  return problems;
+}
+
+// ---------------------------------------------------------------- 합성 입력
+
+const SECTION_STUB = REQUIRED_HEADINGS.flatMap((h) => [h, "x", ""]).join("\n");
+const fakeEnv = (overrides = {}) => ({
+  scripts: { test: "vitest run", start: "node src/app.js", e2e: "playwright test" },
+  exists: (p) => ["src/app.js", "docs/features/001-create-note.md", "docker-compose.test.yml"].includes(p),
+  ...overrides,
+});
+const withSection = (heading, body) => {
+  const next = SECTION_STUB.replace(`${heading}\nx`, `${heading}\n${body}`);
+  // 합성 입력을 만들지 못하면 그 아래 판별력 단언은 전부 공허하게 참이 된다.
+  if (next === SECTION_STUB) throw new Error(`합성 입력 생성 실패: '${heading}' 자리를 찾지 못했다`);
+  return next;
+};
+
+describe("#18 README guard", () => {
+  it("test_18_readme_sections", () => {
+    // README.md 부재는 이 이슈의 증상 그 자체다 — 조용히 skip하지 않고 시끄럽게 실패한다.
+    expect(existsSync(readmeUrl), "저장소 루트에 README.md가 없다 (이슈 #18의 증상)").toBe(true);
+
+    const text = readReadme();
+    expect(sectionProblems(text)).toEqual([]);
+
+    // 판별력: 헤딩만 있는 README도, 섹션이 빠진 README도 RED다.
+    expect(sectionProblems(REQUIRED_HEADINGS.join("\n\n"))).toHaveLength(REQUIRED_HEADINGS.length);
+    expect(sectionProblems(SECTION_STUB.replace("## Layout\nx", ""))).toEqual([expect.stringContaining("'## Layout' 섹션이 없다")]);
+    expect(sectionProblems(SECTION_STUB.replace("## Layout\nx", "## Layout\n   "))).toEqual([expect.stringContaining("본문이 한 줄도 없다")]);
+    expect(sectionProblems(SECTION_STUB)).toEqual([]);
   });
 
-  // dw2: README가 가리키는 것 중 죽은 것이 없다. 검사 범위는 한 섹션이 아니라 README 전체이며
-  // 코드펜스 안을 포함한다 — 기여자가 복붙하는 첫 명령이 펜스 안에 있기 때문이다.
-  test("test_18_readme_references_resolve", () => {
-    const readme = readReadme();
-    const scripts = packageScripts();
-    const scriptNames = Object.keys(scripts);
+  it("test_18_readme_references_resolve", () => {
+    expect(existsSync(readmeUrl), "저장소 루트에 README.md가 없다 (이슈 #18의 증상)").toBe(true);
 
-    // (b) `npm run <x>` 와 고정 단축 `npm test`/`npm start` 만 본다 — 그래서 손으로 유지하는
-    //     npm 빌트인 면제 목록이 필요 없다(`npm ci`/`npm i`는 애초에 수집되지 않는다).
-    const invoked = new Set();
-    for (const [, name] of readme.matchAll(/\bnpm\s+run\s+([A-Za-z][\w:-]*)/g)) invoked.add(name);
-    for (const [, name] of readme.matchAll(/\bnpm\s+(test|start)\b/g)) invoked.add(name);
-    expect(invoked.size, "README가 npm 스크립트를 하나도 안내하지 않는다 — 실행법이 없다는 뜻이다")
-      .toBeGreaterThan(0);
-    for (const name of invoked) {
-      expect(scriptNames, `README가 존재하지 않는 npm 스크립트 '${name}'를 안내한다`).toContain(name);
-    }
+    const text = readReadme();
+    const env = realEnv();
+    expect(referenceProblems(text, env)).toEqual([]);
+    expect(markerProblems(text)).toEqual([]);
 
-    // (c) 저장소 상대경로 토큰과 상대 마크다운 링크 대상이 전부 fs에 존재한다.
-    //     수집 규칙은 collectPathClaims에 있다(펜스 안까지 본다).
-    const referenced = collectPathClaims(readme);
-    expect(referenced.size, "README가 저장소 경로를 하나도 가리키지 않는다 — 인덱스로서 쓸모가 없다")
-      .toBeGreaterThan(0);
-    for (const token of referenced) {
-      const target = REPO_ROOT + token.replace(/\/$/, "");
-      expect(existsSync(target), `README가 존재하지 않는 경로 '${token}'를 가리킨다`).toBe(true);
-      if (token.endsWith("/")) {
-        expect(statSync(target).isDirectory(), `README가 '${token}'를 디렉터리로 적었지만 파일이다`).toBe(true);
-      }
-    }
+    // 판별력 (a) 죽은 경로 / 글로브 면제 / "아직 없음" 면제
+    const layout = (body) => withSection("## Layout", body);
+    expect(referenceProblems(layout("`src/app.js`와 `docs/NOPE.md`"), fakeEnv())).toEqual([expect.stringContaining("존재하지 않는 경로 'docs/NOPE.md'")]);
+    expect(referenceProblems(layout("`src/app.js` — `test/integration/**`는 글로브다"), fakeEnv())).toEqual([]);
+    expect(referenceProblems(layout(`\`src/app.js\` / \`src/routes/notes.js\` ${PLANNED_MARKER}`), fakeEnv())).toEqual([]);
+    expect(referenceProblems(layout("`src/app.js` / `src/routes/notes.js`"), fakeEnv())).toEqual([expect.stringContaining("존재하지 않는 경로 'src/routes/notes.js'")]);
+    // 낱말과 URL은 경로 주장이 아니다 (백틱을 지우게 가르치지 않는다)
+    expect(referenceProblems(layout("`src/app.js`는 `PORT`를 읽는다 — `express` / http://localhost:3000/healthz"), fakeEnv())).toEqual([]);
 
-    // (d) `## Layout`은 package.json `scripts.start`가 **실제로 실행하는 파일**을 언급한다.
-    //     리터럴을 박지 않으므로 진입점이 리네임돼도 정직한 수정이 GREEN이다.
-    const startScript = scripts.start;
-    expect(typeof startScript, "package.json에 scripts.start가 없다").toBe("string");
-    const entry = (startScript.match(/(?:^|\s)([\w./-]+\.[cm]?js)(?=\s|$)/) ?? [])[1];
-    expect(entry, `package.json scripts.start에서 진입점 파일을 찾지 못했다: ${startScript}`).toBeTruthy();
-    expect(existsSync(REPO_ROOT + entry), `scripts.start가 실행하는 '${entry}'가 디스크에 없다`).toBe(true);
-    const layout = sectionBody(readme, "## Layout");
-    expect(layout, "README.md에 '## Layout' 섹션이 없다").not.toBeNull();
-    expect(layout, `'## Layout'이 진입점 '${entry}'(package.json scripts.start)를 언급하지 않는다`)
-      .toContain(entry);
-  });
+    // 판별력 (b) 죽은 스크립트
+    expect(referenceProblems(layout("`src/app.js`\n\n    npm run e2eee"), fakeEnv())).toEqual([expect.stringContaining("npm run e2eee")]);
+    expect(referenceProblems(layout("`src/app.js`\n\n    npm run e2e 와 npm test"), fakeEnv())).toEqual([]);
 
-  // dw2(c)의 "모두 / 면제 키워드 없음"을 README 본문과 **독립적으로** 측정한다.
-  // 오늘의 README가 우연히 인용하지 않는 경로(`scripts/build.sh`, `config/nginx.conf`,
-  // `.github/workflows/ci.yml`, `Dockerfile.dev` …)도 경로 주장으로 수집돼야 한다 —
-  // 수집기가 접두사·확장자 목록으로 대상을 좁히면 그 목록 밖의 죽은 경로에 가드가 침묵하고,
-  // 위 references_resolve는 오늘의 README만 보므로 그 침묵을 드러내지 못한다.
-  // 반대로 명령·라우트·글로브·외부 URL·호출식은 경로 주장이 아니다 — 그것까지 fs에서 찾으면
-  // 참인 README가 RED가 된다.
-  test("test_18_readme_path_claims_exhaustive", () => {
-    const markdown = [
-      "루트 파일 `Dockerfile.dev` 와 `scripts/build.sh` 를 인용한다.",
-      "설정은 `config/nginx.conf`, CI 워크플로는 `.github/workflows/ci.yml`, 환경 템플릿은 `.env.example`.",
-      "명령은 `npm start`, 라우트는 `/healthz`, 호출은 `app.listen()`, 헤더는 `Cache-Control: no-store`.",
-      "패턴은 `test/integration/**`, 버전은 `22.11.0`, 플래그는 `--reporter=json`.",
-      "스펙은 [001](docs/features/001-create-note.md), 외부는 [예시](https://example.com/docs/x.md).",
-      "```bash",
-      "node tools/seed.js --url http://localhost:3000/healthz < fixtures/seed.sql",
-      "```",
-    ].join("\n");
-
-    const claims = [...collectPathClaims(markdown)];
-
-    for (const token of [
-      "Dockerfile.dev",
-      "scripts/build.sh",
-      "config/nginx.conf",
-      ".github/workflows/ci.yml",
-      ".env.example",
-      "docs/features/001-create-note.md",
-      "tools/seed.js",
-      "fixtures/seed.sql",
-    ]) {
-      expect(
-        claims,
-        `'${token}'는 저장소 상대경로 주장인데 수집되지 않았다 — 이 경로가 죽어도 가드가 침묵한다`,
-      ).toContain(token);
-    }
-
-    for (const token of [
-      "npm start",
-      "/healthz",
-      "app.listen()",
-      "Cache-Control: no-store",
-      "test/integration/**",
-      "22.11.0",
-      "--reporter=json",
-      "https://example.com/docs/x.md",
-      "http://localhost:3000/healthz",
-      "node",
-      "--url",
-    ]) {
-      expect(
-        claims,
-        `'${token}'은 경로 주장이 아니다(명령·라우트·글로브·버전·플래그·외부 URL) — fs에서 찾으면 참인 README가 RED가 된다`,
-      ).not.toContain(token);
-    }
-  });
-
-  // dw2(c)의 "면제 없음"을 **구분자도 확장자도 없는 한 단어 파일명**(`Makefile`, `LICENSE`,
-  // `Dockerfile`)에 대해 측정한다. 직전 판본은 이 모양을 설계상 수집에서 뺐고, 그래서 README가
-  // 없는 루트 파일을 백틱으로 주장해도 가드가 침묵했다(리뷰 must_fix spec1 / qa1의 라이브 재현:
-  // Layout 표에 `| `Makefile` | … |` 한 줄을 넣어도 5 passed였다).
-  //
-  // 반대편 경계도 같은 테스트가 잡는다: **코드펜스 안의 맨 단어는 명령의 문법**(동사·서브커맨드·
-  // 플래그)이지 저장소에 대한 주장이 아니다. dw2(c)가 계약한 대상은 "백틱 저장소 상대경로 토큰과
-  // 상대 마크다운 링크 대상"이고, 펜스 안 수집은 dw2(a)(명령 검사 범위)를 위해 그 위에 얹은
-  // 것이므로 거기서는 경로 인자(구분자·확장자를 가진 토큰)만 본다 — `npm ci`의 `ci`,
-  // `docker compose … up -d`의 `up`을 경로로 읽으면 참인 README가 RED가 된다.
-  test("test_18_readme_bare_name_path_claims", () => {
-    const markdown = [
-      "| `Makefile` | 편의 명령 모음 |",
-      "라이선스는 `LICENSE`, 컨테이너 정의는 `Dockerfile`.",
-      "명령은 `npm start`, 라우트는 `/healthz`, 패턴은 `test/integration/**`,",
-      "버전은 `22.11.0`, 플래그는 `--reporter=json`.",
-      "```bash",
-      "npm ci && docker compose -f docker-compose.test.yml up -d",
-      "```",
-    ].join("\n");
-
-    const claims = [...collectPathClaims(markdown)];
-
-    for (const token of ["Makefile", "LICENSE", "Dockerfile", "docker-compose.test.yml"]) {
-      expect(
-        claims,
-        `'${token}'는 저장소 파일에 대한 주장인데 수집되지 않았다 — 그 파일이 없어도 가드가 침묵한다`,
-      ).toContain(token);
-    }
-
-    for (const token of [
-      "npm",
-      "ci",
-      "docker",
-      "compose",
-      "up",
-      "-d",
-      "npm start",
-      "/healthz",
-      "test/integration/**",
-      "22.11.0",
-      "--reporter=json",
-    ]) {
-      expect(
-        claims,
-        `'${token}'은 경로 주장이 아니다(펜스 안 명령 문법·라우트·글로브·버전·플래그) — fs에서 찾으면 참인 README가 RED가 된다`,
-      ).not.toContain(token);
-    }
-  });
-
-  // qa1의 재현을 그대로 테스트로 굳힌다: 실제 README에 존재하지 않는 루트 파일 한 줄을 주입하면
-  // 경로 해석이 그것을 미해결로 보고해야 한다. 오늘의 README는 미해결이 0이어야 하므로,
-  // 이 테스트는 "주입 전 0, 주입 후 그 토큰"이라는 차이로 판별력을 측정한다 —
-  // 단언이 통과하는 가장 게으른 구현(아무 토큰도 수집하지 않기)이 여기서 죽는다.
-  test("test_18_readme_false_bare_path_claim_is_caught", () => {
-    const readme = readReadme();
-    expect(
-      unresolvedPathClaims(readme),
-      "오늘의 README가 이미 존재하지 않는 경로를 가리킨다",
-    ).toEqual([]);
-
-    // 디스크에서 파생한다 — 나중에 누가 진짜 Makefile을 추가해도 이 테스트가 거짓 RED가 되지 않는다.
-    const absent = ["Makefile", "LICENSE", "NOTICE", "CODEOWNERS"].find(
-      (name) => !existsSync(REPO_ROOT + name),
-    );
-    expect(absent, "후보 루트 파일이 전부 실재한다 — 다른 이름으로 이 테스트를 갱신해야 한다").toBeTruthy();
-
-    const mutated = `${readme}\n| \`${absent}\` | 존재하지 않는 루트 파일에 대한 거짓 주장 |\n`;
-    expect(
-      unresolvedPathClaims(mutated),
-      `README가 없는 루트 파일 '${absent}'를 백틱으로 주장하는데 가드가 미해결로 보고하지 않는다`,
-    ).toContain(absent);
-  });
-
-  // dw3: `## Endpoints`의 모든 항목이 상태를 숨기지 않고, 그 상태가 양방향으로 참이다.
-  test("test_18_readme_endpoints_status_honest", () => {
-    const readme = readReadme();
-    const section = sectionBody(readme, "## Endpoints");
-    expect(section, "README.md에 '## Endpoints' 섹션이 없다").not.toBeNull();
-
-    const items = endpointItems(section);
-    // 항목이 하나도 없는 Endpoints 섹션이 공허하게 통과해서는 안 된다.
-    expect(items.length, "'## Endpoints'에 `METHOD /path` 형태의 항목이 하나도 없다").toBeGreaterThan(0);
-
-    const routes = registeredRoutes();
-    for (const item of items) {
-      const markers = STATUS_MARKERS.filter((m) => new RegExp(`\\b${m}\\b`).test(item.line));
-      // 마커가 없으면 독자는 그 줄이 오늘 되는 일인지 계획인지 구분할 수 없다.
-      expect(
-        markers,
-        `'${item.method} ${item.path}' 항목에 상태 마커(${STATUS_MARKERS.join(" / ")})가 정확히 하나 있어야 한다: ${item.line}`,
-      ).toHaveLength(1);
-      const registered = isRegistered(routes, item.method, item.path);
-      if (markers[0] === "implemented") {
-        expect(
-          registered,
-          `README가 '${item.method} ${item.path}'를 implemented로 적었지만 진입점에서 도달하는 라우트에 없다 ` +
-            `(직접 등록·라우터 마운트 둘 다 해석한 결과: ${[...routes].join(", ") || "(없음)"})`,
-        ).toBe(true);
-      } else {
-        // 양방향 — 001/002가 머지되어 실제로 응답하는 날 README의 `planned`가 RED가 되고,
-        // 그 PR의 저자는 마커 한 단어를 뒤집어야 한다. 의도된 트립와이어다.
-        expect(
-          registered,
-          `README가 '${item.method} ${item.path}'를 planned로 적었지만 그 라우트가 이미 등록돼 응답한다 ` +
-            "— 이 실패는 당신의 소스가 아니라 README.md '## Endpoints'의 마커 때문이다: implemented로 고친다",
-        ).toBe(false);
-      }
-    }
-
-    // (e) `planned`가 적힌 줄은 HTTP 상태코드를 약속하지 않는다 — "호출하면 404가 온다" 류의 문장은
-    //     그 엔드포인트가 구현되는 날 거짓이 되는데, 어떤 소스와도 대조할 수 없다.
-    for (const { line, inFence } of annotatedLines(section)) {
-      if (inFence || !/\bplanned\b/.test(line)) continue;
-      expect(
-        HTTP_STATUS.test(line),
-        `'planned'가 적힌 줄이 HTTP 상태코드를 약속한다 — 구현되는 날 거짓이 된다: ${line.trim()}`,
-      ).toBe(false);
-    }
-
-    // (f) GET /healthz 항목의 응답 서술이 보존 계약과 일치해야 한다
-    //     (docs/TECHNICAL.md:63/:77, test/smoke.test.js). 계약 문자열은 README가 아니라 그 계약에서 왔다.
-    const healthz = items.find((item) => normalizePath(item.path) === "/healthz");
-    expect(healthz, "'## Endpoints'에 `GET /healthz` 항목이 없다 — 오늘 유일하게 구현된 엔드포인트다").toBeDefined();
-    expect(healthz.method).toBe("GET");
-    const contract = squash(healthz.block);
-    expect(contract, `/healthz 항목이 상태코드 200을 적지 않았다:\n${healthz.block}`).toContain("200");
-    expect(contract, `/healthz 항목의 body 서술이 {ok:true} 계약과 다르다:\n${healthz.block}`).toContain("ok:true");
-    expect(contract, `/healthz 항목이 Cache-Control: no-store를 적지 않았다:\n${healthz.block}`)
-      .toContain("cache-control:no-store");
-  });
-
-  // cf1 / arch1 (review round 4 must_fix)의 재현을 테스트로 굳힌다.
-  //
-  // dw3(c)(d)의 양방향 대조는 "이 저장소가 실제로 등록하는 라우트"를 알아야 성립한다.
-  // 그 판정이 `app.<method>("<전체 경로>"` 라는 등록 구문 **한 형태**에만 걸려 있으면,
-  // docs/TECHNICAL.md §Architecture가 001~003에 대해 처방한 라우터 마운트 형태
-  // (`src/routes/notes.js`의 `router.post("/")` + `src/app.js`의 `app.use("/notes", router)`)로
-  // 구현하는 순간 가드가 뒤집힌다: 라우트가 실제로 응답하는데 README의 거짓 `planned`이 GREEN이고
-  // 정직한 `implemented`가 RED가 된다 — 즉 그 PR의 유일한 GREEN 경로가 "README를 계속 거짓말시키기"다.
-  //
-  // 그래서 오늘 README가 `planned`로 적은 항목 하나하나에 대해, 그 항목이 **처방된 형태로**
-  // 구현된 소스 트리를 만들어 해석기에 먹이고 "등록된 것으로 읽히는가"를 측정한다.
-  // 실제 README에서 항목을 가져오므로, 나중에 항목이 늘거나 경로가 바뀌어도 이 측정은 따라간다.
-  test("test_18_readme_planned_endpoints_tripwire_under_router_mount", () => {
-    const readme = readReadme();
-    const section = sectionBody(readme, "## Endpoints");
-    expect(section, "README.md에 '## Endpoints' 섹션이 없다").not.toBeNull();
-
-    const planned = endpointItems(section).filter((item) => /\bplanned\b/.test(item.line));
-    expect(
-      planned.length,
-      "'## Endpoints'에 planned 항목이 없다 — 이 트립와이어가 지킬 대상이 사라졌다",
-    ).toBeGreaterThan(0);
-
-    for (const item of planned) {
-      const tree = routerMountTree(item.method, item.path);
-      const routes = resolveRoutes(tree, "src/app.js");
-      expect(
-        isRegistered(routes, item.method, item.path),
-        `'${item.method} ${item.path}'가 docs/TECHNICAL.md §Architecture의 라우터 마운트 형태로 구현되면 ` +
-          "실제로 응답하는데, 가드는 미등록으로 읽는다 — README의 거짓 planned이 GREEN이고 정직한 " +
-          `implemented가 RED가 된다. 해석된 라우트: ${[...routes].join(", ") || "(없음)"}`,
-      ).toBe(true);
-    }
-  });
-
-  // 위 트립와이어를 넓히는 대가로 반대 방향의 false-RED를 사지 않는다는 것을 함께 못 박는다.
-  // 마운트되지 않은 라우터 파일, 주석 처리된 등록, 다른 경로의 접두사는 "등록된 라우트"가 아니다 —
-  // 이것들이 등록으로 읽히면 참인 `planned`을 적은 README가 RED가 되고, 저자는 다시
-  // "없는 엔드포인트를 implemented로 적기"로 몰린다(cf-s4가 지목한 덫의 거울상).
-  test("test_18_route_resolution_ignores_unmounted_and_commented_routes", () => {
-    const tree = new Map([
-      [
-        "src/app.js",
-        [
-          'import express from "express";',
-          'import notesRouter from "./routes/notes.js";',
-          "const app = express();",
-          'app.get("/healthz", (_req, res) => res.status(200).json({ ok: true }));',
-          '// app.post("/legacy", handler); — 예전 라우트, 지금은 주석이다',
-          "/*",
-          ' app.delete("/purge", handler);',
-          "*/",
-          'app.use("/notes", notesRouter);',
-          "app.listen(3000);",
-        ].join("\n"),
-      ],
-      [
-        "src/routes/notes.js",
-        [
-          'import { Router } from "express";',
-          "const router = Router();",
-          'router.post("/", (_req, res) => res.status(201).json({}));',
-          "export default router;",
-        ].join("\n"),
-      ],
-      [
-        "src/routes/orphan.js",
-        [
-          'import { Router } from "express";',
-          "const router = Router();",
-          'router.get("/orphan", (_req, res) => res.status(200).json({}));',
-          "export default router; // 어디에도 마운트되지 않았다",
-        ].join("\n"),
-      ],
+    // 판별력 (d) 진입점은 리터럴이 아니라 package.json scripts.start에서 파생된다
+    const renamed = fakeEnv({ scripts: { start: "node src/server.js" }, exists: (p) => p === "src/server.js" });
+    expect(referenceProblems(layout("`src/app.js`"), renamed)).toEqual([
+      expect.stringContaining("존재하지 않는 경로 'src/app.js'"),
+      expect.stringContaining("진입점 'src/server.js'"),
     ]);
+    expect(referenceProblems(layout("`src/server.js`"), renamed)).toEqual([]);
 
-    const routes = resolveRoutes(tree, "src/app.js");
-    const shown = () => `해석된 라우트: ${[...routes].join(", ") || "(없음)"}`;
+    // 판별력: 마커는 `## Layout` 밖에서 쓸 수 없다 (엔드포인트 상태 어휘로 번지지 않게)
+    expect(markerProblems(withSection("## Endpoints", `- POST /notes ${PLANNED_MARKER}`))).toEqual([expect.stringContaining("'## Layout' 밖에서 쓸 수 없다")]);
+    expect(markerProblems(layout(`\`src/routes/notes.js\` ${PLANNED_MARKER}`))).toEqual([]);
+  });
 
-    // 마운트된 라우터의 라우트는 마운트 경로와 합쳐진 자리에만 있다.
-    expect(isRegistered(routes, "POST", "/notes"), `POST /notes 가 등록으로 읽혀야 한다 — ${shown()}`).toBe(true);
-    expect(isRegistered(routes, "GET", "/healthz"), `GET /healthz 가 등록으로 읽혀야 한다 — ${shown()}`).toBe(true);
+  it("test_18_readme_run_tests_order_enforced", () => {
+    expect(existsSync(readmeUrl), "저장소 루트에 README.md가 없다 (이슈 #18의 증상)").toBe(true);
 
-    for (const [method, path, why] of [
-      ["POST", "/", "라우터 안의 상대 경로가 마운트 접두사 없이 루트로 새면 안 된다"],
-      ["GET", "/orphan", "마운트되지 않은 라우터 파일의 라우트는 응답하지 않는다"],
-      ["POST", "/legacy", "주석 처리된 등록은 라우트가 아니다"],
-      ["DELETE", "/purge", "블록 주석 안의 등록은 라우트가 아니다"],
-      ["GET", "/health", "경로 경계 — /healthz의 접두사는 다른 엔드포인트다"],
-      ["GET", "/notes", "POST만 등록된 경로를 GET으로 읽으면 안 된다"],
-    ]) {
-      expect(isRegistered(routes, method, path), `${method} ${path}: ${why} — ${shown()}`).toBe(false);
+    expect(runTestsProblems(readReadme())).toEqual([]);
+
+    const steps = (...lines) => withSection("## Run tests", lines.join("\n"));
+    const good = ["npm ci", "docker compose -f docker-compose.test.yml up -d --wait", "npm test"];
+
+    expect(runTestsProblems(steps(...good))).toEqual([]);
+    // 순서를 뒤집으면 RED — "기동 언급 이후 어딘가"가 아니라 첫 테스트 명령의 위치로 판정한다
+    expect(runTestsProblems(steps(good[0], good[2], good[1]))).toEqual([expect.stringContaining("첫 테스트 실행 명령이 DB 기동 단계보다 앞에 있다")]);
+    expect(runTestsProblems(steps(good[1], good[0], good[2]))).toEqual([expect.stringContaining("설치 단계가 DB 기동 단계보다 뒤에")]);
+    // 준비 대기를 빼거나 고정 대기로 바꾸면 RED
+    expect(runTestsProblems(steps(good[0], "docker compose -f docker-compose.test.yml up -d", good[2]))).toEqual([expect.stringContaining("준비 완료를 보장하지 않는다")]);
+    expect(runTestsProblems(steps(good[0], "docker compose -f docker-compose.test.yml up -d", "sleep 10", good[2]))).toEqual([
+      expect.stringContaining("준비 완료를 보장하지 않는다"),
+      expect.stringContaining("고정 대기"),
+    ]);
+    // 단계가 통째로 빠져도 RED
+    expect(runTestsProblems(steps(good[0], good[2]))).toEqual([expect.stringContaining("DB 기동 단계가 없다")]);
+    expect(runTestsProblems(steps(good[1], good[2]))).toEqual([expect.stringContaining("설치 단계")]);
+    // 준비 대기 토큰은 셋 다 받는다 (기동 명령의 리터럴 형태는 요구하지 않는다)
+    for (const token of READINESS_TOKENS) {
+      expect(runTestsProblems(steps(good[0], `docker compose -f docker-compose.test.yml up -d`, `준비 대기: ${token}`, good[2]))).toEqual([]);
     }
   });
 
-  // dw4: `## Run tests`를 위에서 아래로 따라 한 기여자가 막히지 않는다.
-  // 설치 → DB 기동 → 테스트 실행이 이 순서여야 한다. `docker compose -f ... up`이라는 리터럴
-  // 명령 형태는 요구하지 않는다 — 지켜야 할 사실은 "기동 단계가 테스트보다 앞에 온다 +
-  // 실재하는 compose 파일을 가리킨다"이고, 형태를 못 박으면 기동을 래퍼로 감싸는 날
-  // 참인 문서가 RED가 된다(의도적 하향 조정 — PR 본문에 기록).
-  test("test_18_readme_run_tests_resolves", () => {
-    const readme = readReadme();
-    const section = sectionBody(readme, "## Run tests");
-    expect(section, "README.md에 '## Run tests' 섹션이 없다").not.toBeNull();
+  it("test_18_readme_endpoints_reflect_today", () => {
+    expect(existsSync(readmeUrl), "저장소 루트에 README.md가 없다 (이슈 #18의 증상)").toBe(true);
 
-    const installAt = section.search(/\bnpm\s+(?:ci|install)\b/);
-    expect(installAt, "'## Run tests'에 설치 단계(`npm ci` / `npm install`)가 없다").toBeGreaterThanOrEqual(0);
+    expect(endpointProblems(readReadme(), realEnv())).toEqual([]);
 
-    // test/integration/db.test.js가 가용성 체크 없이 `docker compose ... psql`을 부르고
-    // harness test_glob이 그 파일을 unit 게이트의 같은 실행에 넣으므로, DB 기동 단계가
-    // 설치 뒤·테스트 앞에 없는 README는 기여자를 첫 명령부터 RED로 보낸다.
-    const composeStep = [...section.matchAll(/[A-Za-z0-9_.\/-]+\.ya?ml/g)]
-      .filter((m) => existsSync(REPO_ROOT + m[0]))
-      .find((m) => m.index > installAt);
-    expect(
-      composeStep,
-      "'## Run tests'에 설치 단계 뒤로 DB 기동 단계가 없다 — 디스크에 실재하는 compose 파일을 이름으로 가리켜야 한다",
-    ).toBeDefined();
-
-    const after = section.slice(composeStep.index + composeStep[0].length);
-    const runMatch = after.match(/\bnpm\s+(?:run\s+)?test\b|\bnpx\s+vitest\s+run\b/);
-    expect(
-      runMatch,
-      "DB 기동 단계 뒤에 테스트 실행 명령(`npm test` / `npx vitest run`)이 없다 — 순서가 뒤집혔거나 명령이 없다",
-    ).not.toBeNull();
+    const eps = (body) => withSection("## Endpoints", body);
+    // 오늘 실제로 응답하는 라우트를 빼고 아직 없는 것만 나열하면 RED
+    expect(endpointProblems(eps("- POST /notes — `docs/features/001-create-note.md`"), fakeEnv())).toEqual([expect.stringContaining("GET /healthz")]);
+    // 항목이 0개인 섹션도 RED
+    expect(endpointProblems(eps("엔드포인트는 여러 개 있다."), fakeEnv())).toEqual([expect.stringContaining("하나도 적지 않았다")]);
+    // 아직 없는 엔드포인트는 실재하는 스펙 문서에 귀속되어야 한다
+    expect(endpointProblems(eps("- GET /healthz — 200\n- POST /notes — 201"), fakeEnv())).toEqual([expect.stringContaining("어떤 docs/features/*.md에도 귀속되지 않았다")]);
+    expect(endpointProblems(eps("- GET /healthz — 200\n- POST /notes — `docs/features/999-nope.md`"), fakeEnv())).toEqual([expect.stringContaining("존재하지 않는 스펙")]);
+    expect(endpointProblems(eps("- GET /healthz — 200\n- POST /notes — `docs/features/001-create-note.md`"), fakeEnv())).toEqual([]);
   });
 });

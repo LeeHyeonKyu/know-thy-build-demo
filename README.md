@@ -18,7 +18,7 @@ HTTP로 메모를 남기고 되찾기 위한 최소 노트 API다. Node 22 + Exp
 - POST /notes — planned — 스펙: `docs/features/001-create-note.md`
 - GET /notes — planned — 스펙: `docs/features/002-list-notes.md`, `docs/features/003-search.md`
 
-`planned` 항목을 호출하면 404가 온다. 구현하는 사람은 해당 스펙 문서부터 읽는다.
+`planned` 항목은 아직 소스에 라우트가 없다 — 응답을 기대하지 말고, 구현하는 사람은 해당 스펙 문서부터 읽는다.
 
 서비스를 띄워 `implemented` 항목을 확인하려면(기본 3000 포트, `PORT` 환경변수로 바꾼다):
 
@@ -42,7 +42,13 @@ npm test
    Postgres가 떠 있지 않으면 그 파일은 예외로 끝난다.
 3. `npm test` — `test/` 아래 unit과 integration이 **한 실행**에 함께 돈다(러너는 vitest).
 
-docker를 쓸 수 없는 환경이라면 unit 파일만 지정해 돌린다: `npx vitest run test/smoke.test.js`.
+docker를 쓸 수 없는 환경이라면 통합 테스트만 제외하고 돌린다 — 파일을 하나씩 열거하지 않으므로
+나중에 추가된 unit 테스트도 함께 돈다:
+
+```bash
+npx vitest run --exclude 'test/integration/**'
+```
+
 이때 통합 테스트는 실행되지 않으므로, 머지 전에는 compose를 띄운 전체 실행으로 한 번 더 확인한다.
 
 e2e(`e2e/smoke.spec.js`, Playwright)는 `npm run e2e`로 돌린다. 하네스 성숙도가 M1인 동안

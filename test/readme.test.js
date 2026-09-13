@@ -85,6 +85,16 @@ function sourceFiles() {
   return files;
 }
 
+// src/**/*.js를 저장소 상대경로 → 텍스트 맵으로 읽는다. 라우트 해석기(resolveRoutes)가
+// 합성 트리로도 측정될 수 있도록, 디스크 접근은 여기서 끝난다.
+function readSourceTree() {
+  const tree = new Map();
+  for (const full of sourceFiles()) {
+    tree.set(full.slice(REPO_ROOT.length), readFileSync(full, "utf8"));
+  }
+  return tree;
+}
+
 // src/**/*.js에 등장하는 라우트 등록 리터럴 `app.<method>("<path>"` 를 모은다.
 // 경로를 부분문자열로 찾지 않는 이유: `GET /health`를 implemented로 적어도
 // src/app.js의 `/healthz` 때문에 통과해 버린다(리뷰에서 세 번 재발견된 구멍).
@@ -95,20 +105,66 @@ function normalizePath(path) {
   return path.length > 1 ? path.replace(/\/+$/, "") : path;
 }
 
-function registeredRoutes() {
-  const files = sourceFiles();
-  expect(files.length, "src/**/*.js 가 비어 있다 — 소스 대조의 전제가 무너졌다").toBeGreaterThan(0);
-  const text = files.map((f) => readFileSync(f, "utf8")).join("\n");
+// 소스 트리(상대경로 → 텍스트)와 진입점에서 "이 저장소가 실제로 등록하는 라우트" 집합을 만든다.
+function resolveRoutes(fileMap, _entryPath) {
   const routes = new Set();
-  for (const [, method, , path] of text.matchAll(ROUTE_REGISTRATION)) {
-    routes.add(`${method.toUpperCase()} ${normalizePath(path)}`);
+  for (const text of fileMap.values()) {
+    for (const [, method, , path] of text.matchAll(ROUTE_REGISTRATION)) {
+      routes.add(`${method.toUpperCase()} ${normalizePath(path)}`);
+    }
   }
   return routes;
+}
+
+// package.json `scripts.start`가 실제로 실행하는 파일 = 라우트 그래프의 뿌리.
+// 리터럴 "src/app.js"를 박지 않는다(진입점 리네임 시 정직한 수정이 RED가 되지 않도록).
+function entryPath() {
+  const startScript = packageScripts().start ?? "";
+  return (startScript.match(/(?:^|\s)([\w./-]+\.[cm]?js)(?=\s|$)/) ?? [])[1];
+}
+
+function registeredRoutes() {
+  const tree = readSourceTree();
+  expect(tree.size, "src/**/*.js 가 비어 있다 — 소스 대조의 전제가 무너졌다").toBeGreaterThan(0);
+  return resolveRoutes(tree, entryPath());
 }
 
 function isRegistered(routes, method, path) {
   const p = normalizePath(path);
   return routes.has(`${method} ${p}`) || routes.has(`ALL ${p}`);
+}
+
+// 테스트용 소스 트리 팩토리: `METHOD /path`를 docs/TECHNICAL.md §Architecture가 처방한
+// 라우터 마운트 형태(`src/routes/<name>.js`의 상대 등록 + 진입점의 `app.use("<prefix>", router)`)로
+// 구현한 트리를 만든다. 디스크를 건드리지 않으므로 결정적이고, 실제 src/**는 한 줄도 바뀌지 않는다.
+function routerMountTree(method, path) {
+  const segments = normalizePath(path).split("/").filter(Boolean);
+  const head = segments[0] ?? "";
+  const prefix = head ? `/${head}` : "/";
+  const sub = segments.length > 1 ? `/${segments.slice(1).join("/")}` : "/";
+  const routerFile = `src/routes/${head || "root"}.js`;
+  return new Map([
+    [
+      "src/app.js",
+      [
+        'import express from "express";',
+        `import mounted from "./routes/${head || "root"}.js";`,
+        "const app = express();",
+        'app.get("/healthz", (_req, res) => res.status(200).json({ ok: true }));',
+        `app.use(${JSON.stringify(prefix)}, mounted);`,
+        "app.listen(process.env.PORT ?? 3000);",
+      ].join("\n"),
+    ],
+    [
+      routerFile,
+      [
+        'import { Router } from "express";',
+        "const router = Router();",
+        `router.${method.toLowerCase()}(${JSON.stringify(sub)}, (_req, res) => res.status(200).json({}));`,
+        "export default router;",
+      ].join("\n"),
+    ],
+  ]);
 }
 
 // 항목 검출은 상태 마커와 **독립**이다 — 마커가 있는 줄만 항목으로 세면
@@ -461,6 +517,101 @@ describe("issue #18 — README는 저장소에 대해 참인 말만 한다", () 
     expect(contract, `/healthz 항목의 body 서술이 {ok:true} 계약과 다르다:\n${healthz.block}`).toContain("ok:true");
     expect(contract, `/healthz 항목이 Cache-Control: no-store를 적지 않았다:\n${healthz.block}`)
       .toContain("cache-control:no-store");
+  });
+
+  // cf1 / arch1 (review round 4 must_fix)의 재현을 테스트로 굳힌다.
+  //
+  // dw3(c)(d)의 양방향 대조는 "이 저장소가 실제로 등록하는 라우트"를 알아야 성립한다.
+  // 그 판정이 `app.<method>("<전체 경로>"` 라는 등록 구문 **한 형태**에만 걸려 있으면,
+  // docs/TECHNICAL.md §Architecture가 001~003에 대해 처방한 라우터 마운트 형태
+  // (`src/routes/notes.js`의 `router.post("/")` + `src/app.js`의 `app.use("/notes", router)`)로
+  // 구현하는 순간 가드가 뒤집힌다: 라우트가 실제로 응답하는데 README의 거짓 `planned`이 GREEN이고
+  // 정직한 `implemented`가 RED가 된다 — 즉 그 PR의 유일한 GREEN 경로가 "README를 계속 거짓말시키기"다.
+  //
+  // 그래서 오늘 README가 `planned`로 적은 항목 하나하나에 대해, 그 항목이 **처방된 형태로**
+  // 구현된 소스 트리를 만들어 해석기에 먹이고 "등록된 것으로 읽히는가"를 측정한다.
+  // 실제 README에서 항목을 가져오므로, 나중에 항목이 늘거나 경로가 바뀌어도 이 측정은 따라간다.
+  test("test_18_readme_planned_endpoints_tripwire_under_router_mount", () => {
+    const readme = readReadme();
+    const section = sectionBody(readme, "## Endpoints");
+    expect(section, "README.md에 '## Endpoints' 섹션이 없다").not.toBeNull();
+
+    const planned = endpointItems(section).filter((item) => /\bplanned\b/.test(item.line));
+    expect(
+      planned.length,
+      "'## Endpoints'에 planned 항목이 없다 — 이 트립와이어가 지킬 대상이 사라졌다",
+    ).toBeGreaterThan(0);
+
+    for (const item of planned) {
+      const tree = routerMountTree(item.method, item.path);
+      const routes = resolveRoutes(tree, "src/app.js");
+      expect(
+        isRegistered(routes, item.method, item.path),
+        `'${item.method} ${item.path}'가 docs/TECHNICAL.md §Architecture의 라우터 마운트 형태로 구현되면 ` +
+          "실제로 응답하는데, 가드는 미등록으로 읽는다 — README의 거짓 planned이 GREEN이고 정직한 " +
+          `implemented가 RED가 된다. 해석된 라우트: ${[...routes].join(", ") || "(없음)"}`,
+      ).toBe(true);
+    }
+  });
+
+  // 위 트립와이어를 넓히는 대가로 반대 방향의 false-RED를 사지 않는다는 것을 함께 못 박는다.
+  // 마운트되지 않은 라우터 파일, 주석 처리된 등록, 다른 경로의 접두사는 "등록된 라우트"가 아니다 —
+  // 이것들이 등록으로 읽히면 참인 `planned`을 적은 README가 RED가 되고, 저자는 다시
+  // "없는 엔드포인트를 implemented로 적기"로 몰린다(cf-s4가 지목한 덫의 거울상).
+  test("test_18_route_resolution_ignores_unmounted_and_commented_routes", () => {
+    const tree = new Map([
+      [
+        "src/app.js",
+        [
+          'import express from "express";',
+          'import notesRouter from "./routes/notes.js";',
+          "const app = express();",
+          'app.get("/healthz", (_req, res) => res.status(200).json({ ok: true }));',
+          '// app.post("/legacy", handler); — 예전 라우트, 지금은 주석이다',
+          "/*",
+          ' app.delete("/purge", handler);',
+          "*/",
+          'app.use("/notes", notesRouter);',
+          "app.listen(3000);",
+        ].join("\n"),
+      ],
+      [
+        "src/routes/notes.js",
+        [
+          'import { Router } from "express";',
+          "const router = Router();",
+          'router.post("/", (_req, res) => res.status(201).json({}));',
+          "export default router;",
+        ].join("\n"),
+      ],
+      [
+        "src/routes/orphan.js",
+        [
+          'import { Router } from "express";',
+          "const router = Router();",
+          'router.get("/orphan", (_req, res) => res.status(200).json({}));',
+          "export default router; // 어디에도 마운트되지 않았다",
+        ].join("\n"),
+      ],
+    ]);
+
+    const routes = resolveRoutes(tree, "src/app.js");
+    const shown = () => `해석된 라우트: ${[...routes].join(", ") || "(없음)"}`;
+
+    // 마운트된 라우터의 라우트는 마운트 경로와 합쳐진 자리에만 있다.
+    expect(isRegistered(routes, "POST", "/notes"), `POST /notes 가 등록으로 읽혀야 한다 — ${shown()}`).toBe(true);
+    expect(isRegistered(routes, "GET", "/healthz"), `GET /healthz 가 등록으로 읽혀야 한다 — ${shown()}`).toBe(true);
+
+    for (const [method, path, why] of [
+      ["POST", "/", "라우터 안의 상대 경로가 마운트 접두사 없이 루트로 새면 안 된다"],
+      ["GET", "/orphan", "마운트되지 않은 라우터 파일의 라우트는 응답하지 않는다"],
+      ["POST", "/legacy", "주석 처리된 등록은 라우트가 아니다"],
+      ["DELETE", "/purge", "블록 주석 안의 등록은 라우트가 아니다"],
+      ["GET", "/health", "경로 경계 — /healthz의 접두사는 다른 엔드포인트다"],
+      ["GET", "/notes", "POST만 등록된 경로를 GET으로 읽으면 안 된다"],
+    ]) {
+      expect(isRegistered(routes, method, path), `${method} ${path}: ${why} — ${shown()}`).toBe(false);
+    }
   });
 
   // dw4: `## Run tests`를 위에서 아래로 따라 한 기여자가 막히지 않는다.

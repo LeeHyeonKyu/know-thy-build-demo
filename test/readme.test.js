@@ -145,7 +145,7 @@ function endpointItems(section) {
 // README 본문과 독립적으로 판별력을 측정할 수 있도록 순수 함수로 분리한다
 // (test_18_readme_path_claims_exhaustive가 합성 마크다운으로 직접 먹인다).
 //
-// 한 토큰이 "경로 주장"인지는 **이름이 아니라 형태**로 판정한다 — 접두사 목록(src|test|docs|e2e)이나
+// 한 토큰이 "경로 주장"인지는 **이름이 아니라 형태와 출처**로 판정한다 — 접두사 목록(src|test|docs|e2e)이나
 // 확장자 목록(yml|json|md|js)으로 대상을 좁히면 그 목록 밖의 진짜 경로(`scripts/build.sh`,
 // `config/nginx.conf`, `.github/workflows/ci.yml`)가 조용히 검사에서 빠진다 —
 // dw2(c)가 금지한 구조적 면제다(spec-conformance must_fix spec1).
@@ -155,29 +155,44 @@ function endpointItems(section) {
 //   · `/`로 시작하면 라우트·절대경로이지 저장소 *상대* 경로가 아니다(`/healthz`).
 //   · 글로브(`*`·`?`)는 경로 주장이 아니라 패턴이다(`test/integration/**`).
 //   · 숫자와 점만으로 된 토큰은 버전이다(`22.11.0`).
-//   후보 중 경로 주장은 (1) 경로 구분자 `/`를 포함하거나 (2) 확장자를 가진 이름
-//   (`Dockerfile.dev`, `run.sh`, `.env.example`)이다 — 어느 쪽도 접두사·확장자 어휘를 열거하지 않는다.
 //
-// 남는 틈은 하나이며 목록이 아니라 형태의 모호성이다: 구분자도 확장자도 없는 한 단어
-// (`Makefile`, `LICENSE`)는 README 산문이 백틱으로 쓰는 어휘(`PORT`, 상태 마커 등)와 형태가 같다.
-// 그것까지 경로 주장으로 보면 코드 식별자·상수를 백틱으로 적는 참인 README가 RED가 되므로
-// 수집하지 않는다 — open risk로 PR 본문에 적는다.
+// 출처에 따라 갈리는 것은 **구분자도 확장자도 없는 한 단어**(`Makefile`, `LICENSE`)뿐이다.
+//   · 인라인 백틱 스팬 = 저장소에 대한 주장이다(dw2(c)가 계약한 대상 그 자체:
+//     "README 전체의 백틱 저장소 상대경로 토큰"). 그러므로 한 단어 파일명도 **수집한다** —
+//     직전 판본은 이것을 설계상 빼서, Layout 표에 `| \`Makefile\` | … |` 한 줄을 넣어도
+//     가드가 5 passed였다(review must_fix spec1 / qa1의 라이브 재현).
+//     대가는 명시적이다: 저장소에 없는 것을 백틱으로 적을 수 없다 — 환경변수·상태 어휘 같은
+//     비경로 단어는 백틱 없이(또는 굵게) 적는다. 정직한 출구가 항상 열려 있고,
+//     "면제 키워드"를 하나도 만들지 않는다.
+//   · 코드펜스 안 = 실행할 **명령**이고, 그 맨 단어는 셸 문법(동사·서브커맨드·플래그)이지
+//     저장소에 대한 주장이 아니다(`npm ci`의 `ci`, `docker compose … up -d`의 `up`).
+//     펜스 수집은 dw2(a)(명령까지 검사 범위를 넓힌다)를 위해 계약 위에 얹은 것이므로
+//     거기서는 경로 인자 — 구분자나 확장자를 가진 토큰 — 만 본다.
+function isPathShaped(raw) {
+  const token = raw.trim().replace(/^['"(<]+|['".,;:)>]+$/g, "");
+  if (!token) return null;
+  if (!/^[A-Za-z0-9._/-]+$/.test(token)) return null; // 명령·헤더·호출식·URL·플래그·글로브
+  if (token.startsWith("/") || token.startsWith("-")) return null; // 라우트·절대경로·플래그
+  if (/^[\d.]+$/.test(token)) return null; // 버전 번호
+  return token;
+}
+
+function looksLikePathArgument(token) {
+  return token.includes("/") || /\.[A-Za-z0-9]+$/.test(token);
+}
+
 function collectPathClaims(text) {
   const claims = new Set();
-  const addIfPathClaim = (raw) => {
-    const token = raw.trim().replace(/^['"(<]+|['".,;:)>]+$/g, "");
-    if (!token) return;
-    if (!/^[A-Za-z0-9._/-]+$/.test(token)) return; // 명령·헤더·호출식·URL·플래그·글로브
-    if (token.startsWith("/") || token.startsWith("-")) return; // 라우트·절대경로·플래그
-    if (/^[\d.]+$/.test(token)) return; // 버전 번호
-    const hasSeparator = token.includes("/");
-    const hasExtension = /\.[A-Za-z0-9]+$/.test(token);
-    if (hasSeparator || hasExtension) claims.add(token);
-  };
-  for (const [, span] of text.matchAll(/`([^`\n]+)`/g)) addIfPathClaim(span);
+  for (const [, span] of text.matchAll(/`([^`\n]+)`/g)) {
+    const token = isPathShaped(span);
+    if (token) claims.add(token); // 한 단어 파일명도 여기서는 주장이다
+  }
   for (const { line, inFence } of annotatedLines(text)) {
     if (!inFence || /^\s*```/.test(line)) continue;
-    for (const word of line.split(/\s+/)) addIfPathClaim(word);
+    for (const word of line.split(/\s+/)) {
+      const token = isPathShaped(word);
+      if (token && looksLikePathArgument(token)) claims.add(token);
+    }
   }
   for (const [, target] of text.matchAll(/\[[^\]\n]*\]\(([^)\s]+)\)/g)) {
     if (/^([a-z]+:|#|\/\/)/i.test(target)) continue; // 외부 URL·앵커는 fs 대조 대상이 아니다

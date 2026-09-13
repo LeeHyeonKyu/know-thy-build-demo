@@ -11,20 +11,27 @@
 // 3) 브라우저 바이너리가 없는 머신에서 무엇을 도는가 — 이 저장소의 CI 셋업(`[runtime].setup = "npm ci"`,
 //    `.factory/actions/setup/action.yml`)에는 크로미움을 내려받는 스텝이 없고, 게이트 명령 안에서
 //    내려받지도 않는다(docs/QA.md: 테스트 프로세스는 외부 네트워크 금지). 그래서 `page` 픽스처가 필요한
-//    케이스는 **바이너리가 실제로 없을 때만** 레인에서 뺀다 — 무조건 빼면 그 케이스는 어디서도 돌지 않는다.
-//    스펙 파일은 한 줄도 고치지 않는다(tests_are_load_bearing): 분기는 전부 여기 있다.
+//    케이스는 **브라우저 사용 가능 신호가 없을 때만** 레인에서 뺀다. 무조건 빼면 그 케이스는 어디서도
+//    돌지 않는다 — 파일에만 남고 아무도 지키지 않는 테스트가 된다(tests_are_load_bearing의 우회).
+//    스펙 파일은 한 줄도 고치지 않는다: 분기는 전부 여기 있고, 분기의 입력은 아래 이름 하나다.
 import { chromium, defineConfig } from "@playwright/test";
 import { existsSync } from "node:fs";
 
-const externalBaseURL = process.env.PLAYWRIGHT_TEST_BASE_URL;   // playwright 자신의 어휘를 쓴다
-const port = process.env.PORT ?? "3000";                        // src/app.js와 같은 기본값, 출처는 하나
-const localBaseURL = `http://127.0.0.1:${port}`;
+/**
+ * 브라우저 레인의 **단일 명명 입력**. 값이 있으면 그 값이 이기고(`1/true/yes/on` = 사용 가능),
+ * 없으면 크로미움 바이너리의 실제 존재에서 파생한다 — 설치한 사람은 아무것도 설정하지 않아도
+ * 전부 돌고, 설치하지 않은 CI는 `page` 케이스만 빠진다. 두 방향 모두 관측 가능해야 하므로
+ * (test/playwright_config.test.js) 값을 강제로 줄 수 있는 이 이름이 필요하다.
+ */
+export const BROWSER_SIGNAL_ENV = "E2E_BROWSER_AVAILABLE";
+const TRUTHY = new Set(["1", "true", "yes", "on"]);
 
 // 브라우저를 요구하는 케이스. 제목으로 고르는 것은 튼튼하지 않다(제목이 바뀌면 범위가 조용히 달라진다) —
 // 새 e2e 케이스가 `page`를 쓰면 여기 이름을 더하거나, 크로미움을 설치하는 셋업을 먼저 만들어야 한다.
-const BROWSER_FIXTURE_CASES = /browser loads/;
+// 제목을 바꾸면 test/playwright_config.test.js가 빨개져서 알려 준다.
+export const BROWSER_FIXTURE_CASES = /browser loads/;
 
-function chromiumInstalled() {
+function chromiumBinaryPresent() {
   try {
     const path = chromium.executablePath();
     return Boolean(path) && existsSync(path);
@@ -33,11 +40,21 @@ function chromiumInstalled() {
   }
 }
 
+export function browserAvailable(env = process.env) {
+  const declared = env[BROWSER_SIGNAL_ENV];
+  if (declared !== undefined && declared !== "") return TRUTHY.has(declared.toLowerCase());
+  return chromiumBinaryPresent();
+}
+
+const externalBaseURL = process.env.PLAYWRIGHT_TEST_BASE_URL;   // playwright 자신의 어휘를 쓴다
+const port = process.env.PORT ?? "3000";                        // src/app.js와 같은 기본값, 출처는 하나
+const localBaseURL = `http://127.0.0.1:${port}`;
+
 export default defineConfig({
   testDir: "e2e",
   use: { baseURL: externalBaseURL || localBaseURL, headless: true },
-  // 설치돼 있으면 전부 돈다 — "브라우저가 있는데도 안 도는" 상태를 만들지 않는다.
-  ...(chromiumInstalled() ? {} : { grepInvert: BROWSER_FIXTURE_CASES }),
+  // 신호가 "사용 가능"이면 전부 돈다 — "브라우저가 있는데도 안 도는" 상태를 만들지 않는다.
+  ...(browserAvailable() ? {} : { grepInvert: BROWSER_FIXTURE_CASES }),
   ...(externalBaseURL
     ? {}
     : {

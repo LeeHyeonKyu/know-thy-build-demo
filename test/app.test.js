@@ -188,6 +188,33 @@ describe("issue #2 — app factory HTTP surface", () => {
 
     // 500을 답한 서버도 헬스 신호를 잃지 않는다 — 에러 핸들러가 앱 전체를 무너뜨리지 않는다.
     await healthzSurvives(buggy, "TypeError — healthz on the same server");
+
+    // (3) dw5(c) — **서버 모양의 오류**는 연결 실패와 다르다. node-postgres는 SQLSTATE를
+    //     `ECONNREFUSED`와 **같은 `err.code` 필드**에 싣는다(node_modules/pg-protocol/dist/messages.d.ts).
+    //     그래서 `err.code ? 503 : 500`으로 판별하는 구현은 "테이블이 없다"(42P01)를
+    //     'DB 불가, 재시도하세요'로 당직자에게 보낸다 — 이 계획은 마이그레이션을 사람의 수동
+    //     `psql -f`로 남기므로 테이블 부재는 가설이 아니라 1순위 운영 실패다.
+    //     실제 Postgres에서도 같은 값이 나온다는 것을 확인했다: repo SQL을 `public.notes`로
+    //     하드코딩하면 integration의 dw1이 이 500 봉투로 떨어진다.
+    const schemaBroken = await startApp({
+      db: failingDb(() =>
+        Object.assign(new Error('relation "notes" does not exist'), { code: "42P01", severity: "ERROR" }),
+      ),
+    });
+    const missingTable = await post(schemaBroken);
+
+    expect(missingTable.status, missingTable.raw).not.toBe(503);
+    expect(missingTable.status).toBe(500);
+    expect(missingTable.type).toMatch(/application\/json/);
+    const missingBody = JSON.parse(missingTable.raw);
+    expect(typeof missingBody.error?.code).toBe("string");
+    expect(missingBody.error.code).not.toBe("db_unavailable");
+    expect(typeof missingBody.error?.message).toBe("string");
+    // 스키마 오류에서도 요청 본문과 드라이버 내부 문장은 새지 않는다.
+    expect(missingTable.raw).not.toContain(secret);
+    expect(missingTable.raw).not.toContain("does not exist");
+
+    await healthzSurvives(schemaBroken, "42P01 — healthz on the same server");
   });
 
   // dw7: import는 포트를 잡지 않고, DB 없이도 /healthz Preserve 계약이 산다(CHARTER:56, #8).
@@ -454,7 +481,63 @@ describe("issue #2 — the shipped entrypoint (`node src/app.js`)", () => {
   // dial되지 않았다(src/app.js `createDbFromEnv`의 catch). 제품 코드의 DSN 처리를 통째로 지워도
   // 초록이었고, 그래서 plan handoff non_goals가 이름으로 금지한 "드라이버 부재 → 503이 정상"을
   // 형태만 바꿔 게이트에 고정하고 있었다(verifier 지적, tests_are_load_bearing=true).
-  // 이 관측은 dw1(`test_2_shipped_entrypoint_persists_note_with_real_driver`)로만 가능하고,
-  // dw1은 `pg`가 dependencies에 있어야 작성 가능하다 — PR 본문 "Harness change needed" 참조.
+  // 이 관측은 dw1(`test_2_shipped_entrypoint_persists_note_in_isolated_schema`)이 하고, 그 테스트는
+  // `pg`가 사람 머지(d7f7996)로 landing한 뒤 `test/integration/notes.test.js`에 들어왔다.
   // 진입점이 기동하고 리스닝한다는 사실은 test/smoke.test.js:33-72가 계속 지킨다.
+});
+
+// ---------------------------------------------------------------------------------------
+// dw7 — 모듈 경계를 구현과 독립적으로 관측한다(DB·docker 불필요, 1초에 판정된다).
+// 두 사실을 한 이름 아래 묶는 이유: 둘 다 "게으른 구현이 나머지 done_when을 통과하면서도
+// 저장소를 못 쓰게 만드는" 형태를 지목하기 때문이다 — 최상단 listen은 파일 병렬 × repeats 아래에서
+// EADDRINUSE flake를 낳고(지울 수도 없다: tests_are_load_bearing), routes → repo 직결은 검증을
+// 비켜 가는 두 번째 저장 경로를 만든다(지난 회차 review arch-s1이 초록 diff에서 실제로 발견한 형태).
+// 한계: 정적 판정이라 동적 import·재수출은 보지 못한다.
+// ---------------------------------------------------------------------------------------
+describe("issue #2 — module boundaries", () => {
+  test("test_2_entrypoint_imports_without_binding_and_routes_do_not_import_repo", async () => {
+    // (a) `src/app.js`를 import하기만 한 프로세스는 스스로 끝난다(exitCode === 0).
+    //     자식에게 PORT=0을 주는 이유: 최상단 listen이 남아 있으면 임의 포트에 **반드시 성공**해
+    //     프로세스가 살아남는다. 고정 포트였다면 이미 쓰이는 날 EADDRINUSE로 죽어 회귀가 조용히 통과한다.
+    const child = spawn(
+      process.execPath,
+      ["--input-type=module", "-e", 'await import(process.env.APP_MODULE_PATH);\n'],
+      { env: { ...process.env, APP_MODULE_PATH: APP_MODULE, PORT: "0" }, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    try {
+      await vi.waitFor(
+        () => {
+          if (child.exitCode === null && child.signalCode === null) {
+            throw new Error("importing src/app.js kept the process alive — a listener was bound at import time");
+          }
+        },
+        { timeout: 15000, interval: 20 },
+      );
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit");
+        child.kill();
+        await exited;
+      }
+    }
+    expect(stderr, stderr).toBe("");
+    expect(child.exitCode).toBe(0);
+    expect(child.signalCode).toBeNull();
+    // ready 신호는 `node src/app.js`일 때만 나온다(test/smoke.test.js의 #8 가드가 그쪽을 본다).
+    expect(stdout).not.toContain("listening on");
+
+    // (b) `src/routes/notes.js`는 아래층(service)만 안다. repo를 직접 import하면 검증을 비켜 가는
+    //     두 번째 저장 경로가 생기고, 002의 정렬·003의 검색어 정규화가 어디 사는지를 동전 던지기로 정한다
+    //     (docs/TECHNICAL.md §Architecture "각 층은 아래층만 안다").
+    const routes = await readFile(join(SRC_DIR, "routes", "notes.js"), "utf8");
+    const specifiers = [...routes.matchAll(/from\s+["']([^"']+)["']/g)].map(([, specifier]) => specifier);
+    expect(specifiers.filter((s) => s.includes("/repo/")), "routes가 repo를 직접 import한다").toEqual([]);
+    expect(specifiers).toContain("../service/notes.js");
+  }, 30000);
 });

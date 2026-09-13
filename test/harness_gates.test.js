@@ -6,12 +6,12 @@
 // "누가 프로세스를 띄웠는가" — 만 본다. 그래서 이 파일은 harness.toml의 한 줄이 바뀌면
 // 그 줄의 **결과**가 달라질 때만 색이 바뀐다.
 //
-// 정직한 한계(verifier 지적에 대한 답): 이 두 단언은 **이 PR의 diff로는 빨개지지 않는다**. 둘을 뒤집는
-// 유일한 파일이 `.factory/harness.toml`이고 그 경로는 `.factory/ci-settings.json`의 `Edit/Write(.factory/**)`
-// deny로 이 역할에게 닫혀 있기 때문이다(실측: Edit 시도 → "File is in a directory that is denied by your
-// permission settings"). 그러므로 이 파일은 "구현을 되돌리면 빨개지는 증명"이 아니라 **사람이 머지할 승격
-// diff에 거는 선행 가드**다 — `[gates].fast`에 e2e가 들어가거나 `[test.env].app_start`가 켜지는 순간 빨개진다.
-// 그 두 가지가 PR 본문 "Harness change needed"의 승격안에서 가장 틀리기 쉬운 자리다.
+// 아래 두 케이스(`test_15_fast_level_does_not_run_e2e`, `test_15_single_app_lifecycle_owner`)는 승격을
+// **거꾸로** 지킨다: base에서도 참이고, `[gates].fast`에 e2e가 들어가거나 `[test.env].app_start`가 켜지는
+// 순간 빨개진다 — 승격 diff에서 가장 틀리기 쉬운 두 자리다. "이 diff를 되돌리면 빨개지는" 증명은 아래
+// 두 번째 describe(`dw1`/`dw2`/`dw3`)가 맡는다. (이 머리말의 이전 판본은 `.factory/harness.toml`이 이
+// 역할에게 닫혀 있다고 적었다 — `factory:harness` 이슈의 implement 스테이지에서는 더 이상 사실이 아니다.
+// 아래 125행 블록 참고.)
 import { describe, expect, test } from "vitest";
 import { fileURLToPath } from "node:url";
 import { loadHarness } from "../.factory/lib/config.js";

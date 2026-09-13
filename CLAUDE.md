@@ -12,7 +12,7 @@
 ## 명령
 | | |
 |---|---|
-| 설치 | `npm ci` |
+| 설치 | `npm ci` — 이것 하나로 테스트가 import하는 모든 것이 깔린다. `test/harness_gates.test.js`·`test/playwright_config.test.js`·`test/integration/e2e_suite.test.js`는 게이트 판정 엔진(`.factory/lib/**`)을 직접 부르므로 그 런타임의 의존(`smol-toml`)이 이 저장소의 `devDependencies`에도 선언돼 있다(버전은 `.factory/package.json`의 핀과 동일해야 한다 — `test_15_factory_lib_deps_install_with_npm_ci`가 지킨다). `.factory/node_modules`를 따로 만들 필요는 없다 |
 | 실행 | `npm start` (기본 3000 포트) |
 | 단위+통합 테스트 | `npx vitest run` (통합은 `docker compose -f docker-compose.test.yml up -d` 필요) |
 | e2e | `npm run e2e` — **required 게이트다**(M2, #15). 러너가 `node src/app.js`를 띄운다. 포트는 `PORT`(기본 3000) |

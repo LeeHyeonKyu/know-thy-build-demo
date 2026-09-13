@@ -97,6 +97,16 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 "몇 개가 돌았고 무엇이 깨졌는가"다. 러너 기동은 그 두 번뿐이다 — 나머지(게이트 판정, 감지기, 설정 객체, 레인
 분기)는 `test/harness_gates.test.js`·`test/playwright_config.test.js`가 기동 없이 본다.
 
+**하네스 테스트가 무엇에 기대는가(#15):** 위 세 파일은 이 저장소에서 처음으로 게이트 판정 엔진
+(`.factory/lib/gates.js`·`config.js`·`retro/maturity.js`·`doctor/harness.js`)을 **직접 import**한다 — 설정 텍스트를
+베껴 쓰는 단언은 설정이 틀려도 초록이기 때문이다. 그 대가로 프로젝트의 테스트 레이어가 벤더링된 factory
+런타임에 묶였고, 그 런타임의 유일한 외부 의존(`smol-toml`)은 원래 `.factory/package.json`에만 선언돼
+`.factory/node_modules`(CI 셋업 스텝이 만든다, `npm ci`가 아니다)에만 있었다. 그래서 `smol-toml`을 이 저장소의
+`devDependencies`에도 **같은 핀으로** 선언한다: 선언된 설치 경로(`[runtime].setup = "npm ci"`)가 문서가 안내하는
+명령(`npx vitest run`)을 깨끗한 클론에서 실제로 돌릴 수 있어야 한다. 두 핀이 갈라지면 같은 커밋이 기계마다 다른
+TOML 파서로 `harness.toml`을 읽는다 — `test_15_factory_lib_deps_install_with_npm_ci`가 선언·해석 경로·핀 일치를
+함께 단언한다.
+
 **M2 승격이 실제로 바꾼 것(#15):** `[commands].e2e` 신설, `[gates].full`·`deep`·`required` 세 곳에 `e2e`,
 `[harness].maturity = "M2"`. 셋이 함께 가야 한다 — `required`에 없으면 `commands.e2e`가 사라져도 `.factory/lib/gates.js`의
 required 교집합 필터가 그 게이트를 MISCONFIGURED가 아니라 GREEN으로 읽고, `maturity` 문자열만 올리면 감지기만 조용해질 뿐

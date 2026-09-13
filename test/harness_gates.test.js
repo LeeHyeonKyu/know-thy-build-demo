@@ -18,12 +18,36 @@ import { loadHarness } from "../.factory/lib/config.js";
 import { runGates } from "../.factory/lib/gates.js";
 import { envUp } from "../.factory/lib/test-env.js";
 // issue #15(2라운드)에서 더해진 단언들이 쓴다 — 위 블록의 두 케이스는 이 심볼들을 쓰지 않는다.
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { detectMaturityGaps } from "../.factory/lib/retro/maturity.js";
+import { checkHarness } from "../.factory/lib/doctor/harness.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const NOW = "2026-01-01T00:00:00Z";   // 판정 결과에 시계가 끼어들지 않게 고정한다(docs/QA.md)
+const NOT_SOURCE = /^(node_modules|\.git)([/\\]|$)/;
+
+/** doctor가 "이 경로에 파일이 실제로 있는가"를 묻는 검사(smoke·protected)에 먹일 저장소 파일 목록. */
+function repoFiles() {
+  return readdirSync(ROOT, { recursive: true, withFileTypes: true })
+    .filter((e) => e.isFile())
+    .map((e) => join(e.parentPath ?? e.path, e.name).slice(ROOT.length).replaceAll("\\", "/"))
+    .filter((f) => !NOT_SOURCE.test(f));
+}
+
+/**
+ * `.factory/harness.toml` **한 파일만** 되돌린 세계. 이 승격이 그 파일에 쓴 것은 다섯 줄이고,
+ * 그중 게이트 판정에 닿는 것은 `commands.e2e`와 네 목록의 `e2e` 항목이다.
+ */
+function revertHarnessToml(harness) {
+  const commands = { ...harness.commands };
+  delete commands.e2e;
+  const gates = { ...harness.gates };
+  for (const level of ["fast", "full", "deep", "required"]) {
+    gates[level] = (harness.gates[level] || []).filter((g) => g !== "e2e");
+  }
+  return { ...harness, commands, gates };
+}
 
 // 주입 러너: 실행된 (cmd, args) 쌍을 기록만 하고 항상 성공을 돌려준다. 게이트 명령을 실제로
 // 돌리지 않는 이유는 속도가 아니라 결정성이다 — 이 파일은 "무엇이 실행되는가"만 묻는다.
@@ -173,5 +197,46 @@ describe("issue #15 — M2 승격이 판정을 실제로 뒤집는가", () => {
     const stillM1 = { ...harness, harness: { ...harness.harness, maturity: "M1" } };
     const wouldFire = detectMaturityGaps({ files: ["src/app.js"], harness: stillM1, manifestDeps });
     expect(wouldFire.map((g) => g.rule)).toContain("http-at-m1");
+  });
+
+  // dw2: 되돌림 단위가 `.factory/harness.toml` **한 파일**이다.
+  // 이 승격이 잘못 배포되면(브라우저 없는 러너, 기동 타임아웃…) 끄는 길은 그 파일 하나를 되돌리는
+  // 것뿐이어야 한다 — `playwright.config.js`나 `e2e/*.spec.js`가 승격에 의존하면, 되돌리는 사람이
+  // 무엇을 더 되돌려야 하는지 알 수 없고 그 사이 모든 PR이 막힌다. 그래서 "harness.toml만 되돌린
+  // 세계"를 실제로 만들어 판정 엔진과 doctor에 통과시킨다.
+  test("test_15_harness_toml_revert_alone_restores_green", async () => {
+    const harness = loadHarness(ROOT);
+    const files = repoFiles();
+
+    // 전제: 지금은 네 자리에 e2e가 있다. 없다면 아래 "제거 후" 단언은 아무것도 증명하지 않는다.
+    expect(typeof harness.commands.e2e).toBe("string");
+    for (const level of ["full", "deep", "required"]) expect(harness.gates[level]).toContain("e2e");
+
+    // harness.toml 단독 revert의 결과: commands.e2e가 사라지고 네 목록에서 e2e가 빠진다.
+    const reverted = revertHarnessToml(harness);
+    expect(reverted.commands.e2e).toBeUndefined();
+    for (const level of ["fast", "full", "deep", "required"]) expect(reverted.gates[level]).not.toContain("e2e");
+
+    const runner = recordingRunner();
+    const result = await runGates({
+      run: runner.run, cwd: ROOT, harness: reverted, level: "full",
+      quarantine: { quarantined: [] }, readFile: () => null, now: NOW,
+    });
+
+    // 되돌린 세계는 **초록**이다 — 남은 파일(playwright.config.js, e2e 스펙)이 승격을 붙잡지 않는다.
+    expect(result.status).toBe("GREEN");
+    expect(result.required_missing).toEqual([]);
+    expect(result.misconfigured).toEqual([]);
+    // 그리고 실제로 게이트가 돌았다: lint·unit은 실행됐고 e2e 명령은 흔적도 없다(공허한 초록 봉쇄).
+    expect(runner.shellCommands()).toEqual(expect.arrayContaining([harness.commands.lint, harness.commands.unit]));
+    expect(Object.keys(result.gates)).not.toContain("e2e");
+    expect(runner.shellCommands()).not.toEqual(expect.arrayContaining([expect.stringContaining("playwright")]));
+
+    // doctor도 그 세계를 정상으로 본다 — 되돌린 하네스가 FAIL을 하나라도 내면 revert가 또 다른
+    // 사람-머지 라운드를 부른다. maturity까지 M1로 돌린 진짜 revert 결과도 같이 본다.
+    for (const h of [reverted, { ...reverted, harness: { ...reverted.harness, maturity: "M1" } }]) {
+      const fails = checkHarness({ harness: h, files }).filter((r) => r.level === "FAIL");
+      expect(fails.map((f) => `${f.id}: ${f.detail}`)).toEqual([]);
+    }
   });
 });

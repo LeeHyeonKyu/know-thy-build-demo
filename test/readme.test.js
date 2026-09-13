@@ -144,14 +144,35 @@ function endpointItems(section) {
 //   (3) 상대 마크다운 링크 대상.
 // README 본문과 독립적으로 판별력을 측정할 수 있도록 순수 함수로 분리한다
 // (test_18_readme_path_claims_exhaustive가 합성 마크다운으로 직접 먹인다).
+//
+// 한 토큰이 "경로 주장"인지는 **이름이 아니라 형태**로 판정한다 — 접두사 목록(src|test|docs|e2e)이나
+// 확장자 목록(yml|json|md|js)으로 대상을 좁히면 그 목록 밖의 진짜 경로(`scripts/build.sh`,
+// `config/nginx.conf`, `.github/workflows/ci.yml`)가 조용히 검사에서 빠진다 —
+// dw2(c)가 금지한 구조적 면제다(spec-conformance must_fix spec1).
+//   · 경로 문자만으로 이뤄진 토큰만 후보다([A-Za-z0-9._/-]) → 명령·헤더·호출식·객체·URL·
+//     플래그(`npm start`, `Cache-Control: no-store`, `app.listen()`, `{"ok":true}`,
+//     `http://…`, `--reporter=json`)는 다른 문자를 갖고 있어 여기서 이미 빠진다.
+//   · `/`로 시작하면 라우트·절대경로이지 저장소 *상대* 경로가 아니다(`/healthz`).
+//   · 글로브(`*`·`?`)는 경로 주장이 아니라 패턴이다(`test/integration/**`).
+//   · 숫자와 점만으로 된 토큰은 버전이다(`22.11.0`).
+//   후보 중 경로 주장은 (1) 경로 구분자 `/`를 포함하거나 (2) 확장자를 가진 이름
+//   (`Dockerfile.dev`, `run.sh`, `.env.example`)이다 — 어느 쪽도 접두사·확장자 어휘를 열거하지 않는다.
+//
+// 남는 틈은 하나이며 목록이 아니라 형태의 모호성이다: 구분자도 확장자도 없는 한 단어
+// (`Makefile`, `LICENSE`)는 README 산문이 백틱으로 쓰는 어휘(`PORT`, 상태 마커 등)와 형태가 같다.
+// 그것까지 경로 주장으로 보면 코드 식별자·상수를 백틱으로 적는 참인 README가 RED가 되므로
+// 수집하지 않는다 — open risk로 PR 본문에 적는다.
 function collectPathClaims(text) {
   const claims = new Set();
   const addIfPathClaim = (raw) => {
     const token = raw.trim().replace(/^['"(<]+|['".,;:)>]+$/g, "");
-    if (!token || token.includes("*")) return;
-    if (/^(src|test|docs|e2e)\/\S*$/.test(token) || /^[A-Za-z0-9_.-]+\.(ya?ml|json|md|js)$/.test(token)) {
-      claims.add(token);
-    }
+    if (!token) return;
+    if (!/^[A-Za-z0-9._/-]+$/.test(token)) return; // 명령·헤더·호출식·URL·플래그·글로브
+    if (token.startsWith("/") || token.startsWith("-")) return; // 라우트·절대경로·플래그
+    if (/^[\d.]+$/.test(token)) return; // 버전 번호
+    const hasSeparator = token.includes("/");
+    const hasExtension = /\.[A-Za-z0-9]+$/.test(token);
+    if (hasSeparator || hasExtension) claims.add(token);
   };
   for (const [, span] of text.matchAll(/`([^`\n]+)`/g)) addIfPathClaim(span);
   for (const { line, inFence } of annotatedLines(text)) {

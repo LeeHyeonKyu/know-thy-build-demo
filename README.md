@@ -58,7 +58,7 @@ e2e는 게이트 밖이다(`docs/TECHNICAL.md` §Testing Strategy).
 
 | 경로 | 무엇이 있나 |
 |---|---|
-| `src/app.js` | 소스 전부. Express 앱 구성 + `/healthz` 라우트 등록 + `app.listen`. `npm start`의 진입점 |
+| `src/app.js` | 소스 전부. Express 앱 구성 + `/healthz` 라우트 등록 + `app.listen()` 호출. `npm start`의 진입점 |
 | `test/smoke.test.js` | unit 스모크 + `/healthz` 응답 계약 회귀 가드 |
 | `test/integration/db.test.js` | integration 스모크 — compose로 띄운 Postgres에 접속한다 |
 | `e2e/smoke.spec.js` | Playwright e2e — M1에서는 게이트 밖 |

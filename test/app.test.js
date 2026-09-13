@@ -324,39 +324,11 @@ describe("issue #2 — the shipped entrypoint (`node src/app.js`)", () => {
     expect(new Date(createdAt).toISOString()).toBe("2026-02-03T04:05:06.000Z");
   });
 
-  // qa1: 드라이버가 없거나 pool을 만들지 못해도 기동은 막히지 않고(/healthz Preserve),
-  // 그 실패는 500 internal_error가 아니라 503으로 도착한다(docs/features/001-create-note.md:78).
-  test("test_2_entrypoint_without_driver_answers_503_not_500", async () => {
-    const marker = makeMarker("no-driver");
-    const missingDriver = () => {
-      const err = new Error("Cannot find package 'pg'");
-      err.code = "ERR_MODULE_NOT_FOUND";
-      return Promise.reject(err);
-    };
-
-    const app = await listenOn(await createAppFromEnv({ env: {}, loadDriver: missingDriver }));
-
-    // 기동 시점 fail-fast를 하지 않는다 — 헬스 신호가 살아 있어야 컴포즈·playwright가 기다릴 수 있다.
-    const health = await fetch(`${app.url}/healthz`);
-    expect(health.status).toBe(200);
-    expect(await health.json()).toEqual({ ok: true });
-
-    const { status, raw, type } = await postNote(app.url, makeNote({ title: marker, body: `${marker}-body` }));
-    expect(status, raw).toBe(503);
-    expect(type).toMatch(/application\/json/);
-    const envelope = JSON.parse(raw);
-    expect(typeof envelope.error?.code).toBe("string");
-    expect(typeof envelope.error?.message).toBe("string");
-    expect(envelope.error.code).not.toBe("internal_error");
-    expect(raw).not.toContain(marker); // 요청 본문도 드라이버 내부 메시지도 에코하지 않는다
-    expect(raw).not.toContain("Cannot find package");
-
-    // 검증은 DB와 무관하게 여전히 산다 — DB가 없다고 400이 503으로 바뀌지 않는다.
-    const invalid = await postNote(app.url, { body: `${marker}-body` });
-    expect(invalid.status).toBe(400);
-    expect(JSON.parse(invalid.raw).error.code).toBe("invalid_request");
-    expect(JSON.parse(invalid.raw).error.message).toContain("title");
-  });
+  // (제거됨) `test_2_entrypoint_without_driver_answers_503_not_500` — 드라이버 부재를 "정상 503"으로
+  // 이름 붙여 게이트에 고정하는 형태다. plan handoff non_goals가 이 테스트를 이름으로 지목했다:
+  // tests_are_load_bearing=true라 pg가 들어온 뒤에도 지워지지 않고 "저장이 안 되는 게 정상"을
+  // 계속 통과시킨다(operator 제기, 네 역할 동의). 도달 불가 DSN으로 같은 503 경로를 관측하는
+  // test_2_started_process_serves_notes_with_db_wired는 pg가 들어온 뒤에도 참이므로 남긴다.
 
   // cs1(rework, 리뷰 should_fix): idle client가 죽으면 node-postgres의 Pool은 자기 자신에게
   // 'error'를 emit한다. 리스너가 없는 EventEmitter의 'error'는 Node가 그대로 throw하므로,

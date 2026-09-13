@@ -24,5 +24,7 @@
 - 기존 테스트는 load-bearing이다 — 고치지 말고 추가한다.
 - 테스트에 `sleep`·고정 대기 금지. 조건 대기만 (`docs/QA.md`).
 - e2e 레인은 크로미움 없이도 초록이어야 한다 — CI 셋업이 브라우저를 내려받지 않는다. `page` 픽스처가
-  필요한 케이스는 바이너리가 없을 때만 `playwright.config.js`가 레인에서 뺀다(스펙 파일은 안 고친다).
+  필요한 케이스는 브라우저 신호가 없을 때만 `playwright.config.js`가 레인에서 뺀다(스펙 파일은 안 고친다).
+  그 신호의 이름은 `E2E_BROWSER_AVAILABLE` 하나다 — 주지 않으면 크로미움 바이너리 존재에서 파생하고,
+  `E2E_BROWSER_AVAILABLE=1 npm run e2e`로 브라우저 케이스까지 강제로 돌릴 수 있다(docs/QA.md).
 - 저장소는 PostgreSQL이다 (SQLite 아님 — `docs/TECHNICAL.md` TDR-1).

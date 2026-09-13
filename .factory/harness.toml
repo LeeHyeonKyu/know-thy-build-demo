@@ -22,7 +22,9 @@ unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json
 # 두지 않는 이유는 playwright JSON을 vitest 파서에 먹이면 `total:0, failed:0`이 오류 없이 나와
 # "읽지 못했는데 읽었다"가 되기 때문이다. 브라우저 다운로드는 여기 넣지 않는다(docs/QA.md: 테스트
 # 프로세스는 외부 네트워크 금지) — 크로미움이 없는 머신에서는 `playwright.config.js`가 `page` 픽스처
-# 케이스만 레인에서 빼고 나머지를 돈다. 이 명령은 `factory doctor`도 매번 실행한다(`--no-run`으로 건너뛴다).
+# 케이스만 레인에서 빼고 나머지를 돈다(신호: `E2E_BROWSER_AVAILABLE`, docs/QA.md). 테스트를 고르는
+# 인자(`--grep`/`--project` 등)는 여기 붙이지 않는다 — 붙이면 `package.json`의 `npm run e2e`(보호 경로라
+# 고칠 수 없다)와 게이트가 서로 다른 집합을 돌게 된다. 이 명령은 `factory doctor`도 매번 실행한다(`--no-run`으로 건너뛴다).
 e2e        = "npx playwright test"
 test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
 test_one   = "npx vitest run {file} -t {name}"   # classify-failure. Scripts quote {file}/{name} — do not add quotes here

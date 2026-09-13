@@ -27,7 +27,8 @@ date: 2026-09-12
 **e2e 레인(M2, #15)이 무엇을 돌리고 무엇을 돌리지 않는가:**
 
 - 게이트 명령은 `[commands].e2e`(`npx playwright test`) 하나이고 판정 근거는 **종료 코드**다. 브라우저를 내려받지 않는다(위 Network blocking 규칙).
-- 그래서 크로미움 바이너리가 없는 머신에서는 `page` 픽스처를 쓰는 케이스(`e2e/smoke.spec.js`의 `browser loads`)가 레인에서 **빠진다** — 스펙 파일에서 지우는 것이 아니라 `playwright.config.js`가 바이너리 존재를 보고 고른다. 바이너리가 있으면 전부 돈다. 새 e2e 케이스에 `page`가 필요하면 그 이름을 설정의 `BROWSER_FIXTURE_CASES`에 더하거나, 브라우저를 설치하는 셋업을 먼저 만든다(`factory:harness` 이슈).
+- 그래서 크로미움 바이너리가 없는 머신에서는 `page` 픽스처를 쓰는 케이스(`e2e/smoke.spec.js`의 `browser loads`)가 레인에서 **빠진다** — 스펙 파일에서 지우는 것이 아니라 `playwright.config.js`가 고른다. 바이너리가 있으면 전부 돈다. 새 e2e 케이스에 `page`가 필요하면 그 이름을 설정의 `BROWSER_FIXTURE_CASES`에 더하거나, 브라우저를 설치하는 셋업을 먼저 만든다(`factory:harness` 이슈).
+- **그 분기의 입력은 이름이 하나다: `E2E_BROWSER_AVAILABLE`**(`playwright.config.js`의 `BROWSER_SIGNAL_ENV`). 값을 주면 그것이 이기고(`1/true/yes/on` = 사용 가능, 그 밖 = 불가), 주지 않으면 크로미움 바이너리의 실제 존재에서 파생한다. 환경 조건부로 테스트를 고르는 것은 위 결정성 표의 예외이므로 여기 적어 둔다 — **양방향이 관측되지 않는 분기는 금지다**: `test/playwright_config.test.js`가 신호 on/off 두 경우의 선택 집합을 모두 고정한다(무조건 `testIgnore`/`grepInvert`는 그 테스트를 빨갛게 만든다).
 - 앱을 띄우는 주인은 실행 경로마다 하나다: 기본 모드는 `playwright.config.js`의 `webServer`(`PORT`, 기본 3000), 외부 타깃 모드는 `PLAYWRIGHT_TEST_BASE_URL`(이때 `webServer` 설정은 아예 없다). `[test.env].app_start`/`app_ready`는 켜지 않는다.
 
 ## Fixture Policy

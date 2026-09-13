@@ -84,10 +84,18 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 돈다 — CI 셋업(`[runtime].setup = "npm ci"`)에 브라우저 설치 스텝이 없고, 게이트 명령 안에서 내려받지도 않는다
 (docs/QA.md: 테스트 프로세스는 외부 네트워크 금지). 바이너리가 있으면 전부 돈다.
 
+**브라우저 레인의 단일 입력(#15):** 그 분기의 기준은 `E2E_BROWSER_AVAILABLE` 하나다(`playwright.config.js`가
+`BROWSER_SIGNAL_ENV`로 내보낸다). 값을 주지 않으면 크로미움 바이너리 존재에서 파생하고, 주면 그 값이 이긴다 —
+그래서 브라우저를 설치한 사람은 아무 설정 없이 전부 돌리고, 설치가 없는 CI는 `page` 케이스만 뺀다. 분기를
+게이트 명령의 **인자**(`--grep-invert` 등)에 두지 않는 이유: `package.json:9`의 `npm run e2e`는 고칠 수 없는
+보호 경로라, 인자로 가르면 문서가 안내하는 명령과 게이트가 서로 다른 집합을 돌게 된다.
+
 **e2e 레인의 단언은 `test/`에서 증명된다(#15):** `e2e/**`는 `[test].test_glob` 밖이라 prove-test가 그 스펙의 RED를
 증명하지 않는다. 그래서 `/healthz` 계약 단언(200 **그리고** 정확히 `{"ok":true}`)이 실제로 회귀를 막는다는 사실은
-`test/integration/e2e_suite.test.js`가 지킨다 — 같은 스펙을 127.0.0.1 스텁을 상대로 두 번 돌려 `{"ok":true}`에는 초록,
-`{"ok":"yes"}`에는 빨강(+ 실패 귀속)임을 대조한다. 판정 근거는 종료 코드 하나가 아니라 "몇 개가 돌았고 무엇이 깨졌는가"다.
+`test/integration/e2e_suite.test.js`가 지킨다 — `[commands].e2e` 문자열 그대로를 127.0.0.1 스텁을 상대로 두 번 돌려
+`{"ok":true}`에는 초록, `{"ok":"yes"}`에는 빨강(+ 실패 귀속)임을 대조한다. 판정 근거는 종료 코드 하나가 아니라
+"몇 개가 돌았고 무엇이 깨졌는가"다. 러너 기동은 그 두 번뿐이다 — 나머지(게이트 판정, 감지기, 설정 객체, 레인
+분기)는 `test/harness_gates.test.js`·`test/playwright_config.test.js`가 기동 없이 본다.
 
 **M2 승격이 실제로 바꾼 것(#15):** `[commands].e2e` 신설, `[gates].full`·`deep`·`required` 세 곳에 `e2e`,
 `[harness].maturity = "M2"`. 셋이 함께 가야 한다 — `required`에 없으면 `commands.e2e`가 사라져도 `.factory/lib/gates.js`의

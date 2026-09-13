@@ -95,22 +95,178 @@ function readSourceTree() {
   return tree;
 }
 
-// src/**/*.js에 등장하는 라우트 등록 리터럴 `app.<method>("<path>"` 를 모은다.
+// 라우트 등록 리터럴 `<ident>.<method>("<path>"` — 호스트 식별자(app/router/…)와 경로를 같이 잡는다.
 // 경로를 부분문자열로 찾지 않는 이유: `GET /health`를 implemented로 적어도
 // src/app.js의 `/healthz` 때문에 통과해 버린다(리뷰에서 세 번 재발견된 구멍).
-// 여기서는 따옴표로 닫힌 리터럴 **전체**가 경로와 같아야 한다.
-const ROUTE_REGISTRATION = /\bapp\s*\.\s*(get|post|put|patch|delete|all)\s*\(\s*(["'`])([^"'`\n]*)\2/g;
+// 여기서는 따옴표로 닫힌 리터럴 **전체**가 (마운트 접두사와 합쳐진 뒤) 경로와 같아야 한다.
+const METHOD_NAMES = "get|post|put|patch|delete|all";
+const REGISTRATION = new RegExp(
+  `\\b([A-Za-z_$][\\w$]*)\\s*\\.\\s*(${METHOD_NAMES})\\s*\\(\\s*(["'\`])([^"'\`\\n]*)\\3`,
+  "g",
+);
+const MOUNT_HEAD = /\b([A-Za-z_$][\w$]*)\s*\.\s*use\s*\(/g;
+const DEFAULT_IMPORT = /\bimport\s+([A-Za-z_$][\w$]*)(?:\s*,[^;\n]*?)?\s+from\s*["']([^"'\n]+)["']/g;
+const REQUIRE_BINDING =
+  /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\s*\(\s*["']([^"'\n]+)["']\s*\)/g;
 
 function normalizePath(path) {
   return path.length > 1 ? path.replace(/\/+$/, "") : path;
 }
 
+// 마운트 접두사와 라우터 안의 상대 경로를 합친다. `/notes` + `/` = `/notes`.
+function joinPath(base, sub) {
+  const head = base === "/" ? "" : base.replace(/\/+$/, "");
+  const tail = sub.startsWith("/") ? sub : `/${sub}`;
+  return normalizePath(`${head}${tail}`.replace(/\/{2,}/g, "/")) || "/";
+}
+
+// 주석은 코드가 아니다 — 주석 안의 `app.post("/notes"`를 등록으로 읽으면, 그 경로를 정직하게
+// `planned`로 적은 README가 RED가 되고 저자는 다시 거짓으로 몰린다.
+// `http://…`처럼 `:` 뒤에 오는 `//`는 주석이 아니다.
+function stripComments(text) {
+  return text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:"'`\\])\/\/[^\n]*/gm, "$1");
+}
+
+// `f(` 의 여는 괄호에서 시작해 최상위 인자들을 문자열로 돌려준다(중첩 괄호·문자열 보존).
+function callArguments(text, openIndex) {
+  const args = [];
+  let current = "";
+  let depth = 0;
+  let quote = null;
+  for (let i = openIndex; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      current += ch;
+      if (ch === quote && text[i - 1] !== "\\") quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") {
+      depth += 1;
+      if (!(depth === 1 && ch === "(")) current += ch;
+      continue;
+    }
+    if (ch === ")" || ch === "]" || ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        args.push(current);
+        return args;
+      }
+      current += ch;
+      continue;
+    }
+    if (ch === "," && depth === 1) {
+      args.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  return args; // 닫히지 않은 호출 — 잡은 데까지만 본다
+}
+
+function stringLiteral(arg) {
+  const match = (arg ?? "").match(/^\s*(["'`])([^"'`]*)\1\s*$/);
+  return match ? match[2] : null;
+}
+
+function identifierOf(arg) {
+  const match = (arg ?? "").match(/^\s*([A-Za-z_$][\w$]*)\s*$/);
+  return match ? match[1] : null;
+}
+
+// 상대 import 스펙을 소스 트리 안의 파일로 해석한다. 외부 패키지(`express`)는 대상이 아니다.
+function resolveModule(fileMap, importerPath, spec) {
+  if (!spec.startsWith(".")) return null;
+  const stack = importerPath.split("/").slice(0, -1);
+  for (const part of spec.split("/")) {
+    if (part === "" || part === ".") continue;
+    else if (part === "..") stack.pop();
+    else stack.push(part);
+  }
+  const base = stack.join("/");
+  return [base, `${base}.js`, `${base}/index.js`].find((candidate) => fileMap.has(candidate)) ?? null;
+}
+
 // 소스 트리(상대경로 → 텍스트)와 진입점에서 "이 저장소가 실제로 등록하는 라우트" 집합을 만든다.
-function resolveRoutes(fileMap, _entryPath) {
+//
+// 등록 구문 한 형태(`app.<method>("<전체 경로>"`)만 보면, docs/TECHNICAL.md §Architecture가
+// 001~003에 대해 처방한 라우터 마운트 형태에서 가드가 뒤집힌다(review round 4 must_fix cf1/arch1):
+// 라우트가 실제로 응답하는데 거짓 `planned`이 GREEN이고 정직한 `implemented`가 RED가 된다.
+// 그래서 형태를 세지 않고 **진입점에서 도달 가능한 마운트 그래프**를 따라가며 접두사를 합친다.
+//   · `app.get("/healthz", …)`            → GET /healthz
+//   · `app.use("/notes", r)` + `r.post("/")` → POST /notes   (같은 파일이든 import된 파일이든)
+//   · 마운트되지 않은 라우터 파일          → 등록 아님 (실제로 응답하지 않는다)
+function resolveRoutes(fileMap, entryPath) {
   const routes = new Set();
-  for (const text of fileMap.values()) {
-    for (const [, method, , path] of text.matchAll(ROUTE_REGISTRATION)) {
-      routes.add(`${method.toUpperCase()} ${normalizePath(path)}`);
+  if (!entryPath || !fileMap.has(entryPath)) return routes;
+
+  const visited = new Set();
+  const queue = [[entryPath, ""]];
+  while (queue.length > 0) {
+    const [filePath, base] = queue.shift();
+    const key = `${filePath} ${base}`;
+    if (visited.has(key)) continue;
+    visited.add(key);
+
+    const text = stripComments(fileMap.get(filePath) ?? "");
+
+    const imported = new Map();
+    for (const [, ident, spec] of text.matchAll(DEFAULT_IMPORT)) {
+      const target = resolveModule(fileMap, filePath, spec);
+      if (target) imported.set(ident, target);
+    }
+    for (const [, ident, spec] of text.matchAll(REQUIRE_BINDING)) {
+      const target = resolveModule(fileMap, filePath, spec);
+      if (target) imported.set(ident, target);
+    }
+
+    const registrations = new Map();
+    for (const [, ident, method, , path] of text.matchAll(REGISTRATION)) {
+      if (!registrations.has(ident)) registrations.set(ident, []);
+      registrations.get(ident).push({ method: method.toUpperCase(), path });
+    }
+
+    const mounts = [];
+    for (const match of text.matchAll(MOUNT_HEAD)) {
+      const args = callArguments(text, match.index + match[0].length - 1);
+      const prefix = stringLiteral(args[0]);
+      for (const arg of prefix === null ? args : args.slice(1)) {
+        const target = identifierOf(arg);
+        if (target) mounts.push({ host: match[1], prefix: prefix ?? "/", target });
+      }
+    }
+
+    // 마운트된 로컬 식별자는 접두사를 물려받고, 그 밖의 식별자는 이 파일의 base에 있다.
+    const localTargets = new Set(mounts.filter((m) => !imported.has(m.target)).map((m) => m.target));
+    const identBase = new Map();
+    for (const ident of [
+      ...registrations.keys(),
+      ...mounts.map((m) => m.host),
+      ...mounts.map((m) => m.target),
+    ]) {
+      if (!localTargets.has(ident)) identBase.set(ident, base);
+    }
+    for (let pass = 0; pass <= mounts.length; pass += 1) {
+      for (const mount of mounts) {
+        if (imported.has(mount.target)) continue;
+        const hostBase = identBase.get(mount.host);
+        if (hostBase === undefined) continue;
+        identBase.set(mount.target, joinPath(hostBase, mount.prefix));
+      }
+    }
+
+    for (const [ident, list] of registrations) {
+      const root = identBase.get(ident) ?? base;
+      for (const { method, path } of list) routes.add(`${method} ${joinPath(root, path)}`);
+    }
+    for (const mount of mounts) {
+      const target = imported.get(mount.target);
+      if (target) queue.push([target, joinPath(identBase.get(mount.host) ?? base, mount.prefix)]);
     }
   }
   return routes;
@@ -126,7 +282,13 @@ function entryPath() {
 function registeredRoutes() {
   const tree = readSourceTree();
   expect(tree.size, "src/**/*.js 가 비어 있다 — 소스 대조의 전제가 무너졌다").toBeGreaterThan(0);
-  return resolveRoutes(tree, entryPath());
+  const entry = entryPath();
+  // 진입점을 못 찾으면 라우트 집합이 조용히 비고, 모든 implemented 항목이 엉뚱한 이유로 RED가 된다.
+  expect(
+    tree.has(entry),
+    `package.json scripts.start가 실행하는 진입점 '${entry}'가 src/**/*.js에 없다 — 라우트 그래프의 뿌리가 없다`,
+  ).toBe(true);
+  return resolveRoutes(tree, entry);
 }
 
 function isRegistered(routes, method, path) {
@@ -485,14 +647,16 @@ describe("issue #18 — README는 저장소에 대해 참인 말만 한다", () 
       if (markers[0] === "implemented") {
         expect(
           registered,
-          `README가 '${item.method} ${item.path}'를 implemented로 적었지만 src/**/*.js에 그 라우트 등록(app.${item.method.toLowerCase()}("${item.path}"...)이 없다`,
+          `README가 '${item.method} ${item.path}'를 implemented로 적었지만 진입점에서 도달하는 라우트에 없다 ` +
+            `(직접 등록·라우터 마운트 둘 다 해석한 결과: ${[...routes].join(", ") || "(없음)"})`,
         ).toBe(true);
       } else {
         // 양방향 — 001/002가 머지되어 실제로 응답하는 날 README의 `planned`가 RED가 되고,
         // 그 PR의 저자는 마커 한 단어를 뒤집어야 한다. 의도된 트립와이어다.
         expect(
           registered,
-          `README가 '${item.method} ${item.path}'를 planned로 적었지만 src/**/*.js에 그 라우트가 이미 등록돼 있다 — README.md의 '## Endpoints' 마커를 implemented로 고쳐야 한다`,
+          `README가 '${item.method} ${item.path}'를 planned로 적었지만 그 라우트가 이미 등록돼 응답한다 ` +
+            "— 이 실패는 당신의 소스가 아니라 README.md '## Endpoints'의 마커 때문이다: implemented로 고친다",
         ).toBe(false);
       }
     }

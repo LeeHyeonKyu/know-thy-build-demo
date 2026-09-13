@@ -72,47 +72,33 @@ export function createApp({ db, now = () => new Date() } = {}) {
 // `npm start`(= `node src/app.js`)가 타는 유일한 경로다. DB 핸들을 만드는 곳은 여기 하나뿐이고,
 // 만들어진 실행자는 createApp이 라우트에 내려준다(docs/TECHNICAL.md §Architecture "DB 핸들").
 //
-// 드라이버는 **동적으로** 부른다. 최상단 `import "pg"`는 드라이버가 없는 환경에서 모듈 import 자체를
-// 깨뜨려 createApp을 쓰는 모든 테스트와 `/healthz`까지 함께 끌고 내려간다 — 이 저장소에는 아직 pg가
-// 없다(package.json은 protected다. PR 본문 "Harness change needed" 참조).
-
+// 드라이버 로딩은 **여기서만** 일어난다. `pg`는 이제 실제 의존성이다(사람이 머지한 커밋 d7f7996) —
+// 그래서 "드라이버가 없으면 요청 시점 503으로 답하는" fallback 실행자를 이 라운드에 지웠다.
+// 그 fallback은 `POST /notes`가 **한 행도 저장하지 못하는 상태**를 정상 운영 상태처럼 보이게 했다
+// (review must_fix spec1·qa1: 실제 Postgres 앞에서도 503 db_unavailable, count(*) = 0).
+// 드라이버가 정말 없다면 그것은 요청 시점에 감출 일이 아니라 기동이 소리를 내야 할 설치 사고다.
+// 여전히 동적 import인 이유는 하나뿐이다: `loadDriver`를 주입해 배선만 보는 단위 테스트
+// (`test_2_entrypoint_wires_db_from_database_url`)가 실제 소켓 없이 돌아야 한다.
 const DB_DRIVER = "pg";
 
-// 드라이버가 없거나 pool을 만들지 못했을 때 쓰는 실행자. 기동을 막지 않고(= fail-fast 하지 않고)
-// 요청 시점에 "DB에 닿지 못했다"를 말한다 — app.js가 그 code만 503으로 매핑한다.
-// pg 오류 코드를 흉내 내지 않는다: 실패한 것은 연결이 아니라 핸들 자체이고, 사용자가 보는 사실은 같다.
-function unavailableDb(cause) {
-  return {
-    async query() {
-      const err = new Error("database is unavailable");
-      err.code = DB_UNAVAILABLE;
-      err.cause = cause;
-      throw err;
-    },
-  };
-}
-
 export async function createDbFromEnv({ env = process.env, loadDriver = () => import(DB_DRIVER) } = {}) {
-  try {
-    const driver = await loadDriver();
-    const Pool = driver?.Pool ?? driver?.default?.Pool;
-    if (typeof Pool !== "function") {
-      throw new TypeError(`${DB_DRIVER} driver exposes no Pool`);
-    }
-    // 진입점은 DATABASE_URL만 읽는다 — 하드코딩 DSN fallback을 두지 않는다(docs/TECHNICAL.md §Data).
-    const pool = new Pool({ connectionString: env.DATABASE_URL });
-    // idle client가 죽으면(DB 재시작, 서버측 연결 종료) pool은 자기 자신에게 'error'를 emit한다.
-    // 리스너가 없는 EventEmitter의 'error'는 Node가 throw해 프로세스를 죽인다 — 요청 시점 503으로
-    // 끝나야 할 DB 블립이 /healthz(CHARTER Preserve)까지 함께 끌고 내려가지 않게 여기서 받는다.
-    pool.on?.("error", (cause) => {
-      console.warn(`[app] idle ${DB_DRIVER} client error — /notes will answer 503 while it lasts: ${cause?.message ?? cause}`);
-    });
-    return pool;
-  } catch (cause) {
-    // 조용히 넘어가지 않는다(PROJECT 원칙 3): 기동은 계속하되 그 사실을 한 줄 남긴다.
-    console.warn(`[app] ${DB_DRIVER} pool unavailable — /notes will answer 503: ${cause?.message ?? cause}`);
-    return unavailableDb(cause);
+  const driver = await loadDriver();
+  const Pool = driver?.Pool ?? driver?.default?.Pool;
+  if (typeof Pool !== "function") {
+    throw new TypeError(`${DB_DRIVER} driver exposes no Pool`);
   }
+  // 진입점은 DATABASE_URL만 읽는다 — 하드코딩 DSN fallback을 두지 않는다(docs/TECHNICAL.md §Data).
+  // `options`(= search_path 등)는 넣지 않는다: config가 env를 이기므로
+  // (node_modules/pg/lib/connection-parameters.js:83) 여기 값을 박으면 PGOPTIONS가 죽고,
+  // 스키마를 한정하지 않는다는 §Data의 SQL 계약도 함께 무의미해진다.
+  const pool = new Pool({ connectionString: env.DATABASE_URL });
+  // idle client가 죽으면(DB 재시작, 서버측 연결 종료) pool은 자기 자신에게 'error'를 emit한다.
+  // 리스너가 없는 EventEmitter의 'error'는 Node가 throw해 프로세스를 죽인다 — 요청 시점 503으로
+  // 끝나야 할 DB 블립이 /healthz(CHARTER Preserve)까지 함께 끌고 내려가지 않게 여기서 받는다.
+  pool.on?.("error", (cause) => {
+    console.warn(`[app] idle ${DB_DRIVER} client error — /notes will answer 503 while it lasts: ${cause?.message ?? cause}`);
+  });
+  return pool;
 }
 
 export async function createAppFromEnv({ env = process.env, loadDriver, now } = {}) {

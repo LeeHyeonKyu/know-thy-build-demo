@@ -1,4 +1,5 @@
-// dw3 — src/service/notes.js 의 검증 계약을 DB·HTTP 없이 고정한다.
+// dw2 — src/service/notes.js 의 검증 계약을 DB·HTTP 없이 고정한다(verify id: test_2_service_validation_contract).
+// (dw3은 test/integration/notes.test.js의 test_2_created_at_from_injected_clock_and_no_row_on_reject다 — review cs4)
 // docs/TECHNICAL.md §Architecture: service는 HTTP를 모른다 → 오류에 상태코드가 실리면 안 된다.
 // docs/features/001-create-note.md:58,:61,:62,:64,:71,:77
 import { describe, expect, test } from "vitest";

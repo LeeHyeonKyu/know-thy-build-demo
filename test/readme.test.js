@@ -303,6 +303,54 @@ describe("#18 README guard", () => {
     for (const token of READINESS_TOKENS) {
       expect(runTestsProblems(steps(good[0], `docker compose -f docker-compose.test.yml up -d`, `준비 대기: ${token}`, good[2]))).toEqual([]);
     }
+
+    // --- review cf1: 참인 README에 RED를 내지 않고, 거짓인 README를 놓치지도 않는다 ---
+
+    // (a) 설치와 기동이 **같은 줄**이면 순서는 줄 안의 위치로 판정한다 — 줄 번호만 보면 '설치가 뒤에 있다'는
+    //     거짓 진단이 나온다(cf1 (a)).
+    const oneLine = "`npm ci`로 설치하고 `docker compose -f docker-compose.test.yml up -d --wait`로 DB를 띄운 다음:";
+    expect(runTestsProblems(steps(oneLine, "```bash", "npm test", "```"))).toEqual([]);
+    // 같은 줄이라도 기동이 설치보다 앞서면 여전히 RED다
+    const oneLineBad = "`docker compose -f docker-compose.test.yml up -d --wait`로 DB를 띄우고 `npm ci`로 설치한 다음:";
+    expect(runTestsProblems(steps(oneLineBad, "```bash", "npm test", "```"))).toEqual([
+      expect.stringContaining("DB 기동 단계가 설치 단계보다 먼저"),
+    ]);
+
+    // (b) 섹션 인트로의 **산문 언급**은 실행 단계가 아니다 — 뒤따르는 절차가 옳으면 GREEN(cf1 (b)).
+    const intro = "`npm test` 하나로 unit과 integration이 함께 돈다. 그 전에 아래 순서를 그대로 따른다.";
+    expect(runTestsProblems(steps(intro, "```bash", ...good, "```"))).toEqual([]);
+
+    // (c) 거짓 음성: 올바른 블록 **뒤에** 순서가 뒤집힌 두 번째 quickstart를 덧붙여도 RED여야 한다(cf1 반례).
+    expect(
+      runTestsProblems(
+        steps("```bash", ...good, "```", "", "```bash", "npm test", "docker compose -f docker-compose.test.yml up -d", "```"),
+      ),
+    ).toEqual([
+      expect.stringContaining("준비 완료를 보장하지 않는다"),
+      expect.stringContaining("같은 블록 안"),
+    ]);
+
+    // (d) 펜스 안 두 줄을 맞바꾸면, 그 아래 산문이 옳은 순서를 반복해도 RED다 (review s1의 구멍).
+    expect(
+      runTestsProblems(
+        steps(
+          "```bash",
+          good[0],
+          good[2],
+          good[1],
+          "```",
+          "",
+          "1. `npm ci` — 설치",
+          "2. `docker compose -f docker-compose.test.yml up -d --wait` — DB 기동",
+          "3. `npm test` — 실행",
+        ),
+      ),
+    ).toEqual([expect.stringContaining("같은 블록 안")]);
+
+    // (e) 통합 테스트를 명시적으로 제외한 실행은 DB를 요구하지 않는다 — docker 없는 안내가 false-RED를 내지 않는다.
+    expect(
+      runTestsProblems(steps("```bash", ...good, "```", "", "```bash", "npx vitest run --exclude 'test/integration/**'", "```")),
+    ).toEqual([]);
   });
 
   it("test_18_readme_endpoints_reflect_today", () => {

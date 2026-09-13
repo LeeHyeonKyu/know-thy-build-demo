@@ -153,31 +153,126 @@ function markerProblems(text) {
 
 // ---------------------------------------------------------------- dw3
 
-const firstIndex = (rows, re) => rows.findIndex((r) => re.test(r.text));
+const INSTALL_CMD = /\bnpm\s+(?:ci|install)\b/g;
+const COMPOSE_FILE = /docker-compose\.test\.yml/g;
+const DB_START_VERB = /\bup\b/; // `docker compose … up`도, `npm run db:up` 같은 래퍼도 받는다
+const TEST_CMD = /\bnpm\s+test\b|\bnpm\s+run\s+test\b|\bvitest\s+run\b/g;
+const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s+\S/;
+const LIST_CONT = /^\s{2,}\S/;
+const RANK = { install: 0, dbUp: 1, testRun: 2 };
+const LABEL = { install: "설치", dbUp: "DB 기동", testRun: "테스트 실행" };
+
+/** 통합 테스트를 명시적으로 제외한 실행은 DB를 요구하지 않는다(= 절차의 일부가 아니다). */
+const isDbFreeRun = (line) => /--exclude/.test(line) && /integration/.test(line);
+
+/**
+ * 단계 = 명령이 나타난 (줄, **줄 안의 위치**). 열까지 보기 때문에 설치와 기동이 한 줄에 있어도
+ * 순서를 잃지 않는다. 단계는 첫 번째 것만이 아니라 전부 모은다 — 뒤에 덧붙인 두 번째 절차도
+ * 기여자가 따라 하는 절차다.
+ */
+function stepsOf(rows) {
+  const steps = [];
+  rows.forEach((row, idx) => {
+    const t = row.text;
+    const at = (kind, col) => steps.push({ kind, row, idx, col, lineNo: row.lineNo });
+    for (const m of t.matchAll(INSTALL_CMD)) at("install", m.index);
+    if (DB_START_VERB.test(t)) for (const m of t.matchAll(COMPOSE_FILE)) at("dbUp", m.index);
+    if (!isDbFreeRun(t)) for (const m of t.matchAll(TEST_CMD)) at("testRun", m.index);
+  });
+  return steps.sort((a, b) => a.lineNo - b.lineNo || a.col - b.col);
+}
+
+const isBefore = (a, b) => a.lineNo < b.lineNo || (a.lineNo === b.lineNo && a.col < b.col);
+
+/**
+ * 기여자가 **그대로 복사해 위에서 아래로 실행하는 덩어리**: 코드펜스 블록과 연속된 목록.
+ * 산문 문단은 블록이 아니다 — 문단 속 `npm test` 언급은 실행 단계가 아니라 설명이기 때문이다.
+ */
+function blocksOf(rows) {
+  const blocks = [];
+  let cur = null;
+  let fenced = false;
+  const flush = () => {
+    if (cur && cur.length) blocks.push(cur);
+    cur = null;
+  };
+  for (const row of rows) {
+    if (/^\s*```/.test(row.text)) {
+      flush();
+      fenced = !fenced;
+      if (fenced) cur = [];
+      continue;
+    }
+    if (fenced) {
+      cur.push(row);
+      continue;
+    }
+    if (LIST_ITEM.test(row.text) || (cur && LIST_CONT.test(row.text))) {
+      cur = cur ?? [];
+      cur.push(row);
+      continue;
+    }
+    flush();
+  }
+  flush();
+  return blocks;
+}
+
+/** 기동 단계가 "반환 시점에 준비 완료"를 말하는지 보는 창: 그 줄 + 바로 다음 비어 있지 않은 줄. */
+function readinessWindow(rows, step) {
+  const lines = [step.row.text];
+  for (let i = step.idx + 1; i < rows.length; i++) {
+    const t = rows[i].text;
+    if (t.trim() === "" || /^\s*```/.test(t)) continue;
+    lines.push(t);
+    break;
+  }
+  return lines.join("\n");
+}
 
 function runTestsProblems(text) {
   const rows = bodyOf(text, "## Run tests");
   if (!rows) return ["README.md: '## Run tests' 섹션이 없다"];
 
-  const install = firstIndex(rows, /\bnpm\s+(ci|install)\b/);
-  const dbUp = firstIndex(rows, /docker-compose\.test\.yml/);
-  const runTests = firstIndex(rows, /\bnpm\s+test\b|\bnpm\s+run\s+test\b|\bvitest\s+run\b/);
+  const steps = stepsOf(rows);
+  const of = (kind) => steps.filter((s) => s.kind === kind);
 
   const problems = [];
-  if (install < 0) problems.push("README.md '## Run tests': 설치 단계(`npm ci`/`npm install`)가 없다");
-  if (dbUp < 0) problems.push("README.md '## Run tests': `docker-compose.test.yml`을 이름으로 가리키는 DB 기동 단계가 없다");
-  if (runTests < 0) problems.push("README.md '## Run tests': 테스트 실행 명령이 없다");
+  if (!of("install").length) problems.push("README.md '## Run tests': 설치 단계(`npm ci`/`npm install`)가 없다");
+  if (!of("dbUp").length) problems.push("README.md '## Run tests': `docker-compose.test.yml`을 이름으로 가리키는 DB 기동 단계가 없다");
+  if (!of("testRun").length) problems.push("README.md '## Run tests': 테스트 실행 명령이 없다 (통합 테스트를 제외한 실행만으로는 절차가 끝나지 않는다)");
   if (problems.length) return problems;
 
-  if (!(install < dbUp)) problems.push("README.md '## Run tests': 설치 단계가 DB 기동 단계보다 뒤에 있다");
-  if (!(dbUp < runTests)) problems.push("README.md '## Run tests': 첫 테스트 실행 명령이 DB 기동 단계보다 앞에 있다 — 그 순서로 따라 하면 통합 테스트가 터진다");
-  if (problems.length) return problems;
-
-  const window = rows.slice(dbUp, runTests).map((r) => r.text).join("\n");
-  if (!READINESS_TOKENS.some((t) => window.includes(t))) {
-    problems.push(`README.md '## Run tests': DB 기동 단계가 준비 완료를 보장하지 않는다 — ${READINESS_TOKENS.map((t) => `'${t}'`).join("/")} 중 하나가 필요하다`);
+  // (1) 준비 대기: 안내된 **모든** 기동 단계가 준비 완료를 보장해야 한다 — 마지막에 덧붙인
+  //     `up -d` 한 줄이 앞의 옳은 블록에 묻혀 통과하지 않게.
+  for (const step of of("dbUp")) {
+    const window = readinessWindow(rows, step);
+    if (!READINESS_TOKENS.some((t) => window.includes(t))) {
+      problems.push(`README.md:${step.lineNo}: DB 기동 단계가 준비 완료를 보장하지 않는다 — ${READINESS_TOKENS.map((t) => `'${t}'`).join("/")} 중 하나가 필요하다`);
+    }
+    if (/\bsleep\b/.test(window)) problems.push(`README.md:${step.lineNo}: 고정 대기(\`sleep\`)는 준비 완료를 보장하지 않는다 (docs/QA.md 결정성 규칙)`);
   }
-  if (/\bsleep\b/.test(window)) problems.push("README.md '## Run tests': 고정 대기(`sleep`)는 준비 완료를 보장하지 않는다 (docs/QA.md 결정성 규칙)");
+
+  // (2) 절차 존재: 설치 → DB 기동 → 테스트 실행을 이 순서로 따라갈 수 있어야 한다.
+  const install = of("install")[0];
+  const dbUp = of("dbUp").find((s) => isBefore(install, s));
+  const runTest = dbUp && of("testRun").find((s) => isBefore(dbUp, s));
+  if (!dbUp) problems.push("README.md '## Run tests': DB 기동 단계가 설치 단계보다 먼저 나온다 — 설치 → 기동 순서로 따라갈 수 있는 절차가 없다");
+  else if (!runTest) problems.push("README.md '## Run tests': DB 기동 단계 뒤에 오는 테스트 실행 명령이 없다 — 그 순서로 따라 하면 DB 없이 통합 테스트를 돌린다");
+
+  // (3) 블록 내부 순서: 복사해 실행하는 덩어리 안에서는 순서가 뒤집히면 안 된다. 아래 산문이
+  //     옳은 순서를 되풀이해도 블록을 복사한 기여자는 구제되지 않는다.
+  for (const block of blocksOf(rows)) {
+    let seen = null;
+    for (const step of stepsOf(block)) {
+      if (seen && RANK[step.kind] < RANK[seen.kind]) {
+        problems.push(`README.md:${step.lineNo}: 같은 블록 안에서 '${LABEL[step.kind]}'가 '${LABEL[seen.kind]}'(${seen.lineNo}행)보다 뒤에 온다 — 그 블록을 위에서 아래로 실행하면 막힌다`);
+        break;
+      }
+      if (!seen || RANK[step.kind] > RANK[seen.kind]) seen = step;
+    }
+  }
+
   return problems;
 }
 
@@ -287,9 +382,9 @@ describe("#18 README guard", () => {
     const good = ["npm ci", "docker compose -f docker-compose.test.yml up -d --wait", "npm test"];
 
     expect(runTestsProblems(steps(...good))).toEqual([]);
-    // 순서를 뒤집으면 RED — "기동 언급 이후 어딘가"가 아니라 첫 테스트 명령의 위치로 판정한다
-    expect(runTestsProblems(steps(good[0], good[2], good[1]))).toEqual([expect.stringContaining("첫 테스트 실행 명령이 DB 기동 단계보다 앞에 있다")]);
-    expect(runTestsProblems(steps(good[1], good[0], good[2]))).toEqual([expect.stringContaining("설치 단계가 DB 기동 단계보다 뒤에")]);
+    // 순서를 뒤집으면 RED — "기동 언급 이후 어딘가"가 아니라 절차를 따라갈 수 있는지로 판정한다
+    expect(runTestsProblems(steps(good[0], good[2], good[1]))).toEqual([expect.stringContaining("DB 기동 단계 뒤에 오는 테스트 실행 명령이 없다")]);
+    expect(runTestsProblems(steps(good[1], good[0], good[2]))).toEqual([expect.stringContaining("DB 기동 단계가 설치 단계보다 먼저 나온다")]);
     // 준비 대기를 빼거나 고정 대기로 바꾸면 RED
     expect(runTestsProblems(steps(good[0], "docker compose -f docker-compose.test.yml up -d", good[2]))).toEqual([expect.stringContaining("준비 완료를 보장하지 않는다")]);
     expect(runTestsProblems(steps(good[0], "docker compose -f docker-compose.test.yml up -d", "sleep 10", good[2]))).toEqual([

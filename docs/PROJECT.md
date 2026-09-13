@@ -121,16 +121,16 @@ date: 2026-09-12
 
 **Technical Foundation:** [TECHNICAL.md](TECHNICAL.md)
 
-## Operations — M1 Harness
+## Operations — M2 Harness
 
 | | Value |
 |---|---|
 | **Runtime / setup** | Node 22 / `npm ci` |
 | **Smoke test** | `test/smoke.test.js` (unit), `test/integration/db.test.js` (integration) |
-| **`.factory/harness.toml` maturity** | M1 |
+| **`.factory/harness.toml` maturity** | M2 (#15 — e2e가 `full`·`deep`·`required` 게이트) |
 | **`factory doctor`** | PASS — 2026-09-12 |
 
-**Next:** `npx know-thy-build factory bootstrap` → 이슈 다크 처리. e2e(`e2e/smoke.spec.js`)는 이미 있으나 M2 승격은 `factory:harness` 이슈로 관찰한다.
+**Next:** `npx know-thy-build factory bootstrap` → 이슈 다크 처리. e2e(`e2e/smoke.spec.js`)는 `npm run e2e`로 게이트 안에서 돈다 — 크로미움이 없는 머신에서는 `page` 픽스처 케이스만 빠진다(docs/QA.md).
 
 ---
 

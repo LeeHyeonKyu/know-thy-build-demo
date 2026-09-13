@@ -19,7 +19,8 @@ import { runGates } from "../.factory/lib/gates.js";
 import { envUp } from "../.factory/lib/test-env.js";
 // issue #15(2라운드)에서 더해진 단언들이 쓴다 — 위 블록의 두 케이스는 이 심볼들을 쓰지 않는다.
 import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
+import { createRequire } from "node:module";
 import { detectMaturityGaps } from "../.factory/lib/retro/maturity.js";
 import { checkHarness } from "../.factory/lib/doctor/harness.js";
 
@@ -237,6 +238,59 @@ describe("issue #15 — M2 승격이 판정을 실제로 뒤집는가", () => {
     for (const h of [reverted, { ...reverted, harness: { ...reverted.harness, maturity: "M1" } }]) {
       const fails = checkHarness({ harness: h, files }).filter((r) => r.level === "FAIL");
       expect(fails.map((f) => `${f.id}: ${f.detail}`)).toEqual([]);
+    }
+  });
+});
+
+// ── 이 승격이 만든 새 결합의 값: 하네스 테스트가 `npm ci`만으로 돌아가는가 ────────────────────
+// 이 diff가 저장소 역사상 처음으로 **프로젝트 테스트 레이어를 벤더링된 factory 런타임에 묶었다**
+// (`git grep '.factory/lib' origin/main -- test src`는 0건). 그 런타임의 유일한 외부 의존(`smol-toml`)은
+// `.factory/package.json`에만 선언돼 있고 `.factory/node_modules`에만 설치되는데, 그 디렉터리를 만드는
+// 것은 `[runtime].setup`(= `npm ci`)이 아니라 CI의 별도 셋업 스텝이다. 그래서 CLAUDE.md가 기여자에게
+// 안내하는 `npm ci && npx vitest run`이 깨끗한 클론에서 세 파일을 collect 단계에서 죽였다.
+// 아래 단언이 그 상태를 관측한다: 이 프로젝트가 스스로 설치하는 것들만으로 이 테스트들이 import될 수
+// 있는가. 고치는 방법은 하나뿐이다 — 저장소의 매니페스트가 그 의존을 **직접 선언**하는 것.
+const FACTORY_LIB = join(ROOT, ".factory/lib");
+
+/** `.factory/lib/**\/*.js`가 정적으로 import하는 외부(비상대·비node:) 모듈 이름. */
+function factoryLibBareImports() {
+  const files = readdirSync(FACTORY_LIB, { recursive: true, withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.endsWith(".js"))
+    .map((e) => join(e.parentPath ?? e.path, e.name));
+  const specs = new Set();
+  for (const file of files) {
+    for (const line of readFileSync(file, "utf8").split("\n")) {
+      const m = /^\s*(?:import|export)\b[^\n]*?\bfrom\s+"([^"]+)"/.exec(line) ?? /^\s*import\s+"([^"]+)"/.exec(line);
+      if (m && !m[1].startsWith(".") && !m[1].startsWith("node:")) specs.add(m[1]);
+    }
+  }
+  return [...specs].sort();
+}
+
+describe("issue #15 — 하네스 테스트가 문서에 적힌 설치 경로만으로 돌아간다", () => {
+  test("test_15_factory_lib_deps_install_with_npm_ci", () => {
+    const specs = factoryLibBareImports();
+    // 전제(공허한 통과 봉쇄): 결합이 실제로 있다. 없다면 아래 루프가 0바퀴를 돌고 아무것도 안 지킨다.
+    expect(specs).toContain("smol-toml");
+
+    const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
+    const declared = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+    const runtimePins = JSON.parse(readFileSync(join(ROOT, ".factory/package.json"), "utf8")).dependencies || {};
+    const requireFromRoot = createRequire(join(ROOT, "package.json"));
+    const rootModules = join(ROOT, "node_modules") + sep;
+
+    // (a) 저장소의 매니페스트가 직접 선언한다 — `npm ci`가 설치하는 것의 정의가 이 파일이다.
+    expect(specs.filter((s) => !(s in declared))).toEqual([]);
+    // (b) 그리고 실제로 프로젝트 루트의 node_modules에서 해석된다(= `npm ci` 뒤 import가 성공한다).
+    //     `.factory/node_modules`가 있는 머신에서도 통과하지 않도록 **해석 경로**까지 본다.
+    const unresolved = specs.filter((s) => {
+      try { return !requireFromRoot.resolve(s).startsWith(rootModules); } catch { return true; }
+    });
+    expect(unresolved).toEqual([]);
+    // (c) 두 설치 경로가 같은 버전을 준다 — CI는 `.factory/node_modules`를, 로컬은 루트를 먼저 만난다.
+    //     핀이 갈라지면 같은 커밋이 기계마다 다른 TOML 파서로 harness.toml을 읽는다.
+    for (const [name, pin] of Object.entries(runtimePins)) {
+      if (specs.includes(name)) expect(declared[name]).toBe(pin);
     }
   });
 });

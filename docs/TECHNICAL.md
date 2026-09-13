@@ -27,7 +27,7 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 | Test runner | vitest 3 | unit + integration 동일 러너 |
 | E2E | Playwright | 이미 설치됨 — M2 승격 전까지 게이트에서 쓰지 않음 |
 
-**Key Dependencies:** `express` — HTTP, `pg` — DB 드라이버(**아직 의존성에 없다**. `package.json`은 protected이므로 도입 경로는 하나다: 사람이 머지하는 `factory:harness` PR. 001은 그 PR을 기다린다 — 001의 plan handoff가 이것을 차단 전제로 선언했다)
+**Key Dependencies:** `express` — HTTP, `pg` — DB 드라이버(`^8.23.0`. `package.json`은 protected라 도입 경로가 하나뿐이었고 — 사람이 머지하는 `factory:harness` PR — 커밋 `d7f7996`(PR #24)로 실제로 들어왔다. 001이 세 회차 동안 기다린 것이 이것이다)
 **Dev Tools:** `vitest`, `@playwright/test`, `docker compose`
 **Weakest Link:** 검색 구현(LIKE) — 데이터가 커지면 가장 먼저 바뀐다.
 
@@ -58,15 +58,20 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 
 **`created_at`의 출처는 앱이다.** DDL의 `default now()`는 fallback으로만 남고, 값은 `createApp({ now })`로 주입된 시계가 만들어 repo의 INSERT가 컬럼에 명시한다. `vi.useFakeTimers`로 전역 `Date`를 얼리는 방법(docs/QA.md의 기본 규칙)은 pg 소켓·undici 타이머와 같은 프로세스에서 도는 이 저장소에서는 쓰지 않는다 — 주입된 clock으로 대체한다(`docs/features/004-cache-expiry.md`의 선례). 002의 정렬 계약이 이 값 위에 얹힌다.
 
-**마이그레이션:** `db/migrations/001_create_notes.sql`은 전진 전용(`CREATE TABLE IF NOT EXISTS`)이고, **제품 코드에는 마이그레이션 러너를 두지 않는다**. `migrate()`를 `src/`에 두면 제품 호출자가 0인 모듈이 되고, 부팅 경로에 붙이면 `GET /healthz`가 DB 가용성에 묶여 CHARTER Preserve가 깨진다. 적용 주체는 둘이다: 운영은 아래 런북(사람), 테스트는 `pg`가 랜딩한 뒤 들어올 integration 헬퍼가 **멱등하게** 한다(`CREATE TABLE IF NOT EXISTS`는 원자적이지 않으므로 헬퍼는 동시 적용 경쟁의 패자 오류 — `42P07`, `pg_type`/`pg_class` 고유 위반 — 만 삼키고 구문·권한 오류는 전파해야 한다. vitest가 파일을 병렬로 돌리므로 이 경쟁은 가정이 아니라 기본 실행 조건이다). **지금 이 저장소에는 그 헬퍼가 없다** — `pg` 없이 헬퍼를 쓰려면 `docker compose exec psql` 서브프로세스를 두 번째 DB 접근 개념으로 들여야 하는데, 그것은 001 plan handoff의 non_goal이고 `tests_are_load_bearing=true` 아래에서 002·003이 그대로 물려받는다.
+**마이그레이션:** `db/migrations/001_create_notes.sql`은 전진 전용(`CREATE TABLE IF NOT EXISTS`)이고, **제품 코드에는 마이그레이션 러너를 두지 않는다**. `migrate()`를 `src/`에 두면 제품 호출자가 0인 모듈이 되고, 부팅 경로에 붙이면 `GET /healthz`가 DB 가용성에 묶여 CHARTER Preserve가 깨진다. 적용 주체는 둘이다: 운영은 아래 런북(사람), 테스트는 `test/integration/notes.test.js`의 `beforeAll`이 **자기 소유 스키마 안에서** 이 파일을 그대로 읽어 실행한다. 스키마 이름이 `test_2_<pid>_<rand>`로 고유하므로 동시 적용 경쟁 자체가 없다 — advisory lock도 `42P07`/`23505` 흡수도 쓰지 않는다(그 비결정성 기계가 사라진 것이 전용 스키마를 택한 부수 이득이다). 그래서 출하되는 SQL이 게이트가 실제로 실행하는 경로 위에 있고, DDL의 컬럼 집합이 repo의 INSERT와 어긋나면 그 자리에서 RED가 된다.
+
+**SQL은 스키마를 한정하지 않는다(계약).** `db/migrations/001_create_notes.sql`도 `src/repo/notes.js`의 문장도 `public.`을 쓰지 않고, `src/app.js`는 Pool config에 `options`를 넣지 않는다(config가 env를 이기므로 — `pg/lib/connection-parameters.js:83` — 넣는 순간 `PGOPTIONS`가 죽는다). 프로덕션은 기본 `search_path`(public)로 돌고 게이트는 전용 스키마로 도는데, 이 계약이 그 둘을 같은 코드 경로 위에 남게 하는 유일한 장치다. 002·003이 `public.`을 한 줄 박으면 조용히 죽는 것은 001의 integration 테스트다.
 
 **운영 적용 런북(사람이 실행한다):** `psql "$DATABASE_URL" -f db/migrations/001_create_notes.sql`.
 되돌림은 코드로 출하하지 않는다 — 이 PR을 revert해도 `notes` 테이블은 남고(순수 additive라 무해하다), 제거가 필요하면 사람이 `DROP TABLE notes`를 직접 판단해 실행한다(파괴적 스키마 변경은 CHARTER NEVER_AUTOMATE).
 
 **연결 설정:** 진입점은 `process.env.DATABASE_URL`만 읽는다. 하드코딩 DSN fallback도, 기동 시점 fail-fast도 두지 않는다(후자는 `/healthz` ready 신호를 굶긴다). 설정이 틀리면 요청 시점에 503으로 드러난다 — repo가 연결류 오류를 `db_unavailable`로 번역하고 `src/app.js`가 그 code만 503으로 매핑한다. 연결류가 아닌 예외는 500이다(전면 catch→503은 진짜 장애를 구별 불가능하게 만든다).
+`DATABASE_URL`을 아예 빠뜨리면 pg 자신의 기본 해석(localhost:5432, user = `$USER`)으로 붙는다 — 기동은 성공하고, 잘못된 로컬 DB가 있으면 조용히 그쪽에 쓴다. 게이트는 이 경로를 밟지 않는다(결과가 코드가 아니라 실행 머신의 성질에 걸리기 때문이다 — 001 plan handoff non_goals). 배포 체크리스트의 항목이다.
 
-**배선의 위치와 드라이버 로딩:** `src/app.js`의 `createDbFromEnv()`가 `DATABASE_URL`로 `pg.Pool`을 만들고 `createAppFromEnv()`가 그것을 `createApp({ db })`에 넘긴다. 진입점 가드(`node src/app.js`)는 그 둘을 부르고 `listen`할 뿐이다 — 이것이 `npm start`가 타는 유일한 배선이다. **이 배선을 실제 Postgres 앞에서 관측하는 게이트 테스트는 아직 없다**: 프로세스를 스폰해 503을 단언하던 케이스는 `pg`가 없는 한 DSN이 무엇이든 같은 fallback을 타므로 판별력이 0이었고(제품 코드의 DSN 처리를 지워도 초록이었다) 지웠다. 남은 관측은 드라이버를 주입해 **배선만** 보는 `test_2_entrypoint_wires_db_from_database_url`(가짜 Pool이 받은 `connectionString`·INSERT 문장·파라미터)과, 진입점이 기동해 리스닝한다는 `test/smoke.test.js`의 #8 가드다. 드라이버는 최상단 `import "pg"`가 아니라 **동적 import**로 부른다: `pg`는 아직 의존성에 없고(`package.json`은 protected — `factory:harness` 대기) 정적 import는 드라이버가 없는 환경에서 모듈 전체를, 즉 `/healthz`와 검증 경로까지 함께 깨뜨린다. 드라이버가 없거나 pool 생성이 실패하면 기동을 막는 대신 `db_unavailable`로 reject하는 실행자를 쓴다 — `/healthz`는 200으로 살아 있고 `POST /notes`는 500이 아니라 503으로 답한다. `pg`가 들어오면 이 경로는 코드 변경 없이 진짜 pool을 쓴다.
-**제거 트리거:** `pg`를 들이는 `factory:harness` PR이 머지되면 그 다음 이슈에서 (a) 드라이버 부재용 fallback 실행자(`unavailableDb`)를 남길지 지울지 결정하고, (b) 001 plan handoff의 `dw1`·`dw3`·`dw4` — `test_2_shipped_entrypoint_persists_note_with_real_driver`(출하되는 `node src/app.js`를 띄워 실제 Postgres에 201을 받고, 앱이 아닌 별도 커넥션이 그 행을 본다), `test_2_create_note_persists_in_caller_transaction`, `test_2_invalid_request_rejected_and_creates_no_row`(둘 다 테스트가 연 `pg.Client`에서 `BEGIN` → 단언 → `ROLLBACK`) — 를 작성한다. 지금은 어떤 게이트 테스트도 "설치된 pg + 실제 Postgres"를 함께 밟지 않으며, **그래서 출하 프로세스는 아직 노트를 한 건도 저장하지 못한다**(리뷰 qa1·spec1이 실제 컨테이너로 재현했다). 이 한 줄이 001의 Story 1이 아직 열려 있다는 기록이다.
+**당직 런북 — 마이그레이션을 빠뜨린 배포에서 실제로 보이는 것:** `POST /notes`가 **500 `{"error":{"code":"internal_error"}}`**이고 503이 아니다. pg는 SQLSTATE를 `ECONNREFUSED`와 같은 `err.code` 필드에 싣지만(`pg-protocol`), repo는 연결류 코드 집합만 `db_unavailable`로 번역하므로 `42P01`(relation "notes" does not exist)은 번역되지 않는다. 즉 **503이면 DB에 못 닿는 것이고, 500이면 이 배포가 위 런북을 실행하지 않은 것이다** — 503을 보고 DB를 30분 들여다보는 일이 없도록 두 신호를 갈라 둔다. 관측은 `test_2_db_failure_503_but_bug_is_not_503`(주입된 42P01)과 integration의 dw1(repo SQL을 `public.notes`로 한정하면 같은 500 봉투가 나온다)이 함께 지킨다.
+
+**배선의 위치와 드라이버 로딩:** `src/app.js`의 `createDbFromEnv()`가 `DATABASE_URL`로 `pg.Pool`을 만들고 `createAppFromEnv()`가 그것을 `createApp({ db })`에 넘긴다. 진입점 가드(`node src/app.js`)는 그 둘을 부르고 `listen`할 뿐이다 — 이것이 `npm start`가 타는 유일한 배선이다. **이 배선은 이제 실제 Postgres 앞에서 관측된다**: `test_2_shipped_entrypoint_persists_note_in_isolated_schema`(dw1)가 그 명령을 그대로 자식 프로세스로 띄워 201을 받고, 앱이 아닌 테스트 커넥션이 저장된 행을 본다. 드라이버 로딩이 동적 import로 남아 있는 이유는 하나뿐이다 — `loadDriver`를 주입해 **배선만** 보는 단위 테스트(`test_2_entrypoint_wires_db_from_database_url`)가 소켓 없이 돌아야 한다. 드라이버를 못 부르면 기동이 그 자리에서 실패한다: 그것은 요청 시점 503으로 덮을 일이 아니라 설치 사고다.
+**드라이버 부재용 fallback은 지웠다.** `pg`가 랜딩하기 전의 `createDbFromEnv`는 로딩 실패를 삼키고 모든 `query`를 `db_unavailable`로 reject하는 실행자를 돌려줬다. 그 형태는 정상 Postgres를 앞에 두고도 `POST /notes`가 201 대신 503을 답하고 **한 행도 저장되지 않는 상태**를 "기동 성공"으로 보이게 했다(review must_fix `spec1`·`qa1`, 재현 로그 `.factory/out/qa/2-real-pg-repro-round2.log`). 같은 상태를 이름 붙여 게이트에 고정하는 테스트도 두지 않는다 — `tests_are_load_bearing=true` 아래에서 "저장이 안 되는 게 정상"이 영구 계약이 된다(001 plan handoff non_goals).
 **idle client 오류:** 만들어진 pool에는 `error` 리스너를 붙인다. node-postgres의 Pool은 idle client가 죽으면 자기 자신에게 `error`를 emit하고, 리스너가 없는 EventEmitter의 `error`는 Node가 throw해 프로세스를 죽인다 — DB 블립이 요청 시점 503이 아니라 프로세스 사망(그리고 `/healthz` 정지)이 되는 것을 막는다.
 
 ## Interfaces
@@ -78,7 +83,9 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 | GET | `/notes?q=` | 200 `{items:[...],total}` |
 | GET | `/healthz` | 200 `{ok:true}` + 응답 헤더 `Cache-Control: no-store` (#8 — 프록시·브라우저가 헬스체크 응답을 재사용하지 못하게) |
 
-**`id`의 와이어 타입은 아직 정해지지 않았다(관측 미완).** DDL은 `bigserial`(= `int8`)이고 node-postgres는 `int8`을 기본으로 **JS 문자열**로 돌려준다(JS `number`가 2^53-1을 넘는 값을 잃지 않게 하려는 드라이버의 기본값이고, 바꾸려면 `pg.types.setTypeParser(20, …)`를 명시해야 한다). 따라서 `pg`가 랜딩하면 `POST /notes` 201의 `id`는 `1` 이 아니라 `"1"` 로 나갈 가능성이 높다. **이 저장소는 그것을 아직 한 번도 관측하지 못했다** — `pg`가 없어 실제 드라이버를 지나는 게이트 테스트가 없고, 어떤 테스트도 이 타입을 고정하지 않는다. 추측을 계약으로 굳히지 않는다: `dw1`이 작성되는 순간 응답 `id`의 `typeof`를 단언하고 **관측된 값으로 이 문단을 갱신한다**. 그때까지 002의 `id DESC` 계약(`docs/features/002-list-notes.md:36,:57,:82`)은 정렬을 DB에 맡기고 클라이언트 쪽 숫자 비교를 가정하지 않는다 — 문자열 `"10" < "9"` 이므로 JS에서 정렬하면 조용히 틀린다.
+**`id`와 `created_at`의 와이어 타입(관측으로 확정).** `POST /notes` 201의 `id`는 **JSON 문자열**이다(`"1"`, `/^[0-9]+$/`). DDL이 `bigserial`(= `int8`)이고 node-postgres는 `int8`을 기본으로 JS 문자열로 돌려주기 때문이다 — JS `number`가 2^53-1 너머의 값을 잃지 않게 하려는 드라이버의 기본값이고, 바꾸려면 `pg.types.setTypeParser(20, …)`를 명시해야 한다. `created_at`은 **밀리초까지 있는 UTC ISO-8601 문자열**이다(`2026-01-01T00:00:00.000Z` — `new Date(v).toISOString() === v`). 이 두 값은 `test_2_shipped_entrypoint_persists_note_in_isolated_schema`(dw1)가 실제 드라이버를 지나 관측한 것이고, 바꾸는 것은 클라이언트를 깨뜨리는 사람의 결정이다(CHARTER NEVER_AUTOMATE). 002의 `id DESC` 계약(`docs/features/002-list-notes.md:36,:57,:82`)은 정렬을 DB에 맡겨야 한다 — 문자열 `"10" < "9"` 이므로 JS에서 정렬하면 조용히 틀린다.
+
+**오류 code의 이름은 여기서 정한다(클라이언트가 `code`로 분기한다 — CHARTER).** `invalid_request` → 400(검증 실패, body-parser가 클라이언트 잘못으로 표시한 4xx), **`db_unavailable` → 503**(repo가 연결류 오류 — `ECONNREFUSED`·`ETIMEDOUT` 같은 소켓 오류와 PostgreSQL class 08·57P0x·53300 — 를 번역한 것), **`internal_error` → 500**(그 밖의 모든 예외: 프로그래밍 버그, 그리고 `42P01`처럼 서버가 돌려준 스키마 오류). 002·003은 새 이름을 발명하지 말고 이 셋을 쓴다.
 
 **Error Format:** `{ "error": { "code": "invalid_request", "message": "title is required" } }` — 조용히 버리지 않는다(PROJECT 원칙 3).
 
@@ -92,11 +99,15 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 | integration | routes→service→repo, 실제 Postgres에 SQL 실행 | vitest + docker compose | SQL·스키마 오류는 unit이 못 잡는다 |
 | e2e | 앱 기동 후 HTTP 표면 | Playwright | 존재하지만 M1에서는 게이트가 아님(M2 승격 대상) |
 
-**integration이 DB에 붙는 법(아직 붙지 않는다):** 실행자 계약은 `{query(text, params)}` 하나이고, `pg`의 `Pool`·`PoolClient`가 그것을 만족한다. 그래서 `pg`가 랜딩하면 integration 헬퍼는 **테스트가 연 `pg.Client` 하나**로 `BEGIN` → 단언 → `ROLLBACK`을 돌리고 그 클라이언트를 그대로 `createApp({ db })`에 주입한다 — 앱이 자기 pool로 다른 커넥션을 쓰면 행이 트랜잭션 안에서 보이지 않아 떨어진다.
+**integration이 DB에 붙는 법:** 실행자 계약은 `{query(text, params)}` 하나이고 `pg`의 `Pool`·`PoolClient`가 둘 다 만족한다. `test/integration/notes.test.js`는 그 두 모양을 **둘 다** 밟는다. (1) 출하 진입점(`node src/app.js`)을 자식 프로세스로 띄워 진짜 `pg.Pool`을 지나는 경로 — dw1·dw6, (2) 테스트가 연 `pg.Client` 하나로 `BEGIN` → `set local search_path` → 단언 → `ROLLBACK`을 돌리고 그 클라이언트를 그대로 `createApp({ db })`에 주입하는 경로 — dw3(앱이 자기 pool로 다른 커넥션을 쓰면 행이 트랜잭션 안에서 보이지 않아 떨어진다, docs/QA.md "DB isolation").
 
-`pg`가 없는 지금 그 헬퍼를 `docker compose exec -T db psql` 서브프로세스로 흉내 내지 **않는다**. 한 번 만들었다가 지웠고, 이유는 셋이다: (1) 001 plan handoff가 "psql 서브프로세스를 `{query}` 실행자로 쓰는 두 번째 DB 접근 개념"을 non_goal로 이름 붙였다, (2) `tests_are_load_bearing=true`라 그 개념은 지워지지 않고 002·003이 그대로 물려받는다, (3) 무엇보다 그 경로를 지나는 단언은 출하되는 드라이버를 한 번도 밟지 않으면서 밟은 것처럼 보인다 — 실제로 `id` 단언이 고정한 것은 드라이버의 타입이 아니라 헬퍼가 `json_agg(...)::text` → `JSON.parse`로 만든 JSON 타입이었다. 따라서 **현재 게이트 안의 DB 관측은 `test/integration/db.test.js`(컴포즈 Postgres가 살아 있다)뿐이고, `POST /notes`의 SQL은 가짜 실행자에 주입된 형태로만 관측된다**(`test_2_entrypoint_wires_db_from_database_url`이 INSERT 문장과 파라미터를 확인한다). 이것이 이 저장소가 `factory:harness` PR을 기다리는 지점이다.
+**DSN의 단일 출처와 스키마 격리.** integration은 `DATABASE_URL`(없으면 `docker-compose.test.yml`의 서비스 정의에서 온 `postgres://postgres:test@127.0.0.1:5432/demo`) 하나만 읽고, 그 값을 자식 프로세스에도 그대로 넘긴다. 케이스들은 `beforeAll`이 만든 **테스트 소유 스키마** `test_2_<pid>_<rand>` 안에서만 돌고(앱 프로세스에는 `PGOPTIONS=-c search_path=<schema>`로, 테스트 커넥션에는 트랜잭션의 `set local search_path`로 건다), 정리는 `afterAll`의 `drop schema … cascade` 하나다 — 공유 `public.notes`에는 한 행도 커밋하지 않는다(그래야 002의 `{items:[],total:0}` AC가 증명 가능하게 남고, 실패 경로에서 행이 새지 않는다). 테이블 전체 `count(*)` 델타는 쓰지 않는다. **대가**: 프로덕션이 실제로 쓰는 구성(기본 `search_path`)을 게이트가 한 번도 실행하지 않는다 — 그 분기를 막는 유일한 장치가 위 §Data의 "SQL은 스키마를 한정하지 않는다" 계약이다(operator의 반대는 001 plan handoff의 dissent_log·open_risks에 남아 있다).
 
-**제품 코드에는 셸 경로가 없다**: `test_2_app_factory_binds_no_port_and_no_shell_in_src`가 `src/**/*.js`에 `child_process`·`docker`·`psql` 문자열이 없다는 것과 `src/routes/notes.js`가 `src/repo/**`를 직접 import하지 않는다는 것을 게이트 안에서 정적으로 단언한다.
+**결정성:** 스키마 이름과 케이스 마커는 `pid + 난수`로 만든다 — vitest는 파일을 병렬로 돌리고 `new_test_repeats=3`은 같은 파일을 전체 스위트와 동시에 세 번 돌리므로, 고정 이름은 서로의 스키마를 드롭한다. 고정 대기는 없다: 진입점의 `listening on <port>`, 강제 종료된 백엔드가 `pg_stat_activity`에서 사라지는 것 모두 조건 대기로 본다(docs/QA.md "No sleep").
+
+DB 접근 개념은 이 이슈가 **하나만** 더한다: 실제 `pg.Client`. `docker compose exec -T db psql` 서브프로세스를 두 번째 실행자 개념으로 들이지 않는다(한 번 만들었다가 지웠다). 이유는 셋이다: (1) 001 plan handoff가 그것을 non_goal로 이름 붙였다, (2) `tests_are_load_bearing=true`라 그 개념은 지워지지 않고 002·003이 물려받는다, (3) 무엇보다 그 경로를 지나는 단언은 출하되는 드라이버를 한 번도 밟지 않으면서 밟은 것처럼 보인다 — 실제로 그때 `id` 단언이 고정한 것은 드라이버의 타입이 아니라 헬퍼가 `json_agg(...)::text` → `JSON.parse`로 만든 JSON 타입이었다. (기존 스모크 `test/integration/db.test.js`가 `psql`을 쓰는 것은 그 이전부터의 사실이고 load-bearing이라 그대로 둔다.)
+
+**제품 코드에는 셸 경로가 없다**: `test_2_app_factory_binds_no_port_and_no_shell_in_src`가 `src/**/*.js`에 `child_process`·`docker`·`psql` 문자열이 없다는 것을 정적으로 단언하고, `test_2_entrypoint_imports_without_binding_and_routes_do_not_import_repo`가 (a) `src/app.js`를 import하기만 한 프로세스가 스스로 끝난다는 것과 (b) `src/routes/notes.js`가 `src/repo/**`를 직접 import하지 않는다는 것을 지킨다(정적 판정이라 동적 import·재수출은 보지 못한다).
 
 **Coverage Principle:** 변경된 줄 기준 diff coverage 90% — 전체 % 는 쓰지 않는다.
 **What NOT to Test:** Express 내부, pg 드라이버, 라우팅 등록 같은 글루 — 프레임워크가 이미 보장하는 것.

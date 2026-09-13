@@ -16,10 +16,10 @@
 | --- | --- | --- |
 | merged | 0 | 1 |
 | review rounds avg | 0 | 1 |
-| needs-human | 3 | 3 |
+| needs-human | 6 | 3 |
 | rejects by role | 없음 | 없음 |
-| cost (usd) | 101.80 | 81.81 |
-| tokens | input 1795037 / output 220659 | input 50 / output 128059 |
+| cost (usd) | 151.48 | 81.81 |
+| tokens | input 2303315 / output 284807 | input 50 / output 128059 |
 | retro cost (usd) | 0.00 | 0.72 |
 | retro tokens | input 0 / output 0 | input 2 / output 2998 |
 | full retros | — | 1 |
@@ -152,6 +152,22 @@
           2
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "이슈 #2의 핵심 약속(`POST /notes` 한 번으로 노트를 실제로 남기고 돌려받는다 — 이슈 본문 Story 1, `npm start`가 타는 실제 배포 경로)이 이 커밋에서도 구조적으로 항상 깨진다. dw1·dw2·dw5·dw8이 검증하는 것은 테스트가 직접 연 psql 세션을 `createApp({db})`에 주입한 경로뿐이고, `npm start`가 유일하게 pool을 만드는 진입점 가드(`createDbFromEnv`, src/app.js:95)는 어떤 done_when에서도 '정상 Postgres에 붙어 201을 반환'하는 형태로 관측되지 않는다 — 오히려 새로 추가된 `test_2_started_process_serves_notes_with_db_wired`(test/app.test.js:392-452)가 스스로 '드라이버가 있든 없든 결과는 하나(503)다'라고 주석에 적고 도달 불가능한 DSN만 써서 503을 정상으로 고정한다. 이는 plan의 open_risks #4('이 저장소 최초의 DB 쓰기 배선인데 그 경로를 한 번도 밟아 본 적이 없다')가 '미검증'이라 적어 둔 위험이 diff에서 '기능이 실제로 동작하지 않음'으로 확정된 것이다.",
+        "runs": [
+          2
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "Re-confirmed against the current HEAD (033bbb7) with a real Postgres 16 container up and DATABASE_URL pointed at it: starting the shipped entrypoint exactly as `npm start` would (`node src/app.js`) and POSTing a valid `{title, body}` to `/notes` does NOT create a note. The process logs `pg pool unavailable — /notes will answer 503: Cannot find package 'pg' imported from .../src/app.js`, `/healthz` stays 200 (good), but `POST /notes` returns 503 `db_unavailable` instead of 201, and a direct psql count against the real table confirms 0 rows were written. `pg` is still absent from package.json, package-lock.json, and node_modules. The diff's only response to this gap is a docs/TECHNICAL.md rewrite that reclassifies installing `pg` as a future, separate `factory:harness` PR's job ('제거 트리거: pg를 들이는 factory:harness PR이 머지되면…') and a new unit test (`test_2_entrypoint_without_driver_answers_503_not_500`) that asserts the *absence* of pg as the expected, permanent behavior rather than as a gap to close. This is the same open item from the previous round (ruled 'uphold' — the dispute framed it as an out-of-scope harness concern, but the plan handoff's own files_expected/open_risks put installing pg and updating the lockfile in scope for issue #2). The core capability the issue text promises — `POST /notes` persists a note and returns id + created_at — still does not exist for any real deployment of this code.",
+        "runs": [
+          2
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -271,14 +287,23 @@
           2
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "'영구 재발화를 끝낸다'는 이 계획의 두 번째 가치 주장은 코드와 다르다. retro는 **닫힌** 이슈만 다시 만든다 — #15를 열어 둔 채 큐 라벨만 내리면 재발화는 영구히 일어나지 않는다. 즉 '지금 만들지 않는다'는 이 이슈에서 여전히 살아 있는 선택지이고, 그것을 배제한 지난 사이클의 기각 사유도 같은 이유로 무너진다. 근거: `.factory/bin/retro.js:596-599`의 openTitles dedupe, `:703`('harnessTitles: factory:harness 라벨의 **열린** 이슈 제목'), `:594-595` 주석. 대안(비용 0, 되돌림 비용 0): #15를 열린 채 두고 큐 라벨을 내린 뒤, 브라우저 프로비저닝과 e2e 레인 기준이 갖춰진 다음 사이클에 승격한다.",
+        "runs": [
+          15
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
     "needs_human": [
       {
         "issue": 2,
-        "reason": "stage artifact missing or invalid: claude -p reported is_error; no candidate matched the stage schema — no JSON object in result",
-        "at": "2026-09-12T15:25:22Z"
+        "reason": "stage artifact missing or invalid: claude -p reported is_error; no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | transcript task-notification #1: head_sha is required; pr is required; gates is required; verifier.verdict is required; gates file missing",
+        "at": "2026-09-12T20:19:17Z"
       },
       {
         "issue": 14,
@@ -287,13 +312,13 @@
       },
       {
         "issue": 18,
-        "reason": "gates file status is RED",
-        "at": "2026-09-12T19:14:54Z"
+        "reason": "stage artifact missing or invalid: claude -p reported is_error; no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | no JSON object in result",
+        "at": "2026-09-12T20:19:29Z"
       },
       {
         "issue": 15,
-        "reason": "verifier rejected",
-        "at": "2026-09-12T19:04:04Z"
+        "reason": "stage artifact missing or invalid: claude -p reported is_error; no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | transcript task-notification #1: gates is required; verifier.verdict is required; gates file missing",
+        "at": "2026-09-12T20:19:11Z"
       }
     ]
   },
@@ -301,12 +326,12 @@
     "merged": 0,
     "review_rounds_avg": 0,
     "rejects_by_role": {},
-    "needs_human": 3,
+    "needs_human": 6,
     "usage": {
-      "cost_usd": 101.804223,
+      "cost_usd": 151.484447,
       "tokens": {
-        "input": 1795037,
-        "output": 220659
+        "input": 2303315,
+        "output": 284807
       }
     }
   },

@@ -2,17 +2,20 @@
   "name": "know-thy-build-demo",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "vitest run",
     "start": "node src/app.js",
     "e2e": "playwright test"
   },
   "devDependencies": {
-    "vitest": "^3.2.0",
-    "@playwright/test": "^1.55.0"
+    "@playwright/test": "^1.55.0",
+    "vitest": "^3.2.0"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "pg": "^8.23.0"
   }
 }

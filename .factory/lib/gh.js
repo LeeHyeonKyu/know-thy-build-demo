@@ -48,16 +48,66 @@ export async function resolveRepo({ run }) {
   return parsed.nameWithOwner;
 }
 
-export function makeGh({ run, repo }) {
+/**
+ * ADR-020 KTB-30 — **라벨 변경만은 재시도한다.** 데모에서 두 번(2026-09-13 08:52Z #2, 08:55Z #15)
+ * 같은 방식으로 죽었다: `gh issue edit --remove-label … --add-label …` 한 번이 GitHub의 일시 장애로
+ * (`GraphQL: Something went wrong while executing your query`, `EOF`) 중간에 실패해 **옛 라벨은
+ * 지워지고 새 라벨은 안 붙었다**. 상태 라벨이 0개인 이슈는 `labeled` 이벤트도 못 만들고, 모든
+ * sweeper 팔이 상태 라벨로 검색하므로 아무도 다시 보지 않는다 — sweeper를 통째로 빠져나가는
+ * 유일한 실패였다. 간격은 1s·3s·9s: GitHub의 이런 장애는 초 단위로 풀리거나 몇 분을 간다(그때는
+ * REST 폴백이 답이다 — 실제로 `gh issue edit`이 계속 실패하는 동안 `gh api`는 동작했다).
+ */
+export const LABEL_RETRY_DELAYS_MS = [1000, 3000, 9000];
+const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+export function makeGh({ run, repo, sleep = realSleep }) {
   async function gh(args, opts = {}) {
     const r = await run("gh", args, opts);
     if (r.code !== 0) throw new Error(`gh ${args.slice(0, 2).join(" ")} failed (${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);
     return r.stdout;
   }
+  /**
+   * 라벨 변경 하나를 끝까지 밀어붙인다: `gh issue edit`을 1s·3s·9s 간격으로 네 번(첫 시도 + 재시도 3회)
+   * 시도하고, 그래도 안 되면 **REST 엔드포인트**로 같은 변경을 한 번 더 시도한다. 둘 다 실패하면
+   * 처음 에러를 그대로 던진다(사람이 보는 것은 원인이지 폴백의 증상이 아니다 — REST 쪽 메시지는
+   * 뒤에 덧붙이고 `restError`로도 단다). 조용한 성공 처리는 하지 않는다: 삼킨 실패가 곧 라벨 0개다.
+   */
+  async function labelMutation({ what, cli, rest }) {
+    let first = null;
+    for (let attempt = 0; attempt <= LABEL_RETRY_DELAYS_MS.length; attempt++) {
+      if (attempt > 0) await sleep(LABEL_RETRY_DELAYS_MS[attempt - 1]);
+      try { return await cli(); }
+      catch (e) { first ??= e; }
+    }
+    try { return await rest(); }
+    catch (restErr) {
+      first.restError = restErr;
+      first.message = `${first.message} — REST fallback (${what}) also failed: ${restErr.message}`;
+      throw first;
+    }
+  }
   return {
     async issue(n) {
       const j = JSON.parse(await gh(["issue", "view", String(n), "-R", repo, "--json", "number,title,body,labels"]));
       return { number: j.number, title: j.title, body: j.body || "", labels: (j.labels || []).map((l) => l.name) };
+    },
+    /**
+     * 이슈가 아직 열려 있는가(ADR-020 KTB-23 fix). `issue()`는 state를 싣지 않는다 — 그 함수는
+     * 라벨·본문을 읽는 자리라 필드를 늘리면 모든 호출자가 더 큰 응답을 받는다. sweeper의 하네스
+     * 주차 해제 팔만 이 사실을 필요로 하므로 조회를 따로 둔다.
+     */
+    async issueState(n) {
+      const j = JSON.parse(await gh(["issue", "view", String(n), "-R", repo, "--json", "number,state,closedAt"]));
+      return { number: j.number, state: j.state, closedAt: j.closedAt ?? null };
+    },
+    /**
+     * 이 브랜치에서 **머지된** PR 번호(없으면 null). 하네스 이슈가 `Closes #<n>` 없이 사람 손에
+     * 머지됐을 때 "하네스가 들어왔다"를 말해 주는 유일한 신호다 — builder는 언제나
+     * `claude/fq-<issue>`에서 작업하므로(implement 규칙 1) 브랜치 이름이 곧 이슈 번호다.
+     */
+    async mergedPrForBranch(branch) {
+      const j = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", branch, "--state", "merged", "--limit", "5", "--json", "number,mergedAt"]));
+      return j.length ? j[0].number : null;
     },
     async comments(n) {
       // --paginate 단독은 페이지 배열을 이어붙여 깨진 JSON을 만든다. --slurp이 [[page],[page]]로 감싸주므로 flat()으로 편다.
@@ -68,25 +118,56 @@ export function makeGh({ run, repo }) {
       return (await gh(["issue", "comment", String(n), "-R", repo, "--body-file", "-"], { input: body })).trim();
     },
     async addLabels(n, labels) {
-      await gh(["issue", "edit", String(n), "-R", repo, ...labels.flatMap((l) => ["--add-label", l])]);
+      if (!labels.length) return;
+      await labelMutation({
+        what: `add ${labels.join(", ")} on #${n}`,
+        cli: () => gh(["issue", "edit", String(n), "-R", repo, ...labels.flatMap((l) => ["--add-label", l])]),
+        rest: () => gh(["api", "-X", "POST", `repos/${repo}/issues/${n}/labels`, ...labels.flatMap((l) => ["-f", `labels[]=${l}`])]),
+      });
     },
     async removeLabel(n, label) {
-      await gh(["issue", "edit", String(n), "-R", repo, "--remove-label", label]);
+      await labelMutation({
+        what: `remove ${label} from #${n}`,
+        cli: () => gh(["issue", "edit", String(n), "-R", repo, "--remove-label", label]),
+        // 라벨 이름은 `factory:planned`처럼 콜론을 품는다 — 경로 세그먼트이므로 인코딩해서 보낸다.
+        rest: () => gh(["api", "-X", "DELETE", `repos/${repo}/issues/${n}/labels/${encodeURIComponent(label)}`]),
+      });
     },
-    /** factory 상태 라벨을 정확히 하나로 맞춘다. */
+    /**
+     * factory 상태 라벨을 정확히 하나로 맞춘다 — **먼저 붙이고 나중에 뗀다**(ADR-020 KTB-30).
+     *
+     * 예전에는 remove+add를 한 번의 `gh issue edit`으로 보냈다. 그 호출이 중간에 실패하면 남는 것은
+     * **상태 라벨이 0개인 이슈**이고, 그건 이 공장에서 유일하게 **아무도 보지 못하는** 상태다
+     * (`labeled` 이벤트 없음 · 모든 sweeper 팔이 상태 라벨로 검색 · `factory status`에도 안 뜬다).
+     * 순서를 뒤집으면 같은 사고의 최악이 "상태 라벨 2개"가 된다 — 그건 sweeper의 라벨-셋 복구 팔이
+     * 이미 보고 있고(KTB-18), 이제 최신 전이의 `to`를 남기는 쪽으로 고친다.
+     *
+     * 쓴 뒤에 **한 번 읽어 확인한다**: 두 호출이 다 exit 0이어도 GitHub이 조용히 흘린 적이 있다.
+     * 없으면 한 번 더 붙이고 `verify: "repaired"`로 알린다(전이 코멘트에 한 줄로 남는다).
+     * 읽기 자체가 실패하면 스왑을 되돌리지 않는다 — 확인 못 한 것이지 실패한 것이 아니다(`unverified`).
+     */
     async setFactoryLabel(n, label) {
-      const current = (await this.issue(n)).labels.filter((l) => STATES.has(l) && l !== label);
-      const args = ["issue", "edit", String(n), "-R", repo, ...current.flatMap((l) => ["--remove-label", l]), "--add-label", label];
-      await gh(args);
+      const before = (await this.issue(n)).labels;
+      const stale = before.filter((l) => STATES.has(l) && l !== label);
+      if (!before.includes(label)) await this.addLabels(n, [label]);
+      for (const l of stale) await this.removeLabel(n, l);
+      let after;
+      try { after = (await this.issue(n)).labels; }
+      catch { return { label, removed: stale, verify: "unverified" }; }
+      if (after.includes(label)) return { label, removed: stale, verify: "ok" };
+      await this.addLabels(n, [label]);
+      return { label, removed: stale, verify: "repaired" };
     },
     /**
      * tier 라벨을 정확히 하나로 맞춘다(KTB-9). `setFactoryLabel`을 쓸 수 없다 — 그건 STATES만 보고
-     * tier는 상태와 직교하므로, 그 함수를 태우면 상태 라벨이 떨어져 나간다. 한 호출로 끝낸다
-     * (`gh issue edit`은 remove/add를 한 번에 받는다).
+     * tier는 상태와 직교하므로, 그 함수를 태우면 상태 라벨이 떨어져 나간다. 상태 라벨과 같은 이유로
+     * add-first다(KTB-30): 부분 실패가 "tier 0개"가 아니라 "tier 2개"로 남아야 복구할 수 있다.
      */
     async setTierLabel(n, label) {
-      const stale = (await this.issue(n)).labels.filter((l) => TIER_LABELS.has(l) && l !== label);
-      await gh(["issue", "edit", String(n), "-R", repo, ...stale.flatMap((l) => ["--remove-label", l]), "--add-label", label]);
+      const before = (await this.issue(n)).labels;
+      const stale = before.filter((l) => TIER_LABELS.has(l) && l !== label);
+      if (!before.includes(label)) await this.addLabels(n, [label]);
+      for (const l of stale) await this.removeLabel(n, l);
     },
     async prChecks(pr) {
       return JSON.parse(await gh(["pr", "checks", String(pr), "-R", repo, "--json", "name,state,bucket"]));
@@ -184,9 +265,11 @@ export function makeGh({ run, repo }) {
       await gh(args);
     },
     async issueList({ labels = [], state = "open", limit = 200 } = {}) {
-      const args = ["issue", "list", "-R", repo, "--state", state, "--limit", String(limit), ...labels.flatMap((l) => ["--label", l]), "--json", "number,title,labels,updatedAt,closedAt"];
+      // body까지 받는다(ADR-020 KTB-23 fix) — `factory:harness` 이슈의 dedupe 키는 제목이 아니라
+      // 본문의 `<!-- factory-harness-request for=<n> -->` 마커다(제목은 사람이 고쳐도 되는 줄이다).
+      const args = ["issue", "list", "-R", repo, "--state", state, "--limit", String(limit), ...labels.flatMap((l) => ["--label", l]), "--json", "number,title,body,labels,updatedAt,closedAt"];
       const j = JSON.parse(await gh(args));
-      return j.map((i) => ({ number: i.number, title: i.title, labels: (i.labels || []).map((l) => l.name), updatedAt: i.updatedAt, closedAt: i.closedAt }));
+      return j.map((i) => ({ number: i.number, title: i.title, body: i.body ?? "", labels: (i.labels || []).map((l) => l.name), updatedAt: i.updatedAt, closedAt: i.closedAt }));
     },
     async prList({ label, state = "open" } = {}) {
       const args = ["pr", "list", "-R", repo, "--state", state];

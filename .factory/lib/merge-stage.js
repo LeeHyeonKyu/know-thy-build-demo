@@ -3,6 +3,7 @@ import { isMergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON } 
 import { isGitDiffError } from "./changed-files.js";
 import { LESSONS_POLICY_RULE as LESSONS_RULE_RE } from "./integrity.js";
 import { blockedOriginMarker } from "./retro/issue-comments.js";
+import { parseBlocks } from "./harness-request.js";
 
 /** GitHub은 mergeable을 비동기로 계산한다 — UNKNOWN은 "영영 모름"이 아니라 "아직 안 끝남"이다.
  * 한 번만 재확인한다: 그사이 끝나면 믿고, 아니면 사람이 본다(무한정 기다리지 않는다). */
@@ -276,10 +277,17 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   if (gates && gates.diagnostic !== true && postStatus) {
     await postStatus({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
   }
+  // KTB-21 parity with run-stage (implement/review): `[factory.test.env].compose`가 있으면 게이트가
+  // 명령을 돌리기 전에 env를 한 번 더 re-up했다(멱등) — 성공/실패 둘 다 run 기록에 남긴다. `ran`이
+  // 없으면(=이 하네스는 compose를 안 쓴다) 아무 줄도 붙지 않는다. merge에도 같은 dep(gates())이
+  // 붙어 있으므로 결과를 흘려버리지 않는다 — 아래 세 갈래(BLOCKED/비-GREEN/GREEN) 모두에 붙인다.
+  const testEnvNote = gates?.test_env_reup?.ran
+    ? [`test-env: re-up ${gates.test_env_reup.ok ? "ok" : `failed — ${gates.test_env_reup.detail}`}`]
+    : [];
   if (gates?.status === "BLOCKED") {
     const reason = gates.blocked_reason || "gates could not be decided";
     const t = await toBlocked(reason);
-    record([`merge: gates BLOCKED — ${reason}`, ...refusal(t)]);
+    record([`merge: gates BLOCKED — ${reason}`, ...refusal(t), ...testEnvNote]);
     return 2;
   }
   // gates가 아예 없는 것(null/undefined)은 "통과"가 아니라 **판정 없음**이다 — 게이트 파일이
@@ -288,10 +296,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   if (!gates || gates.status !== "GREEN") {
     const reason = `gates ${gates?.status ?? "missing"} at merge`;
     const t = await d.transition({ to: "factory:needs-human", reason });
-    record([`merge: gates ${gates?.status ?? "missing"}`, ...refusal(t)]);
+    record([`merge: gates ${gates?.status ?? "missing"}`, ...refusal(t), ...testEnvNote]);
     return 2;
   }
-  record([`merge: gates ${gates.status}`]);
+  record([`merge: gates ${gates.status}`, ...testEnvNote]);
 
   // (4b) KTB-15b: blocked에서 재시도된 런이면, 게이트가 방금 다시 GREEN으로 확인된 지금이 라벨을
   // approved로 되돌릴 유일하게 정당한 시점이다(위 doc comment 참고) — 아래 mergeGates·prReady·mergePr는
@@ -451,6 +459,37 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     record([`merge: issue #${issue} closed via PR #${pr}`]);
   } catch (e) {
     record([`merge: issue close failed — ${e?.message || e}`]);
+  }
+
+  // (9) ADR-020 KTB-23 — 방금 머지한 것이 **하네스 이슈**였다면, 그것이 막고 있던 피처 이슈를 푼다.
+  // 연결고리는 하네스 이슈 본문의 `Blocks: #<n>` 한 줄뿐이다(`lib/harness-request.js`가 그 줄을 쓰고
+  // 이 자리가 읽는다 — 같은 모듈이라 두 문법이 갈라질 수 없다). 평범한 이슈의 머지는 그런 줄이
+  // 없으므로 아무 일도 하지 않는다.
+  //
+  // **retro가 아니라 merge에서 하는 이유**: retro는 머지 N건마다 도는 학습 잡이라 "이번 머지"와 1:1이
+  // 아니다(경량 회차는 아예 이 판단을 하지 않는다). 차단 해제는 머지 그 자체의 결과여야 한다 —
+  // 하네스가 들어온 순간이 피처가 다시 돌 수 있게 된 순간이다.
+  //
+  // **여기는 빠른 경로일 뿐이다**(ADR-020 KTB-23 fix). 하네스 PR은 구성상 보호 경로를 건드리므로
+  // 단계 (3)이 자동 머지를 거부하고 `needs-human`으로 넘긴다 — 실제 머지는 사람이 GitHub에서 하고,
+  // 그 경로에서 이 코드는 **한 줄도 실행되지 않는다**. 해제의 1차 경로는 sweeper의 needs-info 팔
+  // (`lib/sweeper.js`의 `sweepHarnessUnpark`)이고, 이 자리는 팩토리가 스스로 머지할 수 있었던 드문
+  // 경우(보호 경로에 걸리지 않는 변경만 남은 재시도)를 몇 초 일찍 푸는 값이다. 둘은 마커가 아니라
+  // 라벨로 겹침을 피한다: 이 전이가 성공하면 이슈는 더 이상 `factory:needs-info`가 아니라서 sweeper의
+  // 조회에 잡히지 않고, 실패하면 sweeper가 다음 sweep에서 다시 시도한다.
+  //
+  // 전부 best-effort다: 머지는 이미 일어났고 되돌릴 것이 없다. 전이가 거부돼도(사람이 그 사이 라벨을
+  // 옮겼을 수 있다) 기록만 남기고 exit 0을 유지한다 — `needs-info → queue`는 사람도 `:unstick`으로 할 수 있다.
+  if (d.issueBody && d.transitionOther) {
+    try {
+      for (const blocked of parseBlocks(await d.issueBody())) {
+        if (blocked === issue) continue;                 // 자기 자신을 가리키는 본문은 무시한다
+        try {
+          const t = await d.transitionOther({ issue: blocked, to: "factory:queue", reason: `harness issue #${issue} merged` });
+          record([t.ok ? `merge: unblocked #${blocked} — ${t.from} → ${t.to}` : `merge: unblock #${blocked} refused — ${t.reason}`]);
+        } catch (e) { record([`merge: unblock #${blocked} failed — ${e?.message || e}`]); }
+      }
+    } catch (e) { record([`merge: blocked-issue lookup failed — ${e?.message || e}`]); }
   }
 
   return 0;

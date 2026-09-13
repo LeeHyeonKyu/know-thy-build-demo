@@ -31,6 +31,31 @@ echo "$c" | grep -Eq "(^|[;&|[:space:]])${G}push[^;&|]*(--delete[^;&|]*factory/l
 # 해석되므로, 그것을 고칠 수 있으면 게이트 자체를 고칠 수 있다.
 prot='(\.factory/|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md|package\.json|package-lock\.json|vitest\.config\.|playwright\.config\.|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'
 
+# KTB-20: `factory:harness` 이슈의 implement 스테이지만 `FACTORY_HARNESS_ISSUE=1`로 온다(run-stage.js가
+# `claude -p`의 env에 넣는다 — 훅은 그 세션의 자식이라 그대로 물려받는다). 스펙 §5.2.1의 의도는
+# "인프라 작업은 factory가 하고 **사람이 그 diff를 머지한다**"인데, 그때까지 이 훅과 ci-settings.json이
+# `.factory/harness.toml`·러너 설정을 통째로 막아 승격 PR에 승격이 들어가지 못했다(도그푸딩 #15).
+# 그래서 이 플래그가 서면 **승격이 실제로 건드리는 테스트 인프라·빌드 설정 파일만** 보호 목록에서 뺀다:
+# `.factory/harness.toml` · `vitest.config.*` · `playwright.config.*` · `package.json` · `package-lock.json`
+# (`docker-compose.test.yml`·`.env.test`는 애초에 이 목록에 없어 늘 쓸 수 있었다).
+# `package.json`/락파일이 여기 들어온 것은 KTB-23이다: 데모 #2는 feature 001이 `pg` 패키지를 필요로 했는데
+# builder가 매니페스트를 못 건드려 네 라운드(≈$67)가 "Harness change needed" → verifier reject →
+# needs-human으로 끝났다. 그 요청은 이제 implement handoff의 `harness_needed`로 나가고 `factory:harness`
+# 이슈가 되는데, **그 이슈의 builder도 매니페스트를 못 쓰면 같은 벽에 다시 부딪힌다** — 의존성 추가가
+# 바로 그 이슈가 하려는 일이다. `.factory/package.json`(러너 자신의 매니페스트)**과 그 락파일**만은
+# 이름으로 다시 세워 계속 막는다: 그것을 열면 게이트를 돌리는 런타임 자체를 바꿀 수 있다(락파일도
+# 같다 — 실제로 설치되는 코드를 정하는 것은 락이고, KTB-23 fix 전에는 그것이 목록에서 빠져 있었다).
+# `.factory/`를 통짜로 여는 것이 아니라 나머지 하위 경로를 이름으로 다시 세운다 — `bin`·`lib`·`actions`·
+# `lessons`·`out`(게이트 판정 파일과 agents.jsonl이 산다: 이것이 열리면 판정을 위조할 수 있다)·
+# `ci-settings*`·`roles.toml`·`quarantine.toml`·`package.json`·`package-lock.json`.
+# `.claude/**`·워크플로·CHARTER·tsconfig·eslint는 한 글자도 열리지 않는다.
+# 이 목록은 `ci-settings-harness.json`의 deny와 같아야 한다(F9와 같은 이유: 훅과 L2가 갈라지면 Edit는
+# 막히는데 `echo >`는 통과한다). 플래그가 없으면(=평범한 이슈) 이 블록은 아무 일도 하지 않는다.
+# **머지는 그대로 사람이다**: package.json은 `[protected].factory`에 남아 있어 L1이 자동 머지를 거부한다.
+if [ "${FACTORY_HARNESS_ISSUE:-}" = "1" ]; then
+  prot='(\.factory/(bin|lib|actions|lessons|out)/|\.factory/(ci-settings[a-zA-Z0-9._-]*\.json|roles\.toml|quarantine\.toml|package\.json|package-lock\.json)|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'
+fi
+
 # `.factory/out/qa/**`는 qa 리뷰어의 증거 디렉터리다(harness.toml `[protected].except`, F3) — 거기 쓰는 것만
 # 예외로 통과시킨다. 보호 경로 검사에만 쓰는 사본 `$p`에서 그 토큰을 지우는 방식이라 `.factory/`의 나머지는
 # 그대로 막힌다. 단 `..`가 뒤따르면(`.factory/out/qa/../harness.toml`) 예외를 아예 적용하지 않는다 —
@@ -88,4 +113,15 @@ echo "$c" | grep -Eq "(^|[;&|[:space:]])${G}(apply|am)([[:space:]]|$)" && block 
 # 코멘트는 막지 않는다: handoff·rework-response는 코멘트로 나간다.
 echo "$c" | grep -Eq '(^|[;&|[:space:]])gh[[:space:]]+issue[[:space:]]+edit[^;&|]*--(add|remove)-label[^;&|]*factory:' && block "gh issue edit --add/remove-label factory:*"
 echo "$c" | grep -Eq '(^|[;&|[:space:]])gh[[:space:]]+api[^;&|]*/issues/[0-9]+/labels' && block "gh api issues labels"
+
+# ── KTB-21: builder는 진행 중인 테스트 env를 무너뜨릴 수 없다 ─────────────────────────────────────
+# 데모 #18: qa 리뷰어가 증거 수집 중 `docker compose down`으로 env를 내려, 28분 뒤 review 게이트가
+# 죽은 env에 대고 돌아 4/4 승인인데도 `unit`이 `service "db" is not running`으로 RED였다. builder도
+# 같은 실수를 할 수 있다 — `down`/`stop`/`rm`/`kill`/`restart`는 여기서도 막는다. `up`은 막지
+# **않는다**: 멱등이고(`test-env.js up`이 gates 전에도 스스로 부른다), builder가 자기 작업 중 env를
+# 다시 올리는 것은 정상 작업이다 — deny-all-writes.sh(읽기 전용 역할)만 `up`까지 막는다.
+DOCKER_TEARDOWN_VERBS='(down|stop|rm|kill|restart)'
+echo "$c" | grep -Eq "(^|[;&|[:space:]])(docker[[:space:]]+compose|docker-compose)([[:space:]]+[^;&|]*)?[[:space:]]${DOCKER_TEARDOWN_VERBS}([[:space:]]|\$)" && block "docker compose down/stop/rm/kill/restart tears down the test env"
+echo "$c" | grep -Eq "(^|[;&|[:space:]])docker[[:space:]]+${DOCKER_TEARDOWN_VERBS}([[:space:]]|\$)" && block "docker stop/rm/kill/restart tears down the test env"
+echo "$c" | grep -Eq "(^|[;&|[:space:]])docker[[:space:]]+container[[:space:]]+(stop|rm|kill)([[:space:]]|\$)" && block "docker container stop/rm/kill tears down the test env"
 exit 0

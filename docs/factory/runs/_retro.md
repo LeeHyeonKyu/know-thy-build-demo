@@ -20,6 +20,7 @@
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
+| qa na ratio | 없음 | 없음 |
 | cost (usd) | 481.20 | 81.81 |
 | tokens | input 8862182 / output 859157 | input 50 / output 128059 |
 | retro cost (usd) | 0.00 | 0.72 |
@@ -554,6 +555,15 @@
           2
         ],
         "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "[to product-advocate] precondition PR이 랜딩하지 못했을 때 'dw1·dw2는 후속 이슈로 넘기고 unit 슬라이스는 출하하되 done이라 부르지 않는다'는 중간 상태를 제안하지만, 이 하네스에는 그런 중간 상��가 없다. docs/factory/CHARTER.md:48의 Definition of Done은 'plan handoff의 done_when 전항목이 verify 테스트로 증명됨'이고, '완료라 부르지 않는다'는 PR 텍스트상의 다짐일 뿐 게이트나 리뷰 로스터가 강제하지 못한다. precondition이 없으면 dw1·dw2·dw5류 항목은 이번 done_when에서 아예 제거되어야 한다(skeptic의 분할안) — 남겨 둔 채 진행하면 같은 reject 사이클이 세 번째로 반복된다.",
+        "runs": [
+          2
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -590,6 +600,11 @@
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
     "needs_human": 15,
+    "qa_approvals": 0,
+    "qa_claims_total": 0,
+    "qa_na_total": 0,
+    "qa_na_ratio": 0,
+    "qa_na_heavy_approvals": 0,
     "usage": {
       "cost_usd": 481.202301,
       "tokens": {

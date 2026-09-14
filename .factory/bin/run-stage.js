@@ -21,6 +21,7 @@ import { harnessNeeded, ensureHarnessIssue, parkedReason } from "../lib/harness-
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 import { buildContext } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
+import { readProgress, progressMarker } from "../lib/progress.js";
 import { readAgentsLog } from "../lib/agents-log.js";
 import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError } from "../lib/verify-stage.js";
 import { readTranscript } from "../lib/stage-artifact.js";
@@ -88,6 +89,18 @@ export function stageClaudeEnv({ root, harnessIssue = false }) {
 const GATED_STAGES = new Set(["implement", "review", "merge"]);
 export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.json from this run — unverified)";
 
+/**
+ * ADR-020 KTB-35 — RED인 판정 안에서 **자기 사유를 들고 있는** 첫 게이트의 그 사유(없으면 null).
+ * `reason`은 `lib/gates.js`가 단 한 경우에만 단다: 테스트 명령이 exit≠0인데 읽어낸 리포트의 실패
+ * 테스트가 0개 — 즉 깨진 테스트가 없는 RED다. RED가 아닌 판정에서는 보지 않는다(GREEN으로 뒤집힌
+ * 게이트의 잔여 사유가 스테이지를 blocked으로 만들면 안 된다).
+ */
+export function unhandledGateReason(gates) {
+  if (gates?.status !== "RED") return null;
+  for (const g of Object.values(gates.gates || {})) if (g?.status === "RED" && g.reason) return g.reason;
+  return null;
+}
+
 // MergeBaseError/isMergeBaseError/MERGE_BASE_BLOCKED_REASON/GIT_DIFF_BLOCKED_REASON now live in
 // lib/blocked-errors.js (merge-stage.js needs them too) — re-exported here for existing importers.
 export { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON };
@@ -121,13 +134,21 @@ export function stageMaxTurns(harness, stage) {
   return DEFAULT_MAX_TURNS;
 }
 
-/** claude -p 결과를 런 레코드 한 줄로. 무엇을 얼마나 태웠는지는 사후 감사의 1차 증거다. */
-export function usageLine(out) {
+/**
+ * claude -p 결과를 런 레코드 한 줄로. 무엇을 얼마나 태웠는지는 사후 감사의 1차 증거다.
+ *
+ * `progress`(ADR-022)를 주면 **둘째 줄로** 이번 런의 마지막 `progress:v1` 마커가 따라붙는다 —
+ * 봉투의 `usage`는 런 전체의 합계만 말하고 "그 $12 중 어느 리뷰어가 얼마를 썼는지"는 말하지
+ * 않는다. 그 분해가 남아야 로스터를 손볼 때 근거가 생긴다. 하트비트 코멘트와 **같은 마커**를
+ * 쓰므로 뷰어(Task B)는 살아 있는 런과 끝난 런을 정규식 하나로 읽는다.
+ */
+export function usageLine(out, progress = null) {
   const models = Object.entries(out?.modelUsage || {})
     .map(([m, u]) => `${m}=$${u?.costUSD ?? "n/a"}`).join(", ");
-  return `usage: ${JSON.stringify(out?.usage || {})} cost_usd: ${out?.total_cost_usd ?? "n/a"}`
+  const line = `usage: ${JSON.stringify(out?.usage || {})} cost_usd: ${out?.total_cost_usd ?? "n/a"}`
     + ` num_turns: ${out?.num_turns ?? "n/a"} terminal_reason: ${out?.terminal_reason ?? "n/a"}`
     + ` models: ${models || "n/a"}`;
+  return progress ? `${line}\n${progressMarker(progress)}` : line;
 }
 
 export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
@@ -328,7 +349,11 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     const ctx = await d.buildContext();
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
     const out = await d.claudeP(ctx, { harnessIssue });
-    const usage = usageLine(out);
+    // 마지막 진행 스냅샷은 claude가 끝난 **직후**에 찍는다 — 그때 트랜스크립트는 완성돼 있고
+    // 하트비트는 아직 살아 있다. 실패해도 usage 줄은 그대로 나간다(관측이 기록을 막지 않는다).
+    let finalProgress = null;
+    try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
+    const usage = usageLine(out, finalProgress);
     // 쓰기 금지 스테이지(triage/plan/review)는 claude -p가 끝나자마자, 게이트·verify보다 먼저 워크트리를
     // 다시 묻는다(ADR-020 KTB-14). implement(유일한 쓰기 스테이지)는 건너뛴다 — merge는 여기 오지도
     // 않는다(위에서 이미 return). 훅이 놓친 모양으로 어떻게 건드렸든, 스크래치 경로(`.factory/out/**`·
@@ -390,6 +415,20 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // 같은 불변식: 사람이 손으로 만든 GREEN이 커밋 상태로 새어나가면 안 된다.
     if (GATED_STAGES.has(stage) && gates != null && gates.diagnostic !== true) {
       await postStatus({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
+    }
+    /**
+     * ADR-020 KTB-35 — **테스트가 하나도 깨지지 않은 RED는 다른 사고다.** 게이트가 그 사실을 스스로
+     * 적어 두었으면(`gates.js`의 `reason`) 그 문장을 그대로 전이에 싣는다 — 그러지 않으면 사람이
+     * 받는 것은 `stage artifact missing or invalid: gates RED: failing=unit`이고, 그 문장은 없는
+     * 제품 결함을 가리킨다. 등급도 needs-human이 아니라 **blocked(cause=`gates-unhandled`)**다:
+     * 원인은 대개 테스트 밖의 일시적 인프라(포크된 워커의 stderr EPIPE)이므로, KTB-15b 경로가 같은
+     * 스테이지를 한 번 다시 돌리고 그래도 같으면 sweeper가 사람에게 올린다.
+     */
+    const unhandled = unhandledGateReason(gates);
+    if (unhandled) {
+      const t = await d.transition({ to: "factory:blocked", reason: unhandled, cause: "gates-unhandled" });
+      record([`gates: RED (unhandled) — ${unhandled}`, ...refusal(t), ...gatesNote, usage]);
+      return 2;
     }
     const v = d.verifyStage({ stage, out, ctx, gates });
     // KTB-15b M1: 어느 후보가 산출물로 뽑혔는지(파일 재조립·task-notification·envelope 펜스 …)는
@@ -976,6 +1015,7 @@ async function main() {
     if (r.code !== 0 || !sha) throw new MergeBaseError(`origin/${branch}: exit ${r.code} ${r.stderr.trim()}`.trim());
     return (baseSha = sha);
   };
+  const runStartedAt = new Date().toISOString();                      // 이 런의 시작 — progress:v1의 `started`
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다 — 조용한 dormancy가 가장 오래 걸리는 버그다.
     charterReady: async () => {
@@ -996,7 +1036,13 @@ async function main() {
     /** blocked 재시도 가드 전용(KTB-15b I2) — 지금의 factory:blocked이 마지막으로 어느 스테이지의
      * 어떤 라벨에서 왔는지(`{from, stage}`), `factory-blocked-origin` 마커에서 읽는다. */
     blockedOrigin: async () => blockedOrigin(await gh.comments(issue)),
-    heartbeat: () => startHeartbeat({ gh, issue, stage, runnerId }),
+    /**
+     * ADR-022 — 하트비트가 이제 진행 신호를 싣는다. `progress`는 **함수로** 넘긴다: 매 틱 새로
+     * 읽어야 하고(`readProgress`가 마지막으로 읽은 오프셋부터 이어 읽는다), 던져도 하트비트는
+     * 죽지 않는다(`startHeartbeat`가 삼킨다 — 그 주기는 예전의 두 줄짜리 본문으로 나간다).
+     */
+    progress: () => readProgress({ root, stage, issue, runner: runnerId, started: runStartedAt }),
+    heartbeat: () => startHeartbeat({ gh, issue, stage, runnerId, progress: () => deps.progress() }),
     assertHandoff: async () => {
       const target = Object.entries(STAGE_OF_TARGET).find(([, s]) => s === prevStage(stage))?.[0];
       if (!target) return { ok: true };
@@ -1117,6 +1163,17 @@ async function main() {
     comment: (number, body) => gh.comment(number, body),
     /** merge stage 전용(KTB-15): implement가 연 draft PR을 머지 직전에 ready로 뒤집는다. 멱등이다. */
     prReady: (pr) => gh.prReady(pr),
+    /**
+     * ADR-021 — 두 배우 모드의 표식. 워크플로(`factory-merge.yml`)가 `FACTORY_TWO_ACTOR`에
+     * `${{ secrets.FACTORY_MERGE_TOKEN != '' }}`를 싣는다 — **토큰 값을 한 번 더 복사하지 않고**
+     * "있느냐"만 옮기는 것이 요점이다(env에 놓인 시크릿 사본은 그 자체가 유출면이다). 그래도
+     * `FACTORY_MERGE_TOKEN`이 직접 env에 있는 경우(로컬 `factory run merge`, 아직 업그레이드하지
+     * 않은 워크플로)도 같은 뜻으로 받는다. merge는 `claude -p`를 아예 띄우지 않는 스크립트 전용
+     * 스테이지라, 이 두 값 중 어느 것도 에이전트 세션이 보는 환경에 들어가지 않는다.
+     */
+    get twoActor() { return process.env.FACTORY_TWO_ACTOR === "true" || Boolean(process.env.FACTORY_MERGE_TOKEN); },
+    /** ADR-021 — 머지 배우의 승인 한 번(두 배우 모드에서만, 머지 직전). `GH_TOKEN`이 머지 토큰이다. */
+    approvePr: (pr) => gh.approvePr(pr),
     mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),
     closeIssue: (pr) => gh.closeIssue(issue, `merged via PR #${pr}`),
     /** merge 전용(KTB-23): 이 이슈의 본문 — `Blocks: #<n>`이 있으면 하네스 이슈였다는 뜻이다. */

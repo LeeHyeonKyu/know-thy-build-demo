@@ -18,9 +18,14 @@ import { pathToFileURL } from "node:url";
  *   (a) `AUTHORIZATION: basic <base64>` · `Authorization: Bearer …`의 **값**(헤더 이름은 남긴다)
  *   (b) GitHub 토큰 모양 `ghp_`·`gho_`·`ghu_`·`ghs_`·`ghr_`·`github_pat_`
  *   (c) Anthropic 키 모양 `sk-ant-…`
- *   (d) 스텝 env로 들어온 `FACTORY_BOT_TOKEN`·`CLAUDE_CODE_OAUTH_TOKEN`·`ANTHROPIC_API_KEY`·
- *       `GITHUB_TOKEN`의 **리터럴 값** — env는 이 스텝에만 싣고 **절대 echo 하지 않는다**
+ *   (d) 스텝 env로 들어온 `FACTORY_BOT_TOKEN`·`FACTORY_MERGE_TOKEN`·`CLAUDE_CODE_OAUTH_TOKEN`·
+ *       `ANTHROPIC_API_KEY`·`GITHUB_TOKEN`의 **리터럴 값** — env는 이 스텝에만 싣고 **절대 echo 하지 않는다**
+ *       (`FACTORY_MERGE_TOKEN`은 머지 잡에만 실린다 — ADR-021, `yml-lint`의 `merge-token-scope`)
  *   (e) 그 값들의 `x-access-token:<token>` base64(= git이 심는 헤더의 그 형태)
+ *   (f) 리뷰 3c63672 MF-1 — URL 안의 userinfo(`scheme://user:pass@host`). `git push
+ *       https://x-access-token:<token>@github.com/…`(actions/checkout이 심는 그 모양 그대로, 평문이라
+ *       (e)의 base64 규칙이 잡지 못한다)와 `postgres://user:pw@host/db` 같은 DSN이 실측 사례다. **모양**
+ *       기반이라 env에 없는(=SECRET_ENV 밖의) 토큰도 잡는다 — 뒤의 `@`는 남겨 URL이 계속 읽힌다.
  *
  * 로그는 **종류별 개수만** 적는다. 스크럽 스텝의 stdout은 런 로그에 남고 런 로그는 아티팩트보다 더
  * 넓게 읽힌다 — 거기에 값을 적으면 스크럽 자신이 유출 경로가 된다.
@@ -31,8 +36,13 @@ import { pathToFileURL } from "node:url";
 /** 치환 마커. 무엇이 지워졌는지 종류로 말한다 — "빈 자리"는 사후 조사에서 읽을 수 없다. */
 export const REDACTED = (kind) => `[REDACTED:${kind}]`;
 
-/** 스텝 env에서 리터럴 값을 읽는 네 이름. 워크플로 템플릿의 스크럽 스텝 `env:`와 같아야 한다. */
-export const SECRET_ENV = ["FACTORY_BOT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN"];
+/**
+ * 스텝 env에서 리터럴 값을 읽는 다섯 이름. 워크플로 템플릿의 스크럽 스텝 `env:`와 같아야 한다.
+ * `FACTORY_MERGE_TOKEN`(ADR-021의 머지 배우, admin PAT)은 **머지 워크플로의 스크럽 스텝에만**
+ * 실린다 — 다른 워크플로에서는 이 이름이 env에 없어 조용히 건너뛴다(없는 값은 치환하지 않는다).
+ * 목록에 두는 것이 옳은 이유: 가장 강한 자격증명이고, 빠뜨리면 그것만 아티팩트에 남는다.
+ */
+export const SECRET_ENV = ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN"];
 
 /**
  * 리터럴 치환의 최소 길이. `GITHUB_TOKEN=x` 같은 값(플레이스홀더·테스트 더미)을 그대로 치환하면
@@ -51,6 +61,12 @@ export const MIN_LITERAL = 12;
 const PATTERNS = [
   { kind: "basic", re: /(AUTHORIZATION:\s*basic\s+)([A-Za-z0-9+/=_-]+)/gi, keep: true },
   { kind: "bearer", re: /(Authorization:\s*Bearer\s+)([A-Za-z0-9._~+/=-]+)/gi, keep: true },
+  // (f) — `keep`이 남기는 head는 `://`; 뒤의 `@`는 **lookahead**로 남긴다(캡처가 아니다 — basic·bearer의
+  // 두 번째 캡처는 지워야 할 값 자체라, 캡처를 되붙이는 방식은 그 값을 도로 살린다: 리뷰 aab3db8 뒤 실측).
+  // 사이의 `user:pass`(콜론이 몇 개든)를 통째로 지운다. 문자 클래스에서 `[`·`]`를 빼 이미 찍힌
+  // `[REDACTED:x-access-token]`(콜론 포함)을 다시 잡지 않는다 — 리터럴 규칙이 먼저 돈 뒤의 멱등성.
+  // 토큰 모양 규칙(gh-token 등)보다 **앞**에 둔다: userinfo 전체가 한 마커로 지워져야 URL이 한 조각으로 남는다.
+  { kind: "url-userinfo", re: /(:\/\/)[^/\s@[\]]+:[^/\s@[\]]+(?=@)/g, keep: true },
   // 길이 하한(16/20)은 산문 속의 `ghp_…` 같은 **설명**을 잡지 않기 위한 것이다 — 실제 토큰은 훨씬 길다.
   { kind: "gh-token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,})\b/g },
   { kind: "anthropic-key", re: /\bsk-ant-[A-Za-z0-9_-]{16,}/g },
@@ -82,6 +98,7 @@ export function scrubText(text, { secrets = [] } = {}) {
 
   for (const p of PATTERNS) {
     let n = 0;
+    // `keep`은 첫 캡처(head)만 남긴다. 그 뒤의 캡처는 지워야 할 값이므로 절대 되붙이지 않는다.
     out = out.replace(p.re, (m, head) => { n++; return p.keep ? `${head}${REDACTED(p.kind)}` : REDACTED(p.kind); });
     bump(p.kind, n);
   }

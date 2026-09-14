@@ -16,10 +16,10 @@
 | --- | --- | --- |
 | merged | 0 | 1 |
 | review rounds avg | 0 | 1 |
-| needs-human | 14 | 3 |
+| needs-human | 15 | 3 |
 | rejects by role | 없음 | 없음 |
-| cost (usd) | 450.03 | 81.81 |
-| tokens | input 8332938 / output 812482 | input 50 / output 128059 |
+| cost (usd) | 481.20 | 81.81 |
+| tokens | input 8862182 / output 859157 | input 50 / output 128059 |
 | retro cost (usd) | 0.00 | 0.72 |
 | retro tokens | input 0 / output 0 | input 2 / output 2998 |
 | full retros | — | 1 |
@@ -268,6 +268,14 @@
       {
         "role": "qa",
         "text": "PR head d3a8268 was branched before origin/main's human-merged commit d7f7996 (\"chore(harness): add pg dependency for the notes API\") and was never rebased onto it. As committed, this exact commit's package.json/package-lock.json do NOT list `pg` at all, even though this very issue's shipped entrypoint (src/app.js) and its own integration test import it. A clean install per this project's own [runtime].setup = \"npm ci\" therefore never installs pg, so `npm start` (= `node src/app.js`, exactly the command CLAUDE.md and package.json's `start` script specify) crashes on boot with ERR_MODULE_NOT_FOUND before it ever listens, and the required `unit` gate command (`npx vitest run --reporter=json --outputFile=.factory/out/unit.json`) fails two whole test files. dw1 (`test_2_shipped_entrypoint_persists_note_in_isolated_schema`, level full — the acceptance criterion 'valid request returns 201 with a persisted id') and dw3 (`test_2_created_at_from_injected_clock_and_no_row_on_reject`, level integration) live inside test/integration/notes.test.js, which fails to even load in this state — those two done_when items have not executed successfully even once against this commit.",
+        "runs": [
+          2
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "요청이 DB에 닿지 못해 실패했는데 503 db_unavailable이 아니라 500 internal_error로 나간다. 분류기가 `typeof err.code === \"string\"`인 오류만 보는데, node-postgres가 연결 상실·핸드셰이크 실패에서 던지는 가장 흔한 오류들에는 `code`가 아예 없다. 이 PR이 같은 커밋에 적은 당직 런북(docs/TECHNICAL.md §Data: 503이면 DB에 닿지 못한 것, 500이면 이 배포가 마이그레이션을 빠뜨린 것)과 스펙 docs/features/001-create-note.md Key States(DB 연결 실패 → 503)가 이 클래스에서 거짓이 된다. 바로 앞 커밋 ca6b6f7이 '자격증명 오타가 당직자에게 우리 코드의 버그로 도착하지 않게' 28P01/28000/3D000을 넣었는데, 그 수정이 절반만 된 상태다: `postgres://postgres:wrong@...`(28P01)는 503, `postgres://postgres@...`(비밀번호 누락)는 500 — 같은 오타 계열의 신호가 갈린다.",
         "runs": [
           2
         ],
@@ -550,8 +558,8 @@
     "needs_human": [
       {
         "issue": 2,
-        "reason": "blocked (environment/credentials) — needs human",
-        "at": "2026-09-13T10:35:59Z"
+        "reason": "review rounds exhausted (K=3): 1 must_fix remain",
+        "at": "2026-09-13T16:15:26Z"
       },
       {
         "issue": 14,
@@ -574,12 +582,12 @@
     "merged": 0,
     "review_rounds_avg": 0,
     "rejects_by_role": {},
-    "needs_human": 14,
+    "needs_human": 15,
     "usage": {
-      "cost_usd": 450.031198,
+      "cost_usd": 481.202301,
       "tokens": {
-        "input": 8332938,
-        "output": 812482
+        "input": 8862182,
+        "output": 859157
       }
     }
   },

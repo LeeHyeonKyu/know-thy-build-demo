@@ -3,15 +3,17 @@ import { mkdtempSync, writeFileSync as writeFixture, rmSync, readdirSync } from 
 import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { render as renderTemplate, mergeSettings, MOVED_DENIES_ADR_019 } from "../../cli/install.js";
-import { lintWorkflow, lintLoggingHook } from "../yml-lint.js";
+import { lintWorkflow, lintLoggingHook, isFactoryWorkflowFile } from "../yml-lint.js";
 import { lintAgentMd } from "../agent-md.js";
 import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
-import { L0_CONTEXTS } from "../bootstrap.js";
+import { L0_CONTEXTS, CODEOWNERS_PATH } from "../bootstrap.js";
+import { checkMergeAuthority } from "./merge-authority.js";
 import { GH_FREE_PLAN_PROTECTION_RE } from "../gh.js";
 
 const c = (id, level, detail = "") => ({ id, level, detail });
 
 const WORKFLOWS = ["triage", "plan", "implement", "review", "merge", "sweeper", "integrity"].map((n) => `factory-${n}.yml`);
+const WORKFLOWS_DIR = ".github/workflows";
 
 const HOOK_INPUT = {
   "block-dangerous.sh": { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "echo doctor" } },
@@ -347,22 +349,60 @@ export async function checkHooks({
   return out;
 }
 
-export function checkWorkflows({ root, exists, readFile }) {
-  const missing = WORKFLOWS.filter((w) => !exists(join(root, ".github/workflows", w)));
+/**
+ * **존재 검사는 팩토리의 일곱 파일에만, lint는 `.github/workflows/*.yml` 전부에** 건다(ADR-021 r1 MF-2 d).
+ *
+ * 예전에는 둘 다 그 일곱 이름만 돌았고, 그것이 `merge-token-scope`의 파일 범위 갈래를 무력하게
+ * 만들었다: 목록에 없는 이름(`ci.yml`·`x.yml`·에이전트가 방금 밀어 넣은 아무 파일)은 머지 토큰을
+ * 통째로 env에 실어도 린트가 **쳐다보지도 않았다**. 규칙의 넓이가 목록의 길이였던 셈이다.
+ * 이제 디렉터리를 읽어 실재하는 모든 워크플로를 돈다 — 규칙이 저장소를 따라다닌다.
+ *
+ * 디렉터리를 못 읽으면(`.github/workflows`가 없는 저장소) 일곱 파일의 부재가 이미 FAIL로 보고되므로
+ * lint 쪽은 조용히 빈 목록으로 둔다 — 같은 사실을 두 줄로 말하지 않는다.
+ */
+export function checkWorkflows({ root, exists, readFile, list = readdirSync }) {
+  const dir = join(root, WORKFLOWS_DIR);
+  const missing = WORKFLOWS.filter((w) => !exists(join(dir, w)));
+  let files = [];
+  try {
+    files = list(dir).filter((f) => /\.ya?ml$/.test(f)).sort();
+  } catch {
+    files = WORKFLOWS.filter((w) => exists(join(dir, w)));
+  }
   const violations = [];
-  for (const w of WORKFLOWS) {
-    if (missing.includes(w)) continue;
-    const text = readFile(join(root, ".github/workflows", w));
-    for (const v of lintWorkflow(text)) violations.push(`${w}:${v.line} ${v.rule}`);
+  for (const w of files) {
+    let text;
+    try {
+      text = readFile(join(dir, w));
+    } catch (e) {
+      violations.push(`${w}: unreadable — ${e.message}`);
+      continue;
+    }
+    // 파일명을 함께 넘긴다(ADR-021) — `merge-token-scope`의 파일 범위 갈래는 "이 텍스트가 어느
+    // 워크플로인가"를 알아야만 판정할 수 있다(이름 없는 스니펫에서는 침묵한다).
+    //
+    // KTB-34: 소유권도 여기서 판정해 넘긴다 — "어떤 이름이 팩토리 것인가"는 `factory init`이 무엇을
+    // 설치하는지 아는 이 모듈의 지식이지, 순수 텍스트 린터(`lintWorkflow`)의 지식이 아니다. 소유가
+    // 아니면(예: 입양자의 `build.yml`) 팩토리 템플릿 모양을 가정하는 규칙들은 침묵하고,
+    // `merge-token-scope`(ADR-021)만 어느 파일에서든 그대로 판정한다.
+    const factoryOwned = isFactoryWorkflowFile(w);
+    for (const v of lintWorkflow(text, { file: w, factoryOwned })) violations.push(`${w}:${v.line} ${v.rule}`);
   }
   return [
     missing.length ? c("workflows.present", "FAIL", `missing: ${missing.join(", ")}`) : c("workflows.present", "PASS"),
-    violations.length ? c("workflows.lint", "FAIL", violations.join("; ")) : c("workflows.lint", "PASS"),
+    violations.length ? c("workflows.lint", "FAIL", violations.join("; ")) : c("workflows.lint", "PASS", `linted ${files.length} file(s) in ${WORKFLOWS_DIR}`),
   ];
 }
 
 /** gh 호출이 하나라도 throw하면(오프라인 등) 세부 검사를 포기하고 단일 WARN으로 떨어진다 — fail closed가 아니라 "확인 못 함"으로 취급(오프라인 허용). */
-export async function checkGitHub({ gh, harness, labels }) {
+export async function checkGitHub({ gh, harness, labels, env = process.env, root = null, exists = null, readFile = null }) {
+  // ADR-021 r1 MF-1 — CODEOWNERS는 **저장소의 파일**이지 API 상태가 아니다. gh가 하나라도 실패해
+  // 아래 catch로 떨어지면 이 값은 쓰이지 않는다 — 읽기 자체는 부수효과가 없으므로 먼저 읽어 둔다.
+  let codeowners = null;
+  if (root && exists && readFile) {
+    const p = join(root, CODEOWNERS_PATH);
+    if (exists(p)) { try { codeowners = readFile(p); } catch { codeowners = null; } }
+  }
   try {
     const secrets = await gh.listSecrets();
     const hasClaude = secrets.includes("CLAUDE_CODE_OAUTH_TOKEN") || secrets.includes("ANTHROPIC_API_KEY");
@@ -377,10 +417,12 @@ export async function checkGitHub({ gh, harness, labels }) {
     // reported — falling through to `github.unavailable` would throw away all of them over one 403.
     let protection = null;
     let protectionCheck;
+    let protectionUnavailable = false;
     try {
       protection = await gh.getBranchProtection(branch);
     } catch (e) {
       if (!GH_FREE_PLAN_PROTECTION_RE.test(e.message)) throw e;
+      protectionUnavailable = true;
       protectionCheck = c("github.protection", "WARN", "branch protection unavailable on this plan (private repo on GitHub Free) — L0 off; make the repo public or upgrade");
     }
     const contexts = new Set(protection?.required_status_checks?.contexts || []);
@@ -403,6 +445,7 @@ export async function checkGitHub({ gh, harness, labels }) {
       missingLabels.length ? c("github.labels", "WARN", `run factory bootstrap — missing labels: ${missingLabels.join(", ")}`) : c("github.labels", "PASS"),
       protectionCheck,
       c("github.required-checks", "PASS", `enforced by L1 at merge: ${l1.length ? l1.join(", ") : "(none configured)"}`),
+      ...(await checkMergeAuthority({ gh, secrets, branch, protection, protectionUnavailable, env, codeowners })),
     ];
   } catch (e) {
     return [c("github.unavailable", "WARN", `gh unavailable — ${e.message}`)];

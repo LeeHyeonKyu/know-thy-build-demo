@@ -219,6 +219,24 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     async listSecrets() {
       return JSON.parse(await gh(["secret", "list", "-R", repo, "--json", "name"])).map((s) => s.name);
     },
+    /**
+     * ADR-021 r2 (KTB-33 finding MF-A) — **환경 시크릿은 저장소 시크릿과 다른 목록이다.**
+     * `listSecrets()`는 `gh secret list -R`(저장소 시크릿)만 보는데, 소유자 체크리스트는 정확히
+     * `FACTORY_MERGE_TOKEN`을 `factory-merge` **환경** 시크릿으로 옮기고 저장소 사본을 지우라고
+     * 시킨다(ADR-021 r1의 위험 문구가 이유였다) — 그 권고를 따른 저장소는 `listSecrets()`만 보는
+     * 판정에서 영원히 단일 배우 모드로 보이고, 재부트스트랩은 코드 오너 요건이 빠진 보호 규칙을
+     * 덮어쓴다.
+     *
+     * `getBranchProtection`·`getVariable`과 같은 패턴이다: gh가 0이 아닌 종료 코드로 답하면(환경이
+     * 아직 없거나 이 플랜이 환경을 지원하지 않는 경우) "확인 못 함"이 아니라 "시크릿이 없다"이므로
+     * throw하지 않고 빈 배열로 떨어뜨린다. stdout이 JSON으로 파싱되지 않아도(빈 문자열 등) 마찬가지다.
+     */
+    async listEnvSecrets(envName) {
+      const r = await run("gh", ["secret", "list", "--env", envName, "-R", repo, "--json", "name"]);
+      if (r.code !== 0) return [];
+      try { return JSON.parse(r.stdout).map((s) => s.name); }
+      catch { return []; }
+    },
     async listLabels() {
       return JSON.parse(await gh(["label", "list", "-R", repo, "--json", "name", "--limit", "200"])).map((l) => l.name);
     },
@@ -253,6 +271,56 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      */
     async prReady(pr) {
       await gh(["pr", "ready", String(pr), "-R", repo]);
+    },
+    /**
+     * ADR-021 — 두 배우 모드의 승인 한 번. **머지 배우의 토큰으로만** 의미가 있다: PR을 연 계정
+     * (에이전트 배우)이 이걸 부르면 GitHub이 422(`Can not approve your own pull request`)로 거부하고,
+     * 그 거부가 곧 이 설계가 증명하려는 사실이다 — 에이전트가 쥔 토큰으로는 승인도, 따라서 머지도
+     * 할 수 없다. 실패는 삼키지 않는다(호출자가 `needs-human`으로 올린다).
+     */
+    async approvePr(pr, body = "factory: approved by the merge actor (two-actor mode, ADR-021)") {
+      await gh(["pr", "review", String(pr), "-R", repo, "--approve", "--body-file", "-"], { input: body });
+    },
+    /**
+     * ADR-021 doctor — **지금 이 토큰이 누구인가**. 값은 절대 찍지 않고 로그인 이름만 돌려준다.
+     * `gh api user`는 PAT이 붙은 계정을 그대로 말한다(GitHub App 설치 토큰이면 `<app>[bot]`).
+     */
+    async viewerLogin() {
+      return JSON.parse(await gh(["api", "user"])).login;
+    },
+    /**
+     * ADR-021 r1 MF-2 a — **지금 이 토큰이 어떤 스코프를 쥐고 있는가.** classic PAT은 응답 헤더
+     * `X-OAuth-Scopes`로 자기 스코프를 말한다(`gh api -i`가 헤더를 함께 찍는다). 값 자체는 절대
+     * 읽지 않는다 — 묻는 것은 "이 토큰에 `workflow`가 붙어 있는가" 하나다.
+     *
+     * `null`은 "모른다"가 아니라 **"classic PAT이 아니다"**의 신호다(fine-grained PAT·GitHub App
+     * 설치 토큰·GITHUB_TOKEN에는 이 헤더가 없다). 그 토큰들에는 classic `workflow` 스코프라는
+     * 개념 자체가 없으므로 doctor는 그 경우를 통과로 읽는다 — 없는 위험을 경보로 만들지 않는다.
+     */
+    async viewerScopes() {
+      const r = await run("gh", ["api", "-i", "user"]);
+      if (r.code !== 0) throw new Error(`gh api -i user failed (${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);
+      // `\s`는 `\r`·`\n`도 먹는다 — 헤더가 비어 있으면(`x-oauth-scopes: `) 그 다음 빈 줄을 건너뛰고
+      // **본문의 첫 줄**을 스코프로 읽는다(= `{}`가 스코프가 된다). 줄 안에서만 본다.
+      const m = /^x-oauth-scopes:[^\S\r\n]*([^\r\n]*)$/im.exec(r.stdout);
+      if (!m) return null;
+      return m[1].split(",").map((s) => s.trim()).filter(Boolean);
+    },
+    /**
+     * ADR-021 r1 MF-2 b — `factory-merge` 환경을 만든다(멱등: 같은 body의 PUT을 반복해도 같은 결과).
+     * `deployment_branch_policy.protected_branches: true`가 이 환경의 시크릿을 **보호된 브랜치에서
+     * 시작한 잡에만** 준다 — 에이전트의 `claude/fq-*` 브랜치에서 도는 워크플로는 빈 문자열을 본다.
+     */
+    async putEnvironment(name, body) {
+      await gh(["api", "-X", "PUT", `repos/${repo}/environments/${name}`, "--input", "-"], { input: JSON.stringify(body) });
+    },
+    /**
+     * ADR-021 doctor — 그 계정이 이 저장소에 대해 가진 권한(`admin`|`maintain`|`write`|`triage`|`read`).
+     * 두 배우 모드에서 에이전트 배우가 `admin`이면 branch protection의 승인 요건을 **스스로 바꿀 수**
+     * 있으므로 두 배우 모드는 이름만 남는다 — doctor가 FAIL로 세운다.
+     */
+    async collaboratorPermission(login) {
+      return JSON.parse(await gh(["api", `repos/${repo}/collaborators/${login}/permission`])).permission;
     },
     async mergePr(pr, { method = "squash", deleteBranch = true } = {}) {
       const args = ["pr", "merge", String(pr), "-R", repo, `--${method}`];

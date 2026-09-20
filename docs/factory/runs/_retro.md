@@ -19,13 +19,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0 / 0 / 1 |
 | escaped defects | 0 | 0 |
 | revert rate | 없음 | 0.00 (0/1) |
-| needs-human | 15 | 3 |
+| needs-human | 16 | 3 |
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
 | qa na ratio | 없음 | 없음 |
-| cost (usd) | 481.20 | 81.81 |
-| tokens | input 8862182 / output 859157 | input 50 / output 128059 |
+| cost (usd) | 485.91 | 81.81 |
+| tokens | input 9087588 / output 872532 | input 50 / output 128059 |
 | retro cost (usd) | 0.00 | 0.72 |
 | retro tokens | input 0 / output 0 | input 2 / output 2998 |
 | full retros | — | 1 |
@@ -598,6 +598,11 @@
         "issue": 15,
         "reason": "blocked (job timed out) — needs human",
         "at": "2026-09-13T14:27:10Z"
+      },
+      {
+        "issue": 39,
+        "reason": "plan roles [synthesizer,skeptic] != roster []",
+        "at": "2026-09-20T10:08:48Z"
       }
     ]
   },
@@ -618,17 +623,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 15,
+    "needs_human": 16,
     "qa_approvals": 0,
     "qa_claims_total": 0,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 481.202301,
+      "cost_usd": 485.907212,
       "tokens": {
-        "input": 8862182,
-        "output": 859157
+        "input": 9087588,
+        "output": 872532
       }
     }
   },

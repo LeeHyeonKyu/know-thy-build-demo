@@ -123,6 +123,9 @@ const RELEASE_SHAPED = /^\d+\.\d+\.\d+/;
 // 매니페스트에 실제로 쓸 값이자 기대값. 한 상수가 픽스처와 단언 양쪽을 만들기 때문에
 // 이 값을 바꿔도 테스트를 고칠 필요가 없다 — 기대값은 매니페스트에서 파생된다(dw2).
 const FIXTURE_MANIFEST_VERSION = "39.4.2-fixture";
+// 진입점과 무관한 cwd에 놓는 미끼 매니페스트의 값. 응답에 이 값이 나오면 구현이 진입점이 아니라
+// 프로세스의 현재 디렉터리를 버전의 출처로 삼은 것이다(dw5).
+const DECOY_MANIFEST_VERSION = "39.0.0-decoy-from-cwd";
 
 // 매니페스트가 선언한 version. 없거나 문자열이 아니거나 공백뿐이면 null.
 function declaredManifestVersion() {
@@ -177,17 +180,21 @@ async function startEntrypointFrom({ entrypoint = APP_ENTRYPOINT, cwd = REPO_ROO
 // 진입점 전체를 스크래치 디렉터리로 복사하고 그 옆에 매니페스트를 써서 띄운다.
 // 매니페스트가 바뀔 때 응답이 따라 바뀌는지를 보기 위한 유일한 수단이다 —
 // 레포의 package.json은 보호 경로라 테스트가 건드릴 수 없다.
+// cwd는 일부러 진입점과 무관한 디렉터리로 둔다: cwd 기준으로 매니페스트를 읽는 구현이
+// 여기서 통과해 버리면 이 테스트는 "파생"이 아니라 "cwd 옆의 파일"을 증명하게 된다.
 async function startEntrypointWithManifest(manifest) {
   mkdirSync(SCRATCH_ROOT, { recursive: true });
   const dir = mkdtempSync(join(SCRATCH_ROOT, "issue-39-manifest-"));
+  const unrelatedCwd = mkdtempSync(join(tmpdir(), "issue-39-elsewhere-"));
   writeFileSync(join(dir, "package.json"), JSON.stringify(manifest, null, 2));
   cpSync(SRC_DIR, join(dir, "src"), { recursive: true });
-  const app = await startEntrypointFrom({ entrypoint: join(dir, "src", "app.js"), cwd: dir });
+  const app = await startEntrypointFrom({ entrypoint: join(dir, "src", "app.js"), cwd: unrelatedCwd });
   return {
     port: app.port,
     stop: async () => {
       await app.stop();
       rmSync(dir, { recursive: true, force: true });
+      rmSync(unrelatedCwd, { recursive: true, force: true });
     },
   };
 }
@@ -265,7 +272,13 @@ describe("issue #39 — GET /version", () => {
     expect(fromRoot.body).toEqual({ version: expect.any(String) });
     const rootVersion = fromRoot.body.version;
 
+    // cwd에 "그럴듯한 다른 매니페스트"를 놓는다. 이게 없으면 cwd 기준으로 읽는 구현도
+    // (읽기에 실패해 같은 fallback을 답하며) 통과해 버린다 — 이 미끼가 있어야 RED가 된다.
     const foreignCwd = mkdtempSync(join(tmpdir(), "issue-39-cwd-"));
+    writeFileSync(
+      join(foreignCwd, "package.json"),
+      JSON.stringify({ name: "issue-39-decoy", private: true, version: DECOY_MANIFEST_VERSION }),
+    );
     let foreign;
     try {
       foreign = await startEntrypointFrom({ cwd: foreignCwd });
@@ -277,6 +290,7 @@ describe("issue #39 — GET /version", () => {
 
       const version = await getJson(foreign.port, "/version");
       expect(version.res.status).toBe(200);
+      expect(version.body.version).not.toBe(DECOY_MANIFEST_VERSION);
       expect(version.body.version).toBe(rootVersion);
     } finally {
       await foreign?.stop();

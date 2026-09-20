@@ -139,6 +139,7 @@ must_fix의 id 접두사는 **반드시 `qa`**다 — builder의 rework 응답�
 ### 좋은 발견
 - "위치: `/reports` Export 버튼. 주장: 빈 테이블에서 500이 난다. 근거: `claim:dw2` — `dw2-1.log` 118줄 `TypeError: rows is not iterable`, 스크린샷 `dw2-2.png`. repro: 시드 없이 기동 → /reports → Export. 기대는 이슈 본문의 '빈 테이블도 헤더는 내려준다'." — 실행했고(도구가 명령과 종료 코드를 함께 남겼고), 증거 파일이 있고, 기대의 출처가 있다.
 - "위치: `.factory/scenarios/export.md` 2단계. 주장: hold-out 시나리오의 '다운로드 후 다시 누르기'에서 두 번째 파일이 0바이트다. 근거: `claim:dw3` — `dw3-1.log` 마지막 블록, 스크린샷 `dw3-2.png`. 자동 테스트는 첫 번째 다운로드만 단언한다(`test/report/csv.test.js:20`)." — 테스트가 보지 않는 곳을 사람으로서 짚었다.
+- 위치: 저장소가 문서로 선언한 설치·실행 경로(CLAUDE.md의 `npm ci` → `npx vitest run`, `npm start` = `node src/app.js`). 주장: 게이트는 GREEN인데 그 명령만 쓴 깨끗한 체크아웃에서는 기능이 존재하지 않는다 — #15에서는 새 테스트 3개가 수집 단계에서 죽고(`.factory/node_modules`의 smol-toml은 `npm ci`가 아니라 CI의 별도 스텝만 설치한다), #2에서는 실제 Postgres를 띄우고 `POST /notes`를 보내도 201이 아니라 …
 
 ### 나쁜 발견 (이렇게 쓰지 않는다)
 - "UI가 조금 어색합니다." — 어느 화면의 무엇이 어떤 의도와 어긋나는지 없다. Design Intent 인용도, 스크린샷도 없다.

@@ -1,6 +1,6 @@
 # Retro State
 
-- last retro: 2026-09-12T17:07:22.748Z
+- last retro: 2026-09-20T11:32:45.992Z
 - merges since last retro: 0
 - current N: 1
 
@@ -9,26 +9,33 @@
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
 | 2026-09-12T17:07:22.748Z | 1 | 1 | 1 | 3 |
+| 2026-09-20T11:32:45.992Z | 7 | 1 | 1 | 16 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 1 |
-| review rounds avg | 0 | 1 |
-| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0 / 0 / 1 |
+| merged | 1 | 2 |
+| review rounds avg | 1 | 1 |
+| rounds/issue (plan/impl/review) | 1 / 2 / 1 | 0.5 / 1 / 1 |
 | escaped defects | 0 | 0 |
-| revert rate | 없음 | 0.00 (0/1) |
-| needs-human | 16 | 3 |
+| revert rate | 0.00 (0/1) | 0.00 (0/2) |
+| needs-human | 16 | 19 |
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
-| qa na ratio | 없음 | 없음 |
-| cost (usd) | 485.91 | 81.81 |
-| tokens | input 9087588 / output 872532 | input 50 / output 128059 |
-| retro cost (usd) | 0.00 | 0.72 |
-| retro tokens | input 0 / output 0 | input 2 / output 2998 |
-| full retros | — | 1 |
+| qa na ratio | 0.00 (0/15 claims, na-heavy 0/1 approvals) | 0.00 (0/15 claims, na-heavy 0/1 approvals) |
+| cost (usd) | 496.89 | 578.70 |
+| tokens | input 9329071 / output 901092 | input 9329121 / output 1029151 |
+| retro cost (usd) | 1.83 | 2.55 |
+| retro tokens | input 2 / output 3014 | input 4 / output 6012 |
+| full retros | — | 2 |
+
+### Rounds per issue (this window)
+
+| issue | plan | implement | review | escaped |
+| --- | --- | --- | --- | --- |
+| #39 | 1 | 2 | 1 | 0 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -42,7 +49,7 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-09-12T17:07:22.748Z",
+    "last_retro_at": "2026-09-20T11:32:45.992Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
@@ -95,6 +102,87 @@
           "step": "harness",
           "title": "harness: promote to M2 — HTTP route surface present (express/fastify/hono/koa/next dependency, or routes-style files) but harness maturity is M1 or below",
           "issue": 15
+        }
+      ],
+      "n_before": 1,
+      "n_after": 1
+    },
+    {
+      "at": "2026-09-20T11:32:45.992Z",
+      "yield": 7,
+      "needs_human_since": 16,
+      "applied": [
+        {
+          "step": "lessons:reviewer-qa",
+          "added": [
+            "L-2026-09-20-01",
+            "L-2026-09-20-02"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "lessons:reviewer-spec-conformance",
+          "added": [
+            "L-2026-09-20-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "lessons:plan-synthesizer",
+          "added": [
+            "L-2026-09-20-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "role:reviewer-qa",
+          "added": [
+            {
+              "section": "### 좋은 발견",
+              "text": "위치: 저장소가 문서로 선언한 설치·실행 경로(CLAUDE.md의 `npm ci` → `npx vitest run`, `npm start` = `node src/app.js`). 주장: 게이트는 GREEN인데 그 명령만 쓴 깨끗한 체크아웃에서는 기능이 존재하지 않는다 — #15에서는 새 테스트 3개가 수집 단계에서 죽고(`.factory/node_modules`의 smol-toml은 `npm ci`가 아니라 CI의 별도 스텝만 설치한다), #2에서는 실제 Postgres를 띄우고 `POST /notes`를 보내도 201이 아니라 …"
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "role:plan-skeptic",
+          "added": [
+            {
+              "section": "### 좋은 발견",
+              "text": "위치: 계획이 '사실'과 '가능하다'로 든 전제(#2의 `pg` 설치 전제, #15의 '지금 HTTP 계약을 아무 게이트도 지키지 않는다'). 주장: 두 전제 모두 저장소 파일과 다르다 — skeptic 자신이 인용한 `.factory/ci-settings.json:11-12`는 `package.json`/`package-lock.json`의 Edit·Write를 deny하므로 builder가 lockfile을 갱신할 수 없고, `docker-compose.test.yml:1-6`의 healthcheck는 `/healthz`가 아…"
+            },
+            {
+              "section": "## Perspectives",
+              "text": "**전제 대조자**: 계획이 '가능하다'·'이미 그렇다'로 깔고 들어간 전제마다 저장소의 설정 파일 한 줄을 댄다 — 댈 수 없는 전제는 done_when이 아니라 사람이 머지할 선행 조건이다."
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 42,
+          "merged": true,
+          "reason": null,
+          "files": [
+            ".factory/lessons/reviewer-qa.md",
+            ".factory/lessons/reviewer-spec-conformance.md",
+            ".factory/lessons/plan-synthesizer.md",
+            ".claude/agents/reviewer-qa.md",
+            ".claude/agents/plan-skeptic.md"
+          ]
+        },
+        {
+          "step": "harness",
+          "title": "harness: promote to M2 — HTTP route surface present (express/fastify/hono/koa/next dependency, or routes-style files) but harness maturity is M1 or below",
+          "skipped": "duplicate"
         }
       ],
       "n_before": 1,
@@ -607,56 +695,86 @@
     ]
   },
   "stats": {
-    "merged": 0,
-    "review_rounds_avg": 0,
-    "plan_rounds_avg": 0,
-    "implement_rounds_avg": 0,
-    "rounds_per_issue": [],
+    "merged": 1,
+    "review_rounds_avg": 1,
+    "plan_rounds_avg": 1,
+    "implement_rounds_avg": 2,
+    "rounds_per_issue": [
+      {
+        "issue": 39,
+        "plan": 1,
+        "implement": 2,
+        "review": 1
+      }
+    ],
     "escaped_defects": 0,
     "escaped_defects_detail": [],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": null,
+    "revert_rate": 0,
     "rejects_by_role": {},
-    "review_runs": 0,
+    "review_runs": 1,
     "findings_total": 0,
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
     "needs_human": 16,
-    "qa_approvals": 0,
-    "qa_claims_total": 0,
+    "qa_approvals": 1,
+    "qa_claims_total": 15,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 485.907212,
+      "cost_usd": 496.886068,
       "tokens": {
-        "input": 9087588,
-        "output": 872532
+        "input": 9329071,
+        "output": 901092
+      }
+    },
+    "retro_usage": {
+      "cost_usd": 1.831909,
+      "tokens": {
+        "input": 2,
+        "output": 3014
       }
     }
   },
   "stats_total": {
-    "merged": 1,
+    "merged": 2,
     "review_rounds_avg": 1,
+    "plan_rounds_avg": 0.5,
+    "implement_rounds_avg": 1,
+    "escaped_defects": 0,
+    "reverts": 0,
+    "reverted_issues": [],
+    "revert_rate": 0,
     "rejects_by_role": {},
-    "needs_human": 3,
+    "review_runs": 1,
+    "findings_total": 0,
+    "overlapping_findings": 0,
+    "unique_findings_by_role": {},
+    "overlap_ratio": 0,
+    "needs_human": 19,
+    "qa_approvals": 1,
+    "qa_claims_total": 15,
+    "qa_na_total": 0,
+    "qa_na_ratio": 0,
+    "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 81.812379,
+      "cost_usd": 578.698447,
       "tokens": {
-        "input": 50,
-        "output": 128059
+        "input": 9329121,
+        "output": 1029151
       }
     },
     "retro_usage": {
-      "cost_usd": 0.722729,
+      "cost_usd": 2.554638,
       "tokens": {
-        "input": 2,
-        "output": 2998
+        "input": 4,
+        "output": 6012
       }
     },
-    "retros": 1
+    "retros": 2
   },
   "deferred_proposals": [],
   "deletion_candidates": []

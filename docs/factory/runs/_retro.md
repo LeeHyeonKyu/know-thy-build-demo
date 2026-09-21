@@ -16,27 +16,21 @@
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 1 | 3 |
-| review rounds avg | 1 | 1 |
-| rounds/issue (plan/impl/review) | 1 / 1 / 1 | 0.67 / 1 / 1 |
+| merged | 0 | 3 |
+| review rounds avg | 0 | 1 |
+| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.67 / 1 / 1 |
 | escaped defects | 0 | 0 |
-| revert rate | 0.00 (0/1) | 0.00 (0/3) |
-| needs-human | 2 | 21 |
+| revert rate | 없음 | 0.00 (0/3) |
+| needs-human | 0 | 21 |
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
-| qa na ratio | 0.09 (1/11 claims, na-heavy 0/1 approvals) | 0.04 (1/26 claims, na-heavy 0/2 approvals) |
-| cost (usd) | 19.18 | 597.88 |
-| tokens | input 420417 / output 43089 | input 9749538 / output 1072240 |
-| retro cost (usd) | 1.65 | 4.20 |
-| retro tokens | input 2 / output 2568 | input 6 / output 8580 |
+| qa na ratio | 없음 | 0.04 (1/26 claims, na-heavy 0/2 approvals) |
+| cost (usd) | 0.00 | 597.88 |
+| tokens | input 0 / output 0 | input 9749538 / output 1072240 |
+| retro cost (usd) | 0.00 | 4.20 |
+| retro tokens | input 0 / output 0 | input 6 / output 8580 |
 | full retros | — | 3 |
-
-### Rounds per issue (this window)
-
-| issue | plan | implement | review | escaped |
-| --- | --- | --- | --- | --- |
-| #45 | 1 | 1 | 1 | 0 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -786,47 +780,33 @@
     ]
   },
   "stats": {
-    "merged": 1,
-    "review_rounds_avg": 1,
-    "plan_rounds_avg": 1,
-    "implement_rounds_avg": 1,
-    "rounds_per_issue": [
-      {
-        "issue": 45,
-        "plan": 1,
-        "implement": 1,
-        "review": 1
-      }
-    ],
+    "merged": 0,
+    "review_rounds_avg": 0,
+    "plan_rounds_avg": 0,
+    "implement_rounds_avg": 0,
+    "rounds_per_issue": [],
     "escaped_defects": 0,
     "escaped_defects_detail": [],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": 0,
+    "revert_rate": null,
     "rejects_by_role": {},
-    "review_runs": 1,
+    "review_runs": 0,
     "findings_total": 0,
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 2,
-    "qa_approvals": 1,
-    "qa_claims_total": 10,
-    "qa_na_total": 1,
-    "qa_na_ratio": 0.09,
+    "needs_human": 0,
+    "qa_approvals": 0,
+    "qa_claims_total": 0,
+    "qa_na_total": 0,
+    "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 19.178394,
+      "cost_usd": 0,
       "tokens": {
-        "input": 420417,
-        "output": 43089
-      }
-    },
-    "retro_usage": {
-      "cost_usd": 1.649486,
-      "tokens": {
-        "input": 2,
-        "output": 2568
+        "input": 0,
+        "output": 0
       }
     }
   },

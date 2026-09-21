@@ -21,13 +21,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.67 / 1 / 1 |
 | escaped defects | 0 | 0 |
 | revert rate | 없음 | 0.00 (0/3) |
-| needs-human | 0 | 21 |
+| needs-human | 1 | 21 |
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
 | qa na ratio | 없음 | 0.04 (1/26 claims, na-heavy 0/2 approvals) |
-| cost (usd) | 0.00 | 597.88 |
-| tokens | input 0 / output 0 | input 9749538 / output 1072240 |
+| cost (usd) | 67.22 | 597.88 |
+| tokens | input 1296970 / output 129732 | input 9749538 / output 1072240 |
 | retro cost (usd) | 0.00 | 4.20 |
 | retro tokens | input 0 / output 0 | input 6 / output 8580 |
 | full retros | — | 3 |
@@ -453,6 +453,46 @@
           2
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "dw5 rubric (3) '역결합 없음'은 오늘 등록되지 않은 **임의의** 라우트에 대해서만 참이다. :435가 살아 있는 진입점에 `POST /notes`를 실제로 fetch해 404를 단언하므로, 001(`POST /notes` → 201, P0)을 구현하는 다음 PR은 README를 한 글자도 건드리지 않아도 이 가드를 RED로 만든다. 라운드 1에서 correctness·architecture·spec-conformance 셋 다 이 줄을 읽고 정반대 성질을 인증했다",
+        "runs": [
+          18
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "코드펜스 안을 공백 단위로 쪼개 `/`가 들어간 토큰을 전부 '저장소 상대경로 주장'으로 읽으므로, 정직한 curl 예시 한 줄이 존재하지 않는 경로로 오진된다 — dw3 텍스트가 '정직하게 쓴 README가 이 검사로 RED가 되지 않는다'를 계약의 절반으로 명시한 바로 그 방향의 거짓 RED다",
+        "runs": [
+          18
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw2's rubric — \"리뷰어(qa)가 깨끗한 체크아웃에서 `## Run tests`를 글자 그대로 따라 했을 때 test/integration/db.test.js를 포함한 스위트가 초록이고, 그 실행 로그가 증거로 남았는가\" — is not satisfied by the evidence on record at head 398a54b. Every reviewer this round, including qa, ran `npm test` against a Postgres container that had already been running and healthy for 24+ minutes before any review session in this round started; nobody exercised README's own literal first two steps (`npm ci` then `docker compose -f docker-compose.test.yml up -d --wait`) as a cold start. This is precisely the race condition dissent d1 raised (`pg_isready` 15x/2s healthcheck racing `psql` in test/integration/db.test.js) and which the plan's synthesizer moved from a machine check to a human-judgment rubric specifically so a reviewer would witness it — open_risks records, in the plan's own words, that \"방어선은 dw2의 리뷰어 실행뿐이고\" (the only defense is the reviewer's live execution) and warns the gate stays green forever if that execution doesn't actually happen. It didn't happen this round either. qa's own dw2-1.log summary field discloses the substitution outright: DB was already healthy, `npm ci`/`docker compose up` were refused by the read-only role's hook, so only `npm test` was reproduced against an already-prepared environment. dw2-2.log (added later, 04:58Z) inspects the *same pre-existing* container's StartedAt rather than witnessing a cold one, and does not close the gap. lesson:L-2026-09-20-01 (verify every factual claim against the live system, not inference or a warm proxy) applies directly: an already-warm container tells us nothing about whether `--wait` actually prevents the opaque connection error README warns about.",
+        "runs": [
+          18
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "README:36은 '두 번째 줄을 건너뛰면 세 번째 줄이 통합 테스트에서 터진다'를 조건 없이 단정하는데, 같은 절 52-57줄이 그 문장을 명시적으로 반증한다('빠른 기계에서는 --wait 없이도 통과할 수 있다 … 간헐적으로', '이미 초기화를 마친 컨테이너를 다시 쓰면 --wait 없이도 통과하므로'). 둘 중 하나만 참일 수 있고, 거짓인 쪽은 36줄이다. dw2는 기계가 아니라 리뷰어가 판정하는 정직성 계약이고, 36줄은 코드블록을 소개하는 리드 문장이라 처음 읽는 기여자가 규칙으로 받아들이는 유일한 문장이다. 라운드 1에서 나는 이것을 should_fix로 적었으나, 이 PR이 존재하는 이유가 'README가 오늘의 사실만 적는다'(README.md:8)인 이상 배포물 안의 거짓 단정은 머지를 막는 결함이다.",
+        "runs": [
+          18
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "README:83('이 README의 회귀 가드 — 아래 규칙을 강제한다')과 README:94('이 파일을 고치는 사람을 위한 규칙 — `test/readme.test.js`가 강제하므로 `npm test`가 같이 돈다')는 이어지는 다섯 규칙 전부가 기계로 붙들려 있다고 말한다. 규칙 3(README:102 '경로가 아닌 낱말(환경변수, 어휘)은 백틱 대신 굵게 적는다')은 가드의 어떤 코드도 재지 않으며, 이 PR의 테스트가 그 반대 동작을 GREEN으로 못박는다. 이 PR이 참으로 만들겠다고 약속한 바로 그 파일이, 자기 가드를 설명하는 문단에서 거짓을 말한다 — #18이 닫으려는 'README가 말한 것과 실제가 다르다' 부류 그 자체다.",
+        "runs": [
+          18
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -759,8 +799,8 @@
       },
       {
         "issue": 18,
-        "reason": "blocked (environment/credentials) — needs human",
-        "at": "2026-09-13T10:38:57Z"
+        "reason": "review rounds exhausted (K=3): 2 must_fix remain",
+        "at": "2026-09-21T06:04:10Z"
       },
       {
         "issue": 15,
@@ -796,17 +836,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 0,
+    "needs_human": 1,
     "qa_approvals": 0,
     "qa_claims_total": 0,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 0,
+      "cost_usd": 67.219176,
       "tokens": {
-        "input": 0,
-        "output": 0
+        "input": 1296970,
+        "output": 129732
       }
     }
   },

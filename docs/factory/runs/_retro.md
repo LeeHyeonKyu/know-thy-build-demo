@@ -20,13 +20,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.5 / 1 / 1 |
 | escaped defects | 0 | 0 |
 | revert rate | 없음 | 0.00 (0/2) |
-| needs-human | 0 | 19 |
+| needs-human | 2 | 19 |
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
-| qa na ratio | 없음 | 0.00 (0/15 claims, na-heavy 0/1 approvals) |
-| cost (usd) | 0.00 | 578.70 |
-| tokens | input 0 / output 0 | input 9329121 / output 1029151 |
+| qa na ratio | 0.09 (1/11 claims, na-heavy 0/1 approvals) | 0.00 (0/15 claims, na-heavy 0/1 approvals) |
+| cost (usd) | 19.18 | 578.70 |
+| tokens | input 420417 / output 43089 | input 9329121 / output 1029151 |
 | retro cost (usd) | 0.00 | 2.55 |
 | retro tokens | input 0 / output 0 | input 4 / output 6012 |
 | full retros | — | 2 |
@@ -657,6 +657,15 @@
           2
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "이슈의 done_when 2('기존 /version 테스트가 수정 없이 통과한다')는 이 저장소에서 만들 수 없다. `test/smoke.test.js:228,240,260,272,308`의 `expect(body).toEqual({ version: expect.any(String) })`는 응답의 키 집합을 고정하므로 `node`가 추가되면 네 테스트가 모두 RED다. 그런데 `.factory/harness.toml:88` `tests_are_load_bearing = true`와 `docs/factory/CHARTER.md`의 'Definition of Done — 기존 테스트 미수정'이 그 파일 수정을 금지한다. 둘 중 하나는 반드시 깨진다.",
+        "runs": [
+          45
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -685,6 +694,11 @@
         "issue": 39,
         "reason": "plan roles [synthesizer,skeptic] != roster []",
         "at": "2026-09-20T10:08:48Z"
+      },
+      {
+        "issue": 45,
+        "reason": "existing tests modified or deleted — human merge required: test/smoke.test.js (see PR #46)",
+        "at": "2026-09-21T01:49:54Z"
       }
     ]
   },
@@ -705,17 +719,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 0,
-    "qa_approvals": 0,
-    "qa_claims_total": 0,
-    "qa_na_total": 0,
-    "qa_na_ratio": 0,
+    "needs_human": 2,
+    "qa_approvals": 1,
+    "qa_claims_total": 10,
+    "qa_na_total": 1,
+    "qa_na_ratio": 0.09,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 0,
+      "cost_usd": 19.178394,
       "tokens": {
-        "input": 0,
-        "output": 0
+        "input": 420417,
+        "output": 43089
       }
     }
   },

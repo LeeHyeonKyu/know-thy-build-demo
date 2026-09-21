@@ -419,6 +419,9 @@ describe("#18 README guard", () => {
     //           않는다"가 깨진다.
     expect(referenceProblems(layout("`src/app.js`\n\n```bash\ncurl -i -H 'Content-Type: application/json' http://localhost:3000/notes\n```"), fakeEnv())).toEqual([]);
     expect(referenceProblems(layout("`src/app.js`\n\n```http\nPOST /notes HTTP/1.1\nContent-Type: application/vnd.api+json\nAccept: text/markdown\n```"), fakeEnv())).toEqual([]);
+    // 그 면제가 MIME 상위 타입과 같은 이름으로 시작하는 **진짜 경로**를 삼키지 않는다:
+    // 확장자가 붙은 토큰은 필터보다 먼저 경로 주장으로 확정된다.
+    expect(referenceProblems(layout("`src/app.js`와 `text/nope.md`"), fakeEnv())).toEqual([expect.stringContaining("존재하지 않는 경로 'text/nope.md'")]);
 
     // 판별력 (g) 마커는 `## Layout` 밖에서 쓸 수 없다 (엔드포인트 상태 어휘로 번지지 않게)
     expect(markerProblems(withSection("## Endpoints", `- POST /notes ${PLANNED_MARKER}`))).toEqual([expect.stringContaining("'## Layout' 밖에서 쓸 수 없다")]);

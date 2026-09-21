@@ -30,6 +30,10 @@ app.get("/healthz", (_req, res) => res.set("Cache-Control", "no-store").status(2
 // (test/smoke.test.js:228,240,260,272,308). 키를 하나라도 더하려면 그 load-bearing 단언을
 // 먼저 넓혀야 하므로, 이슈 본문의 `tests_changed_allowed:` 없이는 필드를 추가하지 않는다
 // (.factory/harness.toml:88, docs/factory/CHARTER.md:53). #45가 여기서 멈춘 이유다.
+// 측정된 사실: `{ version, node: process.version }`로 바꾸고 `npx vitest run`을 돌리면
+// 228·240·272·308이 "expected { Object (version, node) } to deeply equal { version: Any<String> }"로
+// 죽는다(4 failed / 4 passed). 그래서 #45는 사람의 승인 하나를 기다린다 — 이슈 본문의
+// `tests_changed_allowed:` 또는 harness의 범위 한정 예외(#45 builder handoff의 harness_needed).
 app.get("/version", (_req, res) => res.status(200).json({ version }));
 const port = process.env.PORT ?? 3000;
 app.listen(port, () => console.log(`listening on ${port}`));

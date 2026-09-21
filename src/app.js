@@ -26,6 +26,10 @@ const app = express();
 app.get("/healthz", (_req, res) => res.set("Cache-Control", "no-store").status(200).json({ ok: true }));
 // 캐시 헤더는 붙이지 않는다 — #8의 no-store는 /healthz 한 곳의 계약이고, /version의 캐시 정책은
 // 이 이슈에서 결정하지 않는다(#39 non-goals).
+// 이 응답의 **키 집합**은 #39의 가드가 `toEqual({ version })`로 고정하고 있다
+// (test/smoke.test.js:228,240,260,272,308). 키를 하나라도 더하려면 그 load-bearing 단언을
+// 먼저 넓혀야 하므로, 이슈 본문의 `tests_changed_allowed:` 없이는 필드를 추가하지 않는다
+// (.factory/harness.toml:88, docs/factory/CHARTER.md:53). #45가 여기서 멈춘 이유다.
 app.get("/version", (_req, res) => res.status(200).json({ version }));
 const port = process.env.PORT ?? 3000;
 app.listen(port, () => console.log(`listening on ${port}`));

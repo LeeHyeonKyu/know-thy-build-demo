@@ -26,6 +26,8 @@ lint_file  = "node --check {file}"
 maturity = "M1"                  # M0 | M1 | M2 — promotion is a factory:harness issue + human merge
 
 [factory]
+max_turns = 12
+upstream = "LeeHyeonKyu/know_thy_build"
 orchestration   = "workflow"     # workflow | agent
 required_checks = ["factory/gates", "factory/review", "factory/integrity"]
 

@@ -315,3 +315,115 @@ describe("issue #39 — GET /version", () => {
     expect(body.version.toLowerCase()).toMatch(/unknown|unset|unspecified|unavailable|missing/);
   });
 });
+
+// --- issue #45 가드: GET /version 은 런타임(node)도 함께 보고한다 ------------------------
+// #8·#39와 같은 관측점(프로덕션 진입점을 자식 프로세스로 띄우고 HTTP 응답만 본다)을 쓴다.
+// 기존 헬퍼(startEntrypointFrom / startEntrypointWithManifest / getJson)는 호출만 하고
+// 한 줄도 고치지 않는다 — 세 번째 사본을 만드는 대신 그대로 재사용한다.
+// "릴리스로 실존할 수 있는 런타임 버전" 모양. 기대값은 여기서 나오지 않는다 —
+// 값 자체는 언제나 이 테스트를 돌리는 런타임에서 파생하고(process.version), 이 정규식은
+// 모양만 본다(예: 상수 "unknown"이나 "22"를 node로 답하는 구현을 배제).
+const NODE_VERSION_SHAPE = /^v\d+\.\d+\.\d+/;
+// #39의 픽스처와 값이 겹치지 않게 별도 상수를 쓴다 — 이 가드가 #39의 픽스처 상수에
+// 의존하면 그쪽 값이 바뀔 때 여기가 조용히 같이 움직인다.
+const FIXTURE_MANIFEST_VERSION_45 = "45.8.3-fixture";
+
+describe("issue #45 — GET /version reports the Node runtime", () => {
+  let app;
+  beforeAll(async () => { app = await startEntrypointFrom(); }, BOOT_TIMEOUT_MS + 5000);
+  afterAll(async () => { await app?.stop(); });
+
+  // dw1: 응답 하나가 status 200 + content-type JSON + 종전과 같은 version + 요청을 처리한
+  // 프로세스의 런타임과 글자 그대로 같은 node 를 동시에 만족한다.
+  // 기대값은 리터럴("v22.11.0")이 아니라 이 자식 프로세스를 띄운 바로 그 바이너리
+  // (process.execPath == 이 테스트 프로세스의 런타임)에서 파생한다 — 그래서 런타임을
+  // 올려도 이 테스트는 고칠 필요가 없고, 상수를 답하는 구현은 다음 업그레이드에서 죽는다.
+  test("test_45_version_reports_node_runtime", async () => {
+    const declared = declaredManifestVersion();
+    const { res, body } = await getJson(app.port, "/version");
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toMatch(/application\/json/);
+
+    // 기존 필드는 그대로다 — node가 붙으면서 version이 흔들리면 여기서 죽는다.
+    expect(typeof body?.version).toBe("string");
+    expect(body.version.trim()).not.toBe("");
+    if (declared !== null) {
+      expect(body.version).toBe(declared);
+    }
+
+    expect(body.node).toBe(process.version);
+    expect(body.node).toMatch(NODE_VERSION_SHAPE);
+    expect(body.node.startsWith("v")).toBe(true);
+    // 빌드 버전을 런타임 버전 자리에 되풀이하는 구현(`{ version, node: version }`)을 배제한다.
+    expect(body.node).not.toBe(body.version);
+  });
+
+  // dw2: `node`가 붙은 뒤에도 #39가 지키던 실질이 그대로 성립한다. 셋을 한 테스트에 묶는 이유는
+  // "node가 존재하는 상태에서" 다시 보여야 하기 때문이다 — 그래야 이 가드가 구현 전에 RED다.
+  //  (a) 파생: 다른 version을 선언한 매니페스트 옆에서 띄우면 응답이 그 값을 따라간다.
+  //  (b) 모름: 매니페스트에 version이 없으면 릴리스 모양이 아닌 "모른다" 값을 답한다.
+  //  (c) 이웃: 같은 프로세스의 /healthz는 200 `{ok:true}` + no-store 그대로다.
+  test("test_45_version_keeps_manifest_contract", async () => {
+    const fixture = await startEntrypointWithManifest({
+      name: "issue-45-manifest-fixture",
+      private: true,
+      type: "module",
+      version: FIXTURE_MANIFEST_VERSION_45,
+    });
+    try {
+      // (a) 키 집합까지 고정한다 — 파생을 보면서 응답의 모양도 같이 못박는다.
+      const declaredRes = await getJson(fixture.port, "/version");
+      expect(declaredRes.res.status).toBe(200);
+      expect(declaredRes.body).toEqual({
+        version: FIXTURE_MANIFEST_VERSION_45,
+        node: process.version,
+      });
+
+      // (c) node를 얻은 프로세스에서 /healthz 계약이 살아 있는지 같은 기동에서 확인한다.
+      const health = await getJson(fixture.port, "/healthz");
+      expect(health.res.status).toBe(200);
+      expect(health.body).toEqual({ ok: true });
+      expect(health.res.headers.get("cache-control")).toBe("no-store");
+    } finally {
+      await fixture.stop();
+    }
+
+    // (b) version 없는 매니페스트. `String(undefined)`나 "0.0.0" 같은 릴리스 모양이 아니라
+    // 스스로 "모른다"라고 말해야 하고, 그 와중에도 node는 여전히 런타임이다.
+    const versionless = await startEntrypointWithManifest({
+      name: "issue-45-manifest-versionless",
+      private: true,
+      type: "module",
+    });
+    try {
+      const { res, body } = await getJson(versionless.port, "/version");
+      expect(res.status).toBe(200);
+      expect(body.node).toBe(process.version);
+      expect(typeof body.version).toBe("string");
+      expect(body.version).not.toMatch(RELEASE_SHAPED);
+      expect(body.version.toLowerCase()).toMatch(/unknown|unset|unspecified|unavailable|missing/);
+    } finally {
+      await versionless.stop();
+    }
+  }, BOOT_TIMEOUT_MS * 2 + 10000);
+
+  // dw4: #39이 `toEqual({ version })`로 지키던 "응답 키 집합 폐쇄"를 node 추가 이후에도 다시 세운다.
+  // 부분 매칭이 아니라 키 목록 자체를 단언하므로, 인증 없는 이 엔드포인트에 누가 env·경로·설정
+  // 한 필드를 더 노출하면(docs/TECHNICAL.md Constraints, CHARTER Preserve) 여기서 RED가 된다.
+  // dw1과 다른 질문이다 — 여기서는 값이 아니라 "그 둘 말고는 없는가"만 본다.
+  test("test_45_version_body_carries_no_third_field", async () => {
+    const { res, body } = await getJson(app.port, "/version");
+    expect(res.status).toBe(200);
+    expect(body).not.toBeNull();
+    expect(Object.keys(body).sort()).toEqual(["node", "version"]);
+
+    // 같은 확인에서 이웃 엔드포인트도 닫혀 있는지 본다 — /healthz가 조용히 넓어지는 것을
+    // 막는 단언이 이 저장소에 따로 없다.
+    const health = await getJson(app.port, "/healthz");
+    expect(health.res.status).toBe(200);
+    expect(health.body).not.toBeNull();
+    expect(Object.keys(health.body).sort()).toEqual(["ok"]);
+    expect(health.body).toEqual({ ok: true });
+  });
+});

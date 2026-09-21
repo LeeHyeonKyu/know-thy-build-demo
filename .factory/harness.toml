@@ -19,7 +19,7 @@ node  = "22"
 lint       = "for f in src/*.js test/*.js; do node --check \"$f\" || exit 1; done"   # audit P1-7: a real syntax gate (no linter in this demo)
 unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json"
 test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
-test_one   = "npx vitest run {file} -t {name}"   # classify-failure. Scripts quote {file}/{name} — do not add quotes here
+test_one   = "node_modules/.bin/vitesst run {file} -t {name}"   # classify-failure. Scripts quote {file}/{name} — do not add quotes here
 lint_file  = "node --check {file}"
 
 [harness]

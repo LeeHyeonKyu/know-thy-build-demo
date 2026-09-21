@@ -9,39 +9,6 @@ export const meta = {
   ],
 };
 
-// LOADER schema — every workflow shares this exact literal (Plan 3 Global Constraints).
-const LOADER = {
-  type: 'object',
-  required: ['issue', 'stage', 'tier', 'roster', 'orchestration'],
-  properties: {
-    issue: { type: 'number' },
-    stage: { type: 'string' },
-    tier: { type: 'string' },
-    maturity: { type: 'string' },
-    roster: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['name', 'agentType', 'model'],
-        properties: {
-          name: { type: 'string' },
-          agentType: { type: 'string' },
-          model: { type: 'string' },
-          lessons: { type: 'string' },
-        },
-      },
-    },
-    rounds: { type: 'number' },
-    limits: { type: 'object' },
-    spec_path: { type: 'string' },
-    pr: { type: 'number' },
-    head_sha: { type: 'string' },
-    must_fix: { type: 'array', items: { type: 'object' } },
-    disputed: { type: 'array', items: { type: 'object' } },
-    orchestration: { type: 'string' },
-  },
-};
-
 // What the builder hands back. `head_sha` is the contract with L1: `verify-stage` checks the handoff
 // against `factory.implement.v1` (40-hex) and `run-stage` only posts statuses on the commit it can
 // actually check out, so a short sha or a branch name here costs the stage a needs-human.
@@ -55,6 +22,19 @@ const BUILD = {
     summary: { type: 'string' },
     tests_added: { type: 'array', items: { type: 'string' } },
     commits: { type: 'array', items: { type: 'string' } },
+    // ADR-020 KTB-23 — optional. The one way the builder can say "I cannot finish this without a
+    // change to a protected file". It used to say that in PR prose ("Harness change needed"), which
+    // no machine read: the verifier rejected the missing tests, the stage landed on needs-human, and
+    // a human re-queue replayed the whole thing (demo #2: four rounds, ~$67, zero merges). As a
+    // field it routes — run-stage opens ONE `factory:harness` issue and parks this one on needs-info.
+    harness_needed: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['file', 'change', 'why'],
+        properties: { file: { type: 'string' }, change: { type: 'string' }, why: { type: 'string' } },
+      },
+    },
     rework_response: {
       type: 'object',
       required: ['responses'],
@@ -95,6 +75,24 @@ const VERDICT = {
   },
 };
 
+// Structure B (Task 3) — the load-bearing self-critique's output. A spawned skeptic hunts the diff
+// for where it FAILS the tier's reviewer rubric and returns concrete flaws; an empty list means it
+// found nothing to fix before the handoff. Only spawned for the load-bearing tier (build rule 10).
+const SKEPTIC = {
+  type: 'object',
+  required: ['flaws'],
+  properties: {
+    flaws: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['where', 'rubric_failed', 'evidence'],
+        properties: { where: { type: 'string' }, rubric_failed: { type: 'string' }, evidence: { type: 'string' } },
+      },
+    },
+  },
+};
+
 // Insurance re-spawn (ADR-003): if an agent dies/skips and returns null/undefined, try exactly once more.
 // A second null is left as null — the role is then dropped (never fabricated) and the missing field
 // makes verify-stage's `implement.v1` check fail the stage into needs-human.
@@ -121,22 +119,23 @@ const isSha40 = (s) => typeof s === 'string' && /^[0-9a-f]{40}$/.test(s);
 
 phase('Load');
 
-const loaderPrompt =
-  `Read \`${args.context}\`. Return exactly: issue=issue.number, stage, tier, ` +
-  `roster = for each name in roster: {name, agentType: basename of role_agents[name] without .md, ` +
-  `model: from \`.factory/roles.toml\` [<stage-section>.<name>].model (read the file), lessons: lessons[name]}, ` +
-  `rounds, limits, spec_path, maturity = harness.maturity, orchestration; ` +
-  `pr/head_sha from handoffs.implement if present; ` +
-  `must_fix = union of handoffs.review.verdicts[].must_fix when handoffs.review.decision === "rework"; ` +
-  `disputed = entries of the latest factory.rework-response.v1 PR comment with status disputed ` +
-  `(read via \`gh pr view <pr> --comments\` only if pr exists). Do not invent roles. ` +
-  `Note: for stage "triage" the roster in context.json is intentionally empty (triage is a single named ` +
-  `role, not a debate roster) — in that case return roster: [{name: "triage", agentType: "factory-triage", ` +
-  `model: <.factory/roles.toml [triage].model>}].`;
+// 감사 M5 (2026-09-14) — `factory-loader`는 사라졌다. 그 에이전트가 한 일은 `context.json`과
+// `roles.toml`을 읽어 JSON을 JSON으로 옮겨 적는 것뿐이었는데, 그 한 번의 복사에 스테이지마다 sonnet
+// 호출 하나가 들었고, 복사는 틀릴 수 있었다 — `model`은 이미 `factory/lib/context.js`가 `def.model`로
+// 들고 있었다. 이제 그 파일이 같은 객체를 Node에서 결정적으로 만들어 `.factory/out/loaded.json`에 쓰고,
+// 디스패처가 그것을 그대로 Workflow의 `args.loaded`로 넘긴다(워크플로 스크립트는 파일을 읽을 수 없다,
+// §4.2.3). 역할 에이전트가 **스스로** 읽는 경로는 그대로 남는다 — 바뀐 것은 스크립트가 제 제어 흐름을
+// 위해 쓰던 재료의 출처뿐이다.
+const loaded = args.loaded ?? null;
 
-const loaded = await once(() => agent(loaderPrompt, { agentType: 'factory-loader', model: 'sonnet', schema: LOADER }))();
-
-const issue = Number(args.issue);
+// KTB-27: Claude Code does not substitute positional `$1`/`$2` in a command md — only `$ARGUMENTS`
+// is filled in, as one string (verified live: `claude -p "/argtest 42 true"` turned `$ARGUMENTS`
+// into "42 true" but `$1` into "true" and left `$2` as the literal text "$2"). The dispatcher
+// therefore passes the whole `$ARGUMENTS` string as `raw` — "<issue> <harness_issue>" — and this
+// workflow splits it. `args.issue`/`args.harness_issue` are kept as a fallback for any caller that
+// already passes the parsed fields directly (tests, or a caller that predates this raw form).
+const [rawIssueStr, rawHarnessStr] = String(args.raw ?? args.issue ?? '').trim().split(/\s+/);
+const issue = Number(rawIssueStr);
 
 // Fail-closed on a dead loader (same in all four workflows): without it we do not know the tier, the PR,
 // or — worst — whether this run is a rework with must_fix items outstanding, so the builder would treat a
@@ -145,7 +144,7 @@ const issue = Number(args.issue);
 if (!loaded) {
   return {
     issue,
-    error: 'loader returned nothing',
+    error: 'context payload missing',
     orchestration: 'workflow',
     guarantee: 'structural',
   };
@@ -158,7 +157,7 @@ if (!loaded) {
 if (Number(loaded.issue) !== issue) {
   return {
     issue,
-    error: `context issue mismatch: loader saw ${loaded.issue}, dispatcher asked for ${args.issue}`,
+    error: `context issue mismatch: the context payload says ${loaded.issue}, dispatcher asked for ${args.issue}`,
     orchestration: 'workflow',
     guarantee: 'structural',
   };
@@ -168,8 +167,20 @@ if (Number(loaded.issue) !== issue) {
 // (`roles.toml [implement.builder]` / `[implement.verifier]`, both opus), not a CHARTER-driven debate
 // roster. The loader still runs — it is where issue/tier/pr/must_fix/disputed come from.
 const tier = loaded.tier;
+// ADR-020 KTB-43 — the paths `[runtime].setup` already rewrote in THIS run (run-stage's KTB-39
+// baseline, carried through `loaded.json` because a workflow script cannot read files, §4.2.3).
+// The builder is told never to commit them; empty is the normal case.
+const setupDirty = Array.isArray(loaded.setup_dirty) ? loaded.setup_dirty.filter(Boolean) : [];
 const mustFix = Array.isArray(loaded.must_fix) ? loaded.must_fix.filter(Boolean) : [];
 const disputed = Array.isArray(loaded.disputed) ? loaded.disputed.filter(Boolean) : [];
+// Structure B (Task 3, should_fix 1): if the deterministic self-gate bounced the previous head, its
+// findings ride the context so this re-dispatched builder knows WHY — a blind retry cannot clear the
+// self-gate and is what makes the RED route loop. Fed straight into the build prompt (selfGateBlock).
+const selfGateFindings = Array.isArray(loaded.self_gate_findings) ? loaded.self_gate_findings.filter(Boolean) : [];
+// Structure D (Task 5): regression pins carried from the prior rework round. A pin with a `guard`
+// (a runnable test) is a HARD gate the self-gate re-runs before this handoff; a pin with `guard:null`
+// is an advisory checklist line only. The builder must not silently regress a pinned property.
+const reworkPins = Array.isArray(loaded.rework_pins) ? loaded.rework_pins.filter(Boolean) : [];
 const priorPr = typeof loaded.pr === 'number' ? loaded.pr : null;
 
 // Rework completeness (§7.5, P3-R4): every must_fix id must come back as `fixed` with the commit that
@@ -234,26 +245,143 @@ const PROTECTED =
   '`package.json`, `package-lock.json`, `vitest.config.*`, `playwright.config.*`, `tsconfig*.json`, ' +
   '`.eslintrc*`, `eslint.config.*`';
 
+// ADR-020 KTB-23 fix — a `factory:harness` issue is the one issue whose whole point is to change those
+// files, and the runner already runs its builder with the variant settings + FACTORY_HARNESS_ISSUE=1
+// (KTB-20/KTB-23). The prompt was the one place that never got that judgement: it still listed
+// package.json/vitest.config/.factory as PROTECTED and rule 8 (now rule 9) still said "fill harness_needed and STOP",
+// so the harness issue's own builder parked itself and the factory opened a harness issue for the
+// harness issue — a chain, with the parked feature waiting at the end of it. KTB-27: the flag now
+// arrives as the second token of `args.raw` (`rawHarnessStr`, from the same label read that picked
+// the settings file), with `args.harness_issue` kept as a fallback for the old, pre-KTB-27 shape.
+const isHarnessIssue = rawHarnessStr === 'true' || args.harness_issue === true || args.harness_issue === 'true';
+
+// What the variant actually opens — the same list as `.factory/ci-settings-harness.json` and the
+// FACTORY_HARNESS_ISSUE branch of `hooks/block-dangerous.sh`. `.factory/**` stays shut apart from
+// `harness.toml`, so the exclusion is named file by file rather than as a whole directory.
+// (KTB-36: neither settings file carries a blanket `.factory/**` any more — both enumerate, so that
+// `.factory/out/qa/**` can stay writable for the qa reviewer's evidence. A builder still writes
+// nothing under `.factory/out/`; that carve-out belongs to the review stage, not to this one.)
+const HARNESS_OPEN =
+  '`.factory/harness.toml`, `vitest.config.*`, `playwright.config.*`, `package.json`, `package-lock.json` ' +
+  '(and `docker-compose.test.yml`/`.env.test`, which were never protected)';
+
+const PROTECTED_FOR_HARNESS_ISSUE =
+  '`.factory/**` **except `.factory/harness.toml`**, `.claude/**`, ' +
+  '`.github/workflows/factory-*.yml`, `docs/factory/CHARTER.md`, `tsconfig*.json`, `.eslintrc*`, ' +
+  '`eslint.config.*`';
+
 const builderReading =
   `Read \`${args.context}\` first (issue, tier, spec_path, handoffs.plan.done_when and files_expected, ` +
-  `harness.maturity, harness.commands), then the spec at its \`spec_path\` if one is named, ` +
-  `\`docs/QA.md\` (how this project writes each test level) **if present**, \`docs/TECHNICAL.md\` ` +
+  `harness.maturity, harness.commands), then \`.factory/out/house-rules.md\` (this repo's build/run/test ` +
+  `recipe, its load-bearing paths, and the "a correct change here must…" invariants mined from CHARTER ` +
+  `\`## Preserve\`/NEVER_AUTOMATE — a change that breaks one of those, or skips a step in the recipe, is a ` +
+  `defect, not a style nit; own-calendar #3 shipped a README pointed at the production API and a bring-up ` +
+  `that dropped \`prisma migrate\` for exactly this reason), then the spec at its \`spec_path\` if one is ` +
+  `named, \`docs/QA.md\` (how this project writes each test level) **if present**, \`docs/TECHNICAL.md\` ` +
   `§Testing Strategy **if present** — neither is guaranteed to exist and their absence is normal, and ` +
   `your lessons file at \`.factory/lessons/factory-builder.md\` (treat every entry as a checklist item). ` +
   `The default branch is \`[project].default_branch\` in \`.factory/harness.toml\` — read it there; the ` +
   `\`harness\` block of \`${args.context}\` does not carry it. ` +
   `Answer with the English field names of your output schema.`;
 
+// Rule 8, normal issue: the protected files are a wall, and the way through the wall is a field.
+const normalProtectedBlock =
+  `Protected paths — you must not edit ${PROTECTED}. An \`Edit\` there is denied by a hook, and a PR ` +
+  `carrying such a change is never auto-merged — the merge stage hands it to a human instead.\n` +
+  `9. If the change genuinely needs one of those files changed — a new dependency, a new script, a ` +
+  `runner/linter config change — fill \`harness_needed\` in your output, one entry per file: ` +
+  `{file: the exact path, change: what must change (e.g. "add dependency pg@^8 to dependencies"), ` +
+  `why: which done_when ids need it and why it cannot be done otherwise}. Then STOP: commit and push ` +
+  `whatever is genuinely finished, open (or update) the draft PR as in rule 6, and return. Do not ` +
+  `write the request as PR prose — prose is not a signal, and a "Harness change needed" heading is ` +
+  `read by nobody. The factory opens ONE \`factory:harness\` issue from your entries and parks this ` +
+  `issue until that lands, so a partial-but-honest answer costs one round; working around the deny ` +
+  `(\`npm install\`, editing a lockfile, a shell redirection) is blocked by a hook and, if it got ` +
+  `through, would only be refused at merge. Leave \`harness_needed\` out entirely when you do not ` +
+  `need one — an empty request parks the issue for nothing.\n`;
+
+// Rule 8, harness issue: there is nothing to ask for — you ARE the request. Asking again is a chain
+// (a harness issue that opens a harness issue), and the feature parked behind this one waits for it.
+const harnessProtectedBlock =
+  `THIS IS A \`factory:harness\` ISSUE — the issue whose whole purpose is to change the build/test ` +
+  `harness. Your session runs with the variant permissions (\`.factory/ci-settings-harness.json\` + ` +
+  `\`FACTORY_HARNESS_ISSUE=1\`), so these files ARE yours to edit for this issue: ${HARNESS_OPEN}.\n` +
+  `Still protected — you must not edit ${PROTECTED_FOR_HARNESS_ISSUE}. An \`Edit\` there is denied by ` +
+  `a hook. (\`.factory/package.json\` is the runner's own manifest and stays shut: opening it would ` +
+  `change the runtime that runs the gates.)\n` +
+  `9. Do NOT fill \`harness_needed\` and do NOT stop — make the change. Leave the field out entirely. ` +
+  `Asking for a harness change from inside the harness issue opens a second harness issue behind this ` +
+  `one and the feature parked on it waits for both; the factory refuses to chain them, so the request ` +
+  `is recorded and then ignored. Edit the files above directly, add the test that proves the new ` +
+  `capability works (a smoke test at the level you just enabled), and finish rules 5-7 as usual.\n` +
+  `The merge is still a human's: this PR carries protected paths, so the merge stage will refuse to ` +
+  `auto-merge it and hand it to a person. That is the design — you make the diff, a human approves it. ` +
+  `Do not try to merge it yourself.\n`;
+
+// ADR-020 KTB-43 — the rule the own-calendar #3 builder did not have. It committed its work, wrote the
+// handoff with that sha, then ran `flutter test`, which regenerated the toolchain files `[runtime].setup`
+// had already written once, and committed THOSE as "reconcile flutter toolchain drift left by verification
+// run". The branch head no longer matched the head_sha in the handoff and the issue went to needs-human.
+// Two rules, not one: what not to commit (regenerated files) and when to stop committing (after the
+// handoff). The stage now repairs the drift-only case on its own — this is so it does not have to.
+const driftRule =
+  `8. NEVER commit a file that setup or the tests regenerate, and NEVER commit anything at all after you ` +
+  `have returned your answer. This run's regenerated paths are ` +
+  (setupDirty.length > 0
+    ? `\`setup_dirty\` in the context payload: ${setupDirty.map((p) => `\`${p}\``).join(', ')}. `
+    : `listed as \`setup_dirty\` in the context payload (empty for this run). `) +
+  `\`[runtime].setup\` rewrote them before your session started and the stage restored them for you; ` +
+  `rule 5's commands — or any verification you run — can rewrite them again. If that happens, LEAVE THE ` +
+  `TREE DIRTY: the stage restores it, an uncommitted file never reaches the PR, and "reconciling toolchain ` +
+  `drift" in a follow-up commit is not tidying up — it makes the branch head differ from the head_sha you ` +
+  `reported, which is a mismatch the factory refuses. Do not \`git add\` them, do not amend, do not push ` +
+  `again after rule 7. The stage drops such a commit by itself when it touches ONLY those paths, but a ` +
+  `commit that mixes them with real work cannot be dropped and stops the round (ADR-020 KTB-43).\n`;
+
+// ── Structure B (review-efficiency Task 3) — the builder's adversarial self-critique ────────────
+// Before it hands off, the builder runs the reviewer's DETERMINISTIC checks locally (finish()/gates)
+// and one ADVERSARIAL self-critique pass framed by the tier's reviewer rubric — "find where this
+// FAILS the rubric", not "is this ok?". Raising first-draft quality here is the whole point of the
+// plan (fewer review rounds). Tier-scaled so it does not blow the stage's `claude -p` turn budget
+// (ADR-020 O25; spec §9 Q2 — resolved here): `docs`/`standard` do it as an in-process final turn in
+// this same session; `load-bearing` additionally gets a spawned skeptic sub-agent (Verify phase)
+// because a hard-to-roll-back change earns the extra scrutiny. The stage ALSO runs a deterministic
+// self-gate after this session (lib/self-gate.js) — this rule is so the builder answers those
+// checks BEFORE the handoff, not after.
+const loadBearing = tier === 'load-bearing';
+const selfCritiqueRule =
+  `10. Before you write the handoff, self-critique — a distinct step, not a re-read. First run ` +
+  `\`[commands].finish\`/\`[commands].gates\` (or, if the harness names neither, \`[commands].lint\` + ` +
+  `\`[commands].unit\`/full) locally and confirm they EXIT 0 — a red \`finish()\` handed to review is ` +
+  `KTB #18 R3, a whole round burned on a check you could have run. Then take the reviewer's rubric for ` +
+  `this tier (each \`handoffs.plan.done_when[].rubric\` is the one-line bar a reviewer applies to that ` +
+  `item) and adversarially hunt for where your change FAILS it — a guard test that still passes when the ` +
+  `behaviour it guards is deleted (own-cal R1 cf1), an assertion that copies the implementation, a ` +
+  `done_when whose evidence you cannot point to, a \`## Preserve\`/load-bearing invariant from ` +
+  `\`.factory/out/house-rules.md\` your diff touches. Fix what you find NOW; the stage's deterministic ` +
+  `self-gate re-runs these same checks and will not let a survivor or an uncovered done_when reach review.` +
+  (loadBearing
+    ? ` This is a LOAD-BEARING change: a skeptic sub-agent also reviews your diff before verify — answer ` +
+      `its findings in this same session rather than deferring them to a review round.`
+    : '') +
+  `\n`;
+
 const buildRules =
-  `1. Branch \`claude/fq-${issue}\` from \`origin/<default_branch>\`: create it if it does not exist, ` +
-  `otherwise check it out (it is yours from an earlier round).\n` +
+  `1. You are ALREADY on the branch \`claude/fq-${issue}\` — the stage checked it out before this session ` +
+  `started (ADR-023 Task 8b) and it is the only branch this session may be on. Never run \`git checkout\`, ` +
+  `\`git switch\`, \`git fetch\`, \`git reset --hard\` or \`git stash\`: a branch switch swaps the hook ` +
+  `scripts and settings on disk underneath the session, so a PreToolUse hook blocks all of them. Commit ` +
+  `and push where you are.\n` +
   `2. TDD, in this order: write the tests named by \`handoffs.plan.done_when[].verify\` FIRST and run ` +
   `them to watch them fail (RED), then implement until they pass (GREEN). A test you never saw fail ` +
   `proves nothing, and the verifier runs \`prove-test\` to check exactly that.\n` +
   `3. Never modify or delete an existing test (\`tests_are_load_bearing\`, spec §5.2.4) and never add a ` +
   `skip/ignore pragma (\`.skip\`, \`xit\`, \`@pytest.mark.skip\`, \`# pragma: no cover\`, ` +
-  `\`istanbul ignore\`, \`Stryker disable\`). If an existing test truly must change, stop and write why ` +
-  `in the PR body instead — spec-conformance approves that explicitly or it does not happen.\n` +
+  `\`istanbul ignore\`, \`Stryker disable\`). This is now enforced, not just asked: a removed or changed ` +
+  `line in a file matched by \`harness.test.test_glob\` (and a deleted test file) is a policy violation ` +
+  `that stops the auto-merge and hands the PR to a human (external audit H5). Adding new tests is always ` +
+  `fine. The only exception is an existing test the ISSUE BODY lists under \`tests_changed_allowed:\` — ` +
+  `if the change you need is not listed there, stop and write why in the PR body instead.\n` +
   `4. Stay inside \`handoffs.plan.files_expected\`. If the work honestly needs a path outside it, record ` +
   `the path and the reason in the PR body under a "Scope change" heading.\n` +
   `5. Run \`[commands].lint\` and \`[commands].unit\` from \`harness.commands\` yourself (plus the full ` +
@@ -268,13 +396,11 @@ const buildRules =
   `file, then pass \`--body-file <path>\`. If the PR already exists, push to it and update its body with ` +
   `\`gh pr edit <pr> --body-file <path>\` instead of opening a second one.\n` +
   `7. Return head_sha = the output of \`git rev-parse HEAD\` **after** the push: 40 lowercase hex ` +
-  `characters, not a short sha and not a branch name.\n\n` +
-  `Protected paths — you must not edit ${PROTECTED}. An \`Edit\` there is denied by a hook, and a PR ` +
-  `carrying such a change is never auto-merged — the merge stage hands it to a human instead. ` +
-  `If the change genuinely needs a new dependency, a new script, or ` +
-  `a runner/linter config change, write what is needed and why into the PR body under a ` +
-  `"Harness change needed" heading and finish the issue without it — a human opens a \`factory:harness\` ` +
-  `issue from that. Do NOT \`npm install\`, edit a lockfile, or otherwise work around the deny.\n` +
+  `characters, not a short sha and not a branch name.\n` +
+  driftRule +
+  `\n` +
+  (isHarnessIssue ? harnessProtectedBlock : normalProtectedBlock) +
+  selfCritiqueRule +
   `Never write a credential, token or key into the repository, a test fixture, or a log line.`;
 
 const reworkBlock = mustFix.length > 0
@@ -293,10 +419,39 @@ const reworkBlock = mustFix.length > 0
     `same responses in your output's rework_response.`
   : '';
 
+// Structure B (Task 3): a self-gate retry — the stage bounced the previous head because its own
+// deterministic self-gate blocked (a survivor test, an uncovered done_when, a red gate). This is the
+// one bounded retry (the stage escalates to needs-human on a second RED for the same head), so clear
+// these now: they are exactly what the reviewer's runnable checks would reject.
+const selfGateBlock = selfGateFindings.length > 0
+  ? `\n\nThe stage's deterministic SELF-GATE blocked your previous handoff — these are the findings it ` +
+    `raised (the reviewer's runnable checks would reject the same things). Fix EVERY one before you hand ` +
+    `off; this is your one bounded retry, and an unresolved finding on the same head escalates to a human ` +
+    `rather than looping:\n${JSON.stringify(selfGateFindings, null, 2)}\n` +
+    `A "survivor" means a new test stayed green when the code it guards was mutated — strengthen its ` +
+    `assertion so it fails when the behaviour breaks (never weaken or delete it). A "spec-evidence-missing" ` +
+    `means a done_when has no evidence a reviewer can point to — add the test/manifest entry it names.`
+  : '';
+
+// Structure D (Task 5): the regression pins carried from prior rounds. Guardable pins (a test) are
+// re-run by the self-gate and HARD-block the handoff if red — a fix that regresses one never reaches
+// review. Prose pins are advisory checklist lines only (there is nothing to run, so no loop).
+const guardablePins = reworkPins.filter((p) => p && p.guard && p.guard.kind === 'test' && p.guard.ref);
+const advisoryPins = reworkPins.filter((p) => !(p && p.guard && p.guard.kind === 'test' && p.guard.ref));
+const pinsBlock = reworkPins.length > 0
+  ? `\n\nREGRESSION PINS carried from prior rework rounds — do NOT let a fix regress a property a past ` +
+    `round already established.` +
+    (guardablePins.length > 0 ? `\nThese have a runnable GUARD TEST; the stage's self-gate RE-RUNS each ` +
+      `before your handoff and will BLOCK it (escalating rather than looping) if the guard goes red — ` +
+      `keep them green:\n${JSON.stringify(guardablePins, null, 2)}\n` : '') +
+    (advisoryPins.length > 0 ? `These are advisory checklist lines (no runnable guard) — honour them, ` +
+      `but they never block:\n${JSON.stringify(advisoryPins.map((p) => ({ id: p.id, text: p.text })), null, 2)}\n` : '')
+  : '';
+
 const buildPrompt =
   `${builderReading}\n\n` +
   `Issue #${issue} (tier ${tier}). Build the planned change.\n\n` +
-  `${buildRules}${reworkBlock}`;
+  `${buildRules}${reworkBlock}${selfGateBlock}${pinsBlock}`;
 
 const SHA_NOTE =
   `\n\nYour previous answer's head_sha was not a 40-character lowercase hex sha. head_sha must be the ` +
@@ -320,6 +475,46 @@ let built = await build(buildPrompt, 'build');
 built = await completeRework(built, buildPrompt, 'build:rework');
 const buildGaps = reworkGaps(built);
 if (buildGaps.length > 0) return reworkFailure(built, buildGaps);
+
+// ── Structure B (Task 3), load-bearing only — the spawned skeptic self-critique ─────────────────
+// A hard-to-roll-back change earns one adversarial pass BEFORE the verifier: a skeptic reads the diff
+// and hunts for where it fails the rubric, then the builder gets ONE turn to answer. Bounded to one
+// skeptic spawn + one self-fix so it stays inside the stage's max_turns (ADR-020 O25; own-calendar
+// already raised it to 24). docs/standard tiers do the self-critique in-process (build rule 10) and
+// never reach here — which also keeps their agent sequence exactly builder → verifier.
+const skepticPrompt = (b) =>
+  `Adversarial self-critique. You are the skeptic on a LOAD-BEARING change on PR #${b && b.pr !== undefined ? b.pr : '<unknown>'} ` +
+  `(head ${b && b.head_sha ? b.head_sha : '<unknown>'}). Do NOT ask "is this ok" — hunt for where it FAILS. ` +
+  `Read only: \`${args.context}\` (issue, handoffs.plan.done_when — id, text, verify, level, and especially ` +
+  `\`rubric\`, the one-line bar a reviewer applies), \`.factory/out/house-rules.md\` (the repo's ` +
+  `\`## Preserve\`/load-bearing invariants and its build/run/test recipe), the diff ` +
+  `\`git diff origin/<default_branch>...HEAD\` (default branch from \`.factory/harness.toml\` ` +
+  `[project].default_branch), and the test files and implementation files that diff touches. ` +
+  `For EACH done_when, find where the change fails its \`rubric\`: a guard test that still passes when the ` +
+  `behaviour it guards is deleted, an assertion that copies the implementation, a done_when with no ` +
+  `evidence, a Preserve/load-bearing invariant the diff breaks, a recipe step it skips. Return every flaw ` +
+  `as {where (path:line), rubric_failed (the rubric text it fails), evidence}; an empty \`flaws\` means you ` +
+  `found nothing a reviewer would reject. This is a code smell hunt, not approval.`;
+
+if (built && loadBearing) {
+  const skeptic = await once(() => agent(skepticPrompt(built), { agentType: 'factory-builder', model: 'opus', label: 'self-critique', schema: SKEPTIC }))();
+  const flaws = skeptic && Array.isArray(skeptic.flaws) ? skeptic.flaws.filter(Boolean) : [];
+  if (flaws.length > 0) {
+    const answerPrompt =
+      `${builderReading}\n\n` +
+      `Issue #${issue} (tier ${tier}). Your own skeptic self-critique found these flaws in your change on ` +
+      `PR #${built.pr} (head ${built.head_sha}) BEFORE it reaches the reviewers:\n${JSON.stringify(flaws, null, 2)}\n\n` +
+      `Answer every flaw where you are — you are still on \`claude/fq-${issue}\` and must stay there. A flaw ` +
+      `about a test is a flaw about the test: strengthen the assertion or the fixture, do not weaken it. Fix ` +
+      `them now so the reviewers do not have to spend a round on them.\n\n` +
+      `${buildRules}${reworkBlock}`;
+    const answered = await build(answerPrompt, 'self-critique:fix');
+    if (answered) built = { ...built, ...answered, rework_response: answered.rework_response || built.rework_response };
+    built = await completeRework(built, answerPrompt, 'self-critique:fix:rework');
+    const scGaps = reworkGaps(built);
+    if (scGaps.length > 0) return reworkFailure(built, scGaps);
+  }
+}
 
 // Cold read (§7.1 `cold_read = true`): the verifier's prompt carries the head sha and PR number and
 // nothing else the builder wrote — no summary, no branch name, no test list, no commit messages.
@@ -369,10 +564,11 @@ if (built && verdict && verdict.verdict === 'rejected') {
     `${builderReading}\n\n` +
     `Issue #${issue} (tier ${tier}). The verifier REJECTED your change on PR #${built.pr} ` +
     `(head ${built.head_sha}). Its findings:\n${JSON.stringify(verdict.findings || [], null, 2)}\n\n` +
-    `Answer every finding on the same branch \`claude/fq-${issue}\`. A finding about a test is a finding ` +
+    `Answer every finding where you are — you are still on \`claude/fq-${issue}\` and must stay there. ` +
+    `A finding about a test is a finding ` +
     `about the test: strengthen the assertion or the fixture rather than the code that makes it pass. ` +
     `This is your only fix round — the next verdict ends the stage either way.\n\n` +
-    `${buildRules}${reworkBlock}`;
+    `${buildRules}${reworkBlock}${selfGateBlock}${pinsBlock}`;
 
   const fixed = await build(fixPrompt, 'fix');
   if (fixed) built = { ...built, ...fixed, rework_response: fixed.rework_response || built.rework_response };
@@ -399,6 +595,12 @@ return {
   summary: built ? built.summary : undefined,
   tests_added: built ? built.tests_added : undefined,
   commits: built ? built.commits : undefined,
+  // KTB-23: only carried when the builder actually asked for something — an empty array would park
+  // the issue on needs-info for nothing (run-stage keys on "non-empty", but the handoff should not
+  // carry a field that says "I need nothing").
+  ...(built && Array.isArray(built.harness_needed) && built.harness_needed.length > 0
+    ? { harness_needed: built.harness_needed }
+    : {}),
   verifier: verdict
     ? { verdict: verdict.verdict, findings: verdict.findings || [], prove_test_read: verdict.prove_test_read === true }
     : {},

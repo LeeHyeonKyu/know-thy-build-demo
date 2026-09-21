@@ -17,7 +17,9 @@ export async function classifyFailures({ run, cwd, harness, failing, base, thres
   }
   // {file}과 마찬가지로 {name}도 여기서 따옴표를 붙인다 — 하네스 쪽에서 '{name}'으로 감싸면
   // 이름에 든 작은따옴표가 명령을 깨거나 주입 경로가 된다(§5.1 test_one 계약).
-  const one = (f, dir) => run("bash", ["-lc", cmd.replace("{file}", q(f.file)).replace("{name}", q(f.name))], { cwd: dir });
+  // `replaceAll`(KTB-44 리뷰 should_fix 8): 자리표시자가 두 번 나오는 하네스에서 `replace`는 두 번째를
+  // 리터럴로 남겨 분류가 통째로 "그런 테스트 없음"이 된다 — 리허설과 같은 치환 규칙을 쓴다.
+  const one = (f, dir) => run("bash", ["-lc", cmd.replaceAll("{file}", q(f.file)).replaceAll("{name}", q(f.name))], { cwd: dir });
   let wtReady = false;
   try {
     for (let idx = 0; idx < existing.length; idx++) {
@@ -40,7 +42,17 @@ export async function classifyFailures({ run, cwd, harness, failing, base, thres
       }
       const baseRuns = [];
       for (let i = 0; i < thresholds.flaky_base_runs; i++) baseRuns.push((await one(f, tmp)).code);
-      out.push({ id: f.id, verdict: baseRuns.every((c) => c === 0) ? "introduced" : "flaky-existing", evidence: { pr_isolation, base: baseRuns } });
+      /**
+       * 감사 M3 — base 실행이 **전부** 실패하면 그것은 흔들림이 아니다. flaky의 증거는 "같은 커밋에서
+       * 같은 테스트가 어떤 때는 통과하고 어떤 때는 실패한다"이고, base 5/5 실패는 그 반대의 증거다 —
+       * main에서 이미 깨져 있는 테스트다. 둘을 같은 이름으로 부르면 게이트가 그 실패를 제외하고
+       * GREEN으로 넘어가, main이 빨간 채 자동 머지가 이어진다. 판정을 나눈다: `broken-base`는
+       * 제외 대상이 아니라 사람이 볼 RED다(gates.js).
+       */
+      const verdict = baseRuns.every((c) => c === 0) ? "introduced"
+        : baseRuns.every((c) => c !== 0) ? "broken-base"
+          : "flaky-existing";
+      out.push({ id: f.id, verdict, evidence: { pr_isolation, base: baseRuns } });
     }
   } finally {
     if (wtReady) await run("git", ["worktree", "remove", "--force", tmp], { cwd });

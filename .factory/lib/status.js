@@ -43,7 +43,7 @@ function labelFallbackStage(state) {
 
 export function buildStatus({
   issues = [], prs = {}, heartbeats = new Map(), quarantine = { quarantined: [] },
-  thresholds = {}, charter = {}, usage = null, now, staleMinutes = 30,
+  thresholds = {}, charter = {}, usage = null, overlap = null, now, staleMinutes = 30,
 } = {}) {
   const needsYou = [];
   for (const i of issues) {
@@ -51,6 +51,24 @@ export function buildStatus({
   }
   for (const i of issues) {
     if (labelOf(i) === NEEDS_INFO) needsYou.push({ kind: "needs-info", number: i.number, title: i.title, hint: `:clarify ${i.number}` });
+  }
+  /**
+   * ADR-020 KTB-30 — factory 라벨은 달고 있는데 **상태 라벨이 하나도 없는** 열린 이슈. 라벨 스왑이
+   * 중간에 실패한 흔적이고(데모 #2 08:52Z·#15 08:55Z), 그 이슈는 상태별 조회 어디에도 안 걸려
+   * 이 화면에서 통째로 사라졌다 — 사람이 "아무 일도 안 일어나는 이슈"를 볼 창구가 필요하다.
+   * sweeper가 대개 먼저 되살리므로 힌트는 사람이 할 일이 아니라 그 사실을 가리킨다.
+   */
+  /**
+   * r2 SF6 — **sweeper 8번 팔과 같은 집합을 본다.** 예전에는 `factory:*` 라벨이 남아 있는 이슈만
+   * 셌는데, 그 팔은 라벨이 **하나도** 없는 이슈도 전이 이력으로 잡는다(`sweeper.js`) — triage가 tier
+   * 라벨을 붙이기 전에 상태 라벨을 잃은 이슈가 정확히 그 모양이다(#2). 사람이 보는 창구가 복구 팔보다
+   * 좁으면, 팔이 고치지 못한 바로 그 이슈가 화면에서도 사라진다. `factoryTransition`은 CLI가 코멘트를
+   * 읽어 세워 주는 플래그다(순수 함수인 이 파일은 gh를 만지지 않는다).
+   */
+  for (const i of issues) {
+    if (labelOf(i) !== null) continue;
+    if (!(i.labels || []).some((l) => String(l).startsWith("factory:")) && i.factoryTransition !== true) continue;
+    needsYou.push({ kind: "no-state-label", number: i.number, title: i.title, hint: "sweeper → label restore" });
   }
   for (const p of prs.retroProposal || []) {
     needsYou.push({ kind: "retro-proposal", number: p.number, title: p.title, hint: `:proposal ${p.number}` });
@@ -99,7 +117,22 @@ export function buildStatus({
     quarantine_max: thresholds.quarantine_max,
   };
 
-  return { needsYou, queue, inProgress, recent, backPressure, usage };
+  return { needsYou, queue, inProgress, recent, backPressure, usage, overlap };
+}
+
+/**
+ * 외부 감사 2026-09-14 P2-13 — 리뷰어 겹침 한 줄. 이 화면은 "지금 무엇을 기다리는가"를 보여주지만,
+ * 리뷰어 5명을 계속 띄울지 말지는 **겹침**이 답한다: 겹침이 1에 가까우면 다섯이 같은 것을 다섯 번
+ * 찾고 있다는 뜻이고, 0에 가까우면 각 렌즈가 자기만 보는 것을 들고 온다는 뜻이다. 분모가 0인 창은
+ * 비율을 만들지 않는다 — "겹치지 않았다"와 "판정할 finding이 없었다"는 다른 사실이다.
+ */
+export function overlapLine(o) {
+  if (!o || !Number.isFinite(Number(o.findings_total))) return "- review overlap (30d): (no data)";
+  const total = Number(o.findings_total) || 0;
+  if (total === 0) return `- review overlap (30d): no findings in ${Number(o.review_runs) || 0} review run(s)`;
+  const uniq = Object.entries(o.unique_findings_by_role || {});
+  const uniqText = uniq.length ? uniq.map(([r, n]) => `${r} ${n}`).join(", ") : "none";
+  return `- review overlap (30d): ${Number(o.overlap_ratio ?? 0).toFixed(2)} (${Number(o.overlapping_findings) || 0}/${total} findings raised by ≥2 roles, ${Number(o.review_runs) || 0} review run(s)) · unique: ${uniqText}`;
 }
 
 /** §13 `:status`와 같은 섹션 순서: Needs You → 진행 중 → 큐 → 역압 → 최근 머지 → 사용량. */
@@ -133,6 +166,7 @@ export function renderStatus(s) {
   lines.push("## 최근 머지");
   if (s.recent.length === 0) lines.push("(none)");
   else for (const r of s.recent) lines.push(`- #${r.number} ${r.title} · ${r.mergedAt}`);
+  lines.push(overlapLine(s.overlap));
   lines.push("");
 
   lines.push("## 사용량");
@@ -146,6 +180,11 @@ export function renderStatus(s) {
   } else {
     lines.push("(no data)");
   }
+
+  // ADR-022 Task B — 이 보고서는 **한 시점**이다. 스테이지가 8–35분을 도는 동안 무엇이 일어나는지는
+  // 여기 없다(하트비트의 age_min 한 숫자뿐이다). 보드가 그 자리를 채운다는 사실을 사람이 알 수 있는
+  // 곳은 사람이 이미 보고 있는 이 화면이다 — 그래서 마지막 한 줄로 남긴다.
+  lines.push("", "board: npx know-thy-build factory board");
 
   return lines.join("\n");
 }

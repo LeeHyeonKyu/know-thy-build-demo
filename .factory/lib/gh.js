@@ -1,4 +1,5 @@
 import { STATES, TIER_LABELS } from "./labels.js";
+import { HEARTBEAT_HEAD } from "./heartbeat.js";
 
 /**
  * 머지는 되돌릴 수 없다 — 체크가 하나도 없으면 "전부 통과"가 아니라 "확인 못 함"으로 본다(fail closed).
@@ -18,6 +19,19 @@ export const allChecksGreen = (checks, required = null) => {
   }
   return checks.length > 0 && checks.every(isGreen);
 };
+
+/**
+ * `gh pr checks`가 **체크가 하나도 없는 PR**에 대해 내는 실패(`no checks reported on the '<branch>'
+ * branch`, gh `checks.go`의 `populateStatusChecks`). exit code가 0이 아니라 이 어댑터의 래퍼는
+ * 그것을 throw로 올린다 — 그런데 그것은 조회 실패(transport)가 아니라 **판정**이다: 체크가 없다는
+ * 사실 자체가 `allChecksGreen([])`이 이미 내리는 그 판정(fail closed)이다.
+ *
+ * merge 스테이지는 이 구분이 필요 없다(`mergeGates`의 catch가 `checksGreen`을 세우지 않고 떠나면
+ * `requirements.js`가 "required checks not verified GREEN"으로 접는다 — 어느 쪽이든 거부다). sweeper의
+ * 사람-머지 반영 팔은 transport와 판정을 갈라 다르게 다루므로(전자는 재시도, 후자는 마커) 그 경계를
+ * 알아야 한다. 문구를 손으로 베끼지 않도록 여기 한 곳에 둔다(KTB-46 r5).
+ */
+export const GH_NO_CHECKS_RE = /no (?:required )?checks reported/i;
 
 const STATUS_STATES = new Set(["success", "failure", "pending", "error"]);
 
@@ -48,45 +62,311 @@ export async function resolveRepo({ run }) {
   return parsed.nameWithOwner;
 }
 
-export function makeGh({ run, repo }) {
+/**
+ * ADR-020 KTB-30 — **라벨 변경만은 재시도한다.** 데모에서 두 번(2026-09-13 08:52Z #2, 08:55Z #15)
+ * 같은 방식으로 죽었다: `gh issue edit --remove-label … --add-label …` 한 번이 GitHub의 일시 장애로
+ * (`GraphQL: Something went wrong while executing your query`, `EOF`) 중간에 실패해 **옛 라벨은
+ * 지워지고 새 라벨은 안 붙었다**. 상태 라벨이 0개인 이슈는 `labeled` 이벤트도 못 만들고, 모든
+ * sweeper 팔이 상태 라벨로 검색하므로 아무도 다시 보지 않는다 — sweeper를 통째로 빠져나가는
+ * 유일한 실패였다. 간격은 1s·3s·9s: GitHub의 이런 장애는 초 단위로 풀리거나 몇 분을 간다(그때는
+ * REST 폴백이 답이다 — 실제로 `gh issue edit`이 계속 실패하는 동안 `gh api`는 동작했다).
+ */
+export const LABEL_RETRY_DELAYS_MS = [1000, 3000, 9000];
+const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 팩토리 자신의 계정 **이름**(값이 아니다) — commit status의 게시자를 대조할 기준(외부 감사 H1b).
+ *
+ * 두 배우 모드에서 이 잡의 `GH_TOKEN`은 머지 배우이지만 `factory/review` 상태를 올린 것은 **에이전트
+ * 배우**다 — 그래서 둘 다 받는다. 봇 로그인은 워크플로가 `FACTORY_BOT_LOGIN`으로 넘긴다(이름은
+ * 비밀이 아니라 env로 옮겨도 사본이 늘지 않는다). 잡 토큰의 로그인조차 해석되지 않으면 `ok:false` —
+ * 호출자는 fail closed 한다(누가 올렸는지 모르는 상태는 통과가 아니다).
+ *
+ * KTB-46에 `bin/sweep.js`가 두 번째 호출자로 붙으면서 `bin/run-stage.js`의 클로저에서 여기로 옮겼다 —
+ * `gh api user` 해석이 두 벌이 되면 그 둘이 갈라지는 날 한쪽만 위조 상태를 통과시킨다.
+ *
+ * ── T5 리뷰 MF-1: **이 함수가 어디서 도는지가 답을 바꾼다.** ──────────────────────────────────
+ * 출처는 세 갈래이고, 각각 다른 자리에서만 참이다:
+ *   ① `FACTORY_BOT_LOGIN` (워크플로가 넘긴다) — 어디서나 참.
+ *   ② `gh api user` — **Actions 안에서만** 참(거기서 뷰어는 잡 토큰의 주인 = 봇).
+ *   ③ 하트비트 코멘트의 작성자 — 어디서나 참(하트비트는 러너만 쓴다). `comments`를 넘기면 쓴다.
+ * 셋 다 비면 `ok:false`다: 빈 목록은 "봇이 없다"로 읽혀 위조된 결정을 통과시킨다.
+ *
+ * ── 1.4.0 핫픽스: **`env`는 주입이지 주변 환경이 아니다** ────────────────────────────────────
+ * `env = process.env`가 기본값이었고, 그래서 이 함수의 답은 호출자가 아무것도 고르지 않아도
+ * **프로세스가 어디서 도는지**에 따라 바뀌었다. 라이브러리 한가운데에서 그런 일이 일어나면 그
+ * 판정은 호출자의 코드만 읽어서는 재구성할 수 없다 — publish.yml의 validate 잡에서 정확히 그렇게
+ * 터졌다: Actions 러너의 `GITHUB_ACTIONS=true`가 ②의 문을 열었고, 가짜 `viewerLogin`이 팩토리 계정
+ * 목록에 들어가 11개 테스트가 **러너에서만** 빨개졌다(노트북에서는 영원히 초록이다).
+ *
+ * 그래서 `env`는 **필수 주입**이다(`classifyFinding`의 `ownerOf`/`isInstalled`와 같은 규율):
+ * 빠뜨리면 던진다. `process.env`라는 기본값은 CLI·워크플로의 **진입점 한 줄**에만 산다.
+ */
+export async function resolveFactoryLogins({ gh, env, comments = null }) {
+  if (!env || typeof env !== "object") {
+    throw new TypeError("resolveFactoryLogins: env is required — pass the caller's env explicitly (`process.env` belongs at the CLI/workflow entry point, not here); reading the ambient environment from inside made this function answer differently on a runner than on a laptop");
+  }
+  const logins = [];
+  /**
+   * ── T7: **그 팩토리 계정이 사람 계정인가.** ────────────────────────────────────────────────
+   * 후보는 "이 저장소에서 팩토리로 도는 계정"을 러너가 기록한 자리에서만 모은다 — Actions의 뷰어와
+   * 바이트 0 하트비트의 작성자. 둘 다 코멘트 **본문**이 아니라 GitHub이 계정에 붙인 사실(`type`)을
+   * 들고 오므로 에이전트가 고를 수 없다. `FACTORY_BOT_LOGIN`만 있고 그 이름의 코멘트가 없으면
+   * 종류를 모르므로 `null`이다 — **추측하지 않는다**(모르는 것을 `false`로 적으면 경보가 영영 안 뜬다).
+   */
+  const candidates = [];
+  const bot = (env.FACTORY_BOT_LOGIN || "").trim();
+  if (bot) logins.push(bot);
+
+  /**
+   * ① 뷰어는 **Actions 안에서만** 팩토리 계정이다. 거기서 `gh api user`가 돌려주는 것은 잡 토큰의
+   * 주인, 곧 봇이다. 노트북에서는 같은 호출이 **소유자**를 돌려준다 — 그런데 이 목록의 용도는
+   * "이 코멘트를 에이전트가 썼는가"이므로, 소유자를 팩토리 계정으로 세면 소유자가 직접 적은
+   * `human-decision:v1`이 "봇이 쓴 결정"으로 기각된다(T5 리뷰 MF-1이 재현: 데모 #39의 `[ktb]`
+   * 발견 둘이 통째로 사라졌다). 사람을 봇으로 오인하는 것은 fail-closed가 아니라 그냥 틀린 것이다.
+   */
+  if (env.GITHUB_ACTIONS === "true") {
+    let viewer;
+    try { viewer = await gh.viewerLogin(); }
+    catch (e) { return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
+    logins.push(viewer);
+    /**
+     * Actions 안에서는 뷰어가 곧 팩토리 계정이므로 그 계정의 **종류**가 답이다 — `gh api user --jq .type`
+     * 한 번(런당 한 번 도는 함수다). 이 호출의 실패는 `ok`를 바꾸지 않는다: 로그인 목록은 이미
+     * 손에 있고, 못 읽은 것은 "사람 계정인지 모른다"일 뿐이다(`personal: null`).
+     */
+    try { candidates.push({ login: viewer, type: await gh.viewerType?.() ?? null }); }
+    catch { candidates.push({ login: viewer, type: null }); }
+  }
+
+  /**
+   * ② 하트비트 코멘트의 **작성자**는 구성상 러너다. 하트비트는 러너만 쓰는 산출물이고
+   * (`[protected].runner_only` + 훅이 그 경로를 에이전트에게서 닫는다), 그 코멘트가 존재한다는 것
+   * 자체가 "이 로그인이 이 저장소에서 팩토리로 돈다"는 증거다. 그래서 노트북에서도 — `gh api user`가
+   * 소유자를 주는 바로 그 자리에서도 — 봇 이름을 알 수 있다. env도 Actions도 필요 없다.
+   *
+   * ── T5 재리뷰 SF-A: **하트비트를 인용한 코멘트는 하트비트가 아니다.** ──────────────────────
+   * `HEARTBEAT_HEAD`는 앵커가 없어서 본문 **어디서나** 맞는다. 곧 사람이 "맥락 삼아 붙여 둡니다:
+   * <하트비트 전문>"을 적으면 그 코멘트가 하트비트로 읽히고, 작성자인 **소유자**가 팩토리 계정
+   * 목록에 들어가, 바로 그 사람이 적은 `human-decision:v1`이 기각된다(리뷰어가 재현: 로그인이
+   * `["factory-bot","LeeHyeonKyu"]`가 되며 `[ktb]` 발견 둘이 사라졌다) — MF-1과 정확히 같은 사고가
+   * 다른 문으로 돌아온 것이다. 그래서 **본문 0바이트에서 시작할 때만** 하트비트로 센다:
+   * `heartbeatBody`는 언제나 head를 맨 앞에 놓으므로(진짜 하트비트는 전부 통과) 인용본만 걸린다.
+   */
+  for (const c of comments || []) {
+    if (!c?.author) continue;
+    if (HEARTBEAT_HEAD.exec(String(c.body ?? ""))?.index !== 0) continue;
+    logins.push(String(c.author));
+    // 하트비트를 쓴 계정 = 러너가 쓰는 계정. 그 `authorType`이 곧 "팩토리가 사람 계정으로 도는가"다.
+    candidates.push({ login: String(c.author), type: c.authorType == null ? null : String(c.authorType) });
+  }
+
+  /**
+   * ③ GitHub이 기록한 **작성자 사실**: `user.type === "Bot"`. 로그인 이름과 달리 이 값은 코멘트
+   * 본문이 아니라 GitHub이 계정에 붙인 종류라 에이전트가 고를 수 없다. 봇이 적은 결정은 사람의
+   * 결정이 아니므로 봇은 전부 팩토리 계정으로 센다 — 이름을 몰라도 그 문은 닫힌다.
+   */
+  for (const c of comments || []) {
+    if (c?.author && String(c.authorType ?? "") === "Bot") logins.push(String(c.author));
+  }
+
+  const out = [...new Set(logins.filter(Boolean))];
+  /**
+   * 하나도 못 찾았으면 `ok:false`다 — **`[]`로 돌려주지 않는다**. 빈 목록은 "봇이 없다"로 읽히고,
+   * 그러면 에이전트가 적어 둔 `human-decision:v1`이 사람의 결정으로 통과한다(그 한 줄이 상류
+   * 저장소 쓰기를 연다). 모르는 것은 통과가 아니므로 호출자가 fail closed 하게 만든다.
+   */
+  if (!out.length) {
+    return { ok: false, reason: "no factory login could be resolved — set FACTORY_BOT_LOGIN, or read an issue that has at least one heartbeat comment (outside GitHub Actions the viewer is the owner, not the bot)" };
+  }
+  /**
+   * `FACTORY_BOT_LOGIN`은 이름만 주고 종류는 주지 않는다. 그 이름으로 **이 이슈에 코멘트를 쓴 흔적**이
+   * 있으면 GitHub이 그 코멘트에 붙여 둔 `authorType`이 종류를 말해 준다(본문이 아니라 계정 사실이다).
+   */
+  if (bot) {
+    const seen = (comments || []).find((c) => c?.author && String(c.author).toLowerCase() === bot.toLowerCase() && c.authorType != null);
+    if (seen) candidates.push({ login: bot, type: String(seen.authorType) });
+  }
+  return { ok: true, logins: out, identity: identityOf(candidates, out) };
+}
+
+/**
+ * 후보 (로그인, 계정 종류) 목록 → `{ personal, login }`.
+ *   - 하나라도 `User`다  → `personal: true` (그 로그인을 지목한다 — 사람이 고칠 대상이 그것이다)
+ *   - 종류를 아는 후보가 있고 전부 `User`가 아니다 → `personal: false`
+ *   - 종류를 아는 후보가 없다 → `personal: null` (**모른다**. 추측은 하지 않는다)
+ * `Organization`은 사람 계정이 아니다 — GitHub App 설치 토큰(`<app>[bot]`)과 마찬가지로 공유 신원 문제를
+ * 만들지 않는다(그 계정으로 사람이 코멘트를 적을 수 없다).
+ */
+function identityOf(candidates, logins) {
+  const known = candidates.filter((c) => c.type);
+  const person = known.find((c) => c.type === "User");
+  if (person) return { personal: true, login: person.login };
+  if (known.length) return { personal: false, login: known[0].login };
+  return { personal: null, login: candidates[0]?.login ?? logins[0] ?? null };
+}
+
+export function makeGh({ run, repo, sleep = realSleep }) {
   async function gh(args, opts = {}) {
     const r = await run("gh", args, opts);
     if (r.code !== 0) throw new Error(`gh ${args.slice(0, 2).join(" ")} failed (${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);
     return r.stdout;
+  }
+  /**
+   * 라벨 변경 하나를 끝까지 밀어붙인다: `gh issue edit`을 1s·3s·9s 간격으로 네 번(첫 시도 + 재시도 3회)
+   * 시도하고, 그래도 안 되면 **REST 엔드포인트**로 같은 변경을 한 번 더 시도한다. 둘 다 실패하면
+   * 처음 에러를 그대로 던진다(사람이 보는 것은 원인이지 폴백의 증상이 아니다 — REST 쪽 메시지는
+   * 뒤에 덧붙이고 `restError`로도 단다). 조용한 성공 처리는 하지 않는다: 삼킨 실패가 곧 라벨 0개다.
+   */
+  async function labelMutation({ what, cli, rest }) {
+    let first = null;
+    for (let attempt = 0; attempt <= LABEL_RETRY_DELAYS_MS.length; attempt++) {
+      if (attempt > 0) await sleep(LABEL_RETRY_DELAYS_MS[attempt - 1]);
+      try { return await cli(); }
+      catch (e) { first ??= e; }
+    }
+    try { return await rest(); }
+    catch (restErr) {
+      first.restError = restErr;
+      first.message = `${first.message} — REST fallback (${what}) also failed: ${restErr.message}`;
+      throw first;
+    }
   }
   return {
     async issue(n) {
       const j = JSON.parse(await gh(["issue", "view", String(n), "-R", repo, "--json", "number,title,body,labels"]));
       return { number: j.number, title: j.title, body: j.body || "", labels: (j.labels || []).map((l) => l.name) };
     },
+    /**
+     * 이슈가 아직 열려 있는가(ADR-020 KTB-23 fix). `issue()`는 state를 싣지 않는다 — 그 함수는
+     * 라벨·본문을 읽는 자리라 필드를 늘리면 모든 호출자가 더 큰 응답을 받는다. sweeper의 하네스
+     * 주차 해제 팔만 이 사실을 필요로 하므로 조회를 따로 둔다.
+     */
+    async issueState(n) {
+      const j = JSON.parse(await gh(["issue", "view", String(n), "-R", repo, "--json", "number,state,closedAt"]));
+      return { number: j.number, state: j.state, closedAt: j.closedAt ?? null };
+    },
+    /**
+     * 이 브랜치에서 **머지된** PR 번호(없으면 null). 하네스 이슈가 `Closes #<n>` 없이 사람 손에
+     * 머지됐을 때 "하네스가 들어왔다"를 말해 주는 유일한 신호다 — builder는 언제나
+     * `claude/fq-<issue>`에서 작업하므로(implement 규칙 1) 브랜치 이름이 곧 이슈 번호다.
+     */
+    /**
+     * 이 브랜치에서 머지된 PR들 — **머지 시각 내림차순**. `gh pr list`는 *생성* 순으로 주므로
+     * 첫 항목이 가장 나중에 머지된 PR이라는 보장이 없다(Task 4 r3 should_fix 2): 재작업으로 같은
+     * 브랜치에 PR이 두 번 머지되면(먼저 만든 쪽이 나중에 머지될 수 있다) 첫 항목은 옛 머지다.
+     * `mergedAt`은 예전에도 조회하면서 쓰지는 않았다 — 이제 그 값이 순서를 정한다.
+     */
+    async mergedPrsForBranch(branch) {
+      const j = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", branch, "--state", "merged", "--limit", "20", "--json", "number,mergedAt"]));
+      return j
+        .map((p) => ({ number: p.number, mergedAt: p.mergedAt ?? null }))
+        .sort((a, b) => (Date.parse(b.mergedAt) || 0) - (Date.parse(a.mergedAt) || 0));
+    },
+    async mergedPrForBranch(branch) {
+      return (await this.mergedPrsForBranch(branch))[0]?.number ?? null;
+    },
+    /**
+     * KTB-46 — **머지된 PR의 머지 사실 그 자체.** `mergedPrForBranch`는 번호만 준다("머지된 PR이
+     * 있다"). 이슈를 `factory:merged`로 이으려면 그보다 두 가지가 더 필요하다:
+     *   - `headSha`: 그 전이의 증거 검사(`requirements.js`의 `factory:merged`)가 review handoff의
+     *     `head_sha`를 묶을 대상. 이것이 없으면 "어느 커밋에 대한 승인인가"를 말할 수 없다.
+     *   - `mergedBy`: 전이 사유에 실릴 **누가 머지했는가**. 이 경로의 존재 이유가 "사람이 머지했다"
+     *     이므로, 그 사람의 이름이 이슈 이력에 남아야 나중에 왜 자동 머지가 아니었는지 읽힌다.
+     * `mergeSha`·`mergedAt`은 같은 조회로 공짜라 함께 싣는다(run 기록·retro가 쓸 수 있다).
+     * 없는 필드는 지어내지 않고 null이다 — 머지되지 않은 PR에 부르면 전부 null로 답한다.
+     */
+    /**
+     * 이 PR이 **실제로 건드린 파일 경로들**(피드백 루프 Task 4 r2). 경로는 GitHub이 diff에서 계산한
+     * 사실이지 에이전트가 적은 산문이 아니다 — 그래서 tier 라벨과 **독립한** 두 번째 위험 출처가 된다.
+     * triage가 docs 모양의 diff를 `standard`로 채점해도(KTB #18) 이 목록은 그 사실을 그대로 말한다.
+     * 못 읽으면 던진다 — 호출자가 "모양 미상"으로 저하시킨다(라벨로 **추측하지 않는다**).
+     */
+    async prFiles(pr) {
+      const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "files"]));
+      return (j.files || []).map((f) => f.path).filter(Boolean);
+    },
+    async prMergeInfo(pr) {
+      const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "number,headRefOid,mergeCommit,mergedAt,mergedBy"]));
+      return { headSha: j.headRefOid ?? null, mergeSha: j.mergeCommit?.oid ?? null, mergedAt: j.mergedAt ?? null, mergedBy: j.mergedBy?.login ?? null };
+    },
+    /**
+     * `author`(T3 재리뷰 NEW-MF-2): **누가 이 코멘트를 썼는가**. `gh issue comment`는 훅이 일부러
+     * 열어 둔 문이므로(핸드오프가 그리로 나간다) 코멘트 본문만으로는 사람의 `:unstick` 결정과
+     * 에이전트가 적어 둔 같은 모양의 글을 구별할 수 없다. 피드백 루프는 `human-decision:v1`을
+     * **권한**으로 읽으므로(그 한 줄이 상류 저장소 쓰기를 연다) 작성자가 판정의 일부여야 한다.
+     * 필드는 응답에 이미 있었고 이 어댑터가 떨어뜨리고 있었을 뿐이다 — 추가 호출은 없다.
+     */
     async comments(n) {
       // --paginate 단독은 페이지 배열을 이어붙여 깨진 JSON을 만든다. --slurp이 [[page],[page]]로 감싸주므로 flat()으로 편다.
       const j = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/comments?per_page=100`, "--paginate", "--slurp"])).flat();
-      return j.map((c) => ({ id: c.id, body: c.body || "", createdAt: c.created_at }));
+      /**
+       * T5 재리뷰 SF-A — `authorType`/`viaApp`은 GitHub이 **계정에** 붙인 사실이지 본문이 아니다.
+       * 로그인 이름은 코멘트를 적는 쪽이 고를 수 없지만 본문은 고를 수 있으므로(하트비트를 인용해
+       * 자기를 러너처럼 보이게 하는 수가 있다), 귀속 판정에는 본문 바깥의 사실이 하나 더 필요하다.
+       * 둘 다 응답에 이미 있던 필드다 — 추가 호출은 없다.
+       */
+      return j.map((c) => ({
+        id: c.id, body: c.body || "", createdAt: c.created_at,
+        author: c.user?.login ?? null,
+        authorType: c.user?.type ?? null,
+        viaApp: c.performed_via_github_app ? (c.performed_via_github_app.slug ?? c.performed_via_github_app.name ?? true) : null,
+      }));
     },
     async comment(n, body) {
       return (await gh(["issue", "comment", String(n), "-R", repo, "--body-file", "-"], { input: body })).trim();
     },
     async addLabels(n, labels) {
-      await gh(["issue", "edit", String(n), "-R", repo, ...labels.flatMap((l) => ["--add-label", l])]);
+      if (!labels.length) return;
+      await labelMutation({
+        what: `add ${labels.join(", ")} on #${n}`,
+        cli: () => gh(["issue", "edit", String(n), "-R", repo, ...labels.flatMap((l) => ["--add-label", l])]),
+        rest: () => gh(["api", "-X", "POST", `repos/${repo}/issues/${n}/labels`, ...labels.flatMap((l) => ["-f", `labels[]=${l}`])]),
+      });
     },
     async removeLabel(n, label) {
-      await gh(["issue", "edit", String(n), "-R", repo, "--remove-label", label]);
+      await labelMutation({
+        what: `remove ${label} from #${n}`,
+        cli: () => gh(["issue", "edit", String(n), "-R", repo, "--remove-label", label]),
+        // 라벨 이름은 `factory:planned`처럼 콜론을 품는다 — 경로 세그먼트이므로 인코딩해서 보낸다.
+        rest: () => gh(["api", "-X", "DELETE", `repos/${repo}/issues/${n}/labels/${encodeURIComponent(label)}`]),
+      });
     },
-    /** factory 상태 라벨을 정확히 하나로 맞춘다. */
+    /**
+     * factory 상태 라벨을 정확히 하나로 맞춘다 — **먼저 붙이고 나중에 뗀다**(ADR-020 KTB-30).
+     *
+     * 예전에는 remove+add를 한 번의 `gh issue edit`으로 보냈다. 그 호출이 중간에 실패하면 남는 것은
+     * **상태 라벨이 0개인 이슈**이고, 그건 이 공장에서 유일하게 **아무도 보지 못하는** 상태다
+     * (`labeled` 이벤트 없음 · 모든 sweeper 팔이 상태 라벨로 검색 · `factory status`에도 안 뜬다).
+     * 순서를 뒤집으면 같은 사고의 최악이 "상태 라벨 2개"가 된다 — 그건 sweeper의 라벨-셋 복구 팔이
+     * 이미 보고 있고(KTB-18), 이제 최신 전이의 `to`를 남기는 쪽으로 고친다.
+     *
+     * 쓴 뒤에 **한 번 읽어 확인한다**: 두 호출이 다 exit 0이어도 GitHub이 조용히 흘린 적이 있다.
+     * 없으면 한 번 더 붙이고 `verify: "repaired"`로 알린다(전이 코멘트에 한 줄로 남는다).
+     * 읽기 자체가 실패하면 스왑을 되돌리지 않는다 — 확인 못 한 것이지 실패한 것이 아니다(`unverified`).
+     */
     async setFactoryLabel(n, label) {
-      const current = (await this.issue(n)).labels.filter((l) => STATES.has(l) && l !== label);
-      const args = ["issue", "edit", String(n), "-R", repo, ...current.flatMap((l) => ["--remove-label", l]), "--add-label", label];
-      await gh(args);
+      const before = (await this.issue(n)).labels;
+      const stale = before.filter((l) => STATES.has(l) && l !== label);
+      if (!before.includes(label)) await this.addLabels(n, [label]);
+      for (const l of stale) await this.removeLabel(n, l);
+      let after;
+      try { after = (await this.issue(n)).labels; }
+      catch { return { label, removed: stale, verify: "unverified" }; }
+      if (after.includes(label)) return { label, removed: stale, verify: "ok" };
+      await this.addLabels(n, [label]);
+      return { label, removed: stale, verify: "repaired" };
     },
     /**
      * tier 라벨을 정확히 하나로 맞춘다(KTB-9). `setFactoryLabel`을 쓸 수 없다 — 그건 STATES만 보고
-     * tier는 상태와 직교하므로, 그 함수를 태우면 상태 라벨이 떨어져 나간다. 한 호출로 끝낸다
-     * (`gh issue edit`은 remove/add를 한 번에 받는다).
+     * tier는 상태와 직교하므로, 그 함수를 태우면 상태 라벨이 떨어져 나간다. 상태 라벨과 같은 이유로
+     * add-first다(KTB-30): 부분 실패가 "tier 0개"가 아니라 "tier 2개"로 남아야 복구할 수 있다.
      */
     async setTierLabel(n, label) {
-      const stale = (await this.issue(n)).labels.filter((l) => TIER_LABELS.has(l) && l !== label);
-      await gh(["issue", "edit", String(n), "-R", repo, ...stale.flatMap((l) => ["--remove-label", l]), "--add-label", label]);
+      const before = (await this.issue(n)).labels;
+      const stale = before.filter((l) => TIER_LABELS.has(l) && l !== label);
+      if (!before.includes(label)) await this.addLabels(n, [label]);
+      for (const l of stale) await this.removeLabel(n, l);
     },
     async prChecks(pr) {
       return JSON.parse(await gh(["pr", "checks", String(pr), "-R", repo, "--json", "name,state,bucket"]));
@@ -111,8 +391,30 @@ export function makeGh({ run, repo }) {
       // --input stdin JSON avoids -f treating a leading "@" in body as a file reference
       await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${commentId}`, "--input", "-"], { input: JSON.stringify({ body }) });
     },
-    async searchIssues(label) {
-      return JSON.parse(await gh(["issue", "list", "-R", repo, "--label", label, "--state", "open", "--limit", "200", "--json", "number,title,updatedAt"]));
+    /**
+     * 이 라벨이 붙은 이슈들. 기본은 **열린 것만** — sweeper의 모든 팔과 back-pressure가 묻는 것은
+     * "지금 파이프라인 위에 있는 이슈"이기 때문이다.
+     *
+     * KTB-46: `state: "all"`이 하나 필요해졌다. 사람이 보호 경로 PR을 머지할 때 그 PR 본문의
+     * `Closes #<n>`이 실제로 걸리면 이슈는 **`factory:needs-human` 라벨을 그대로 단 채 닫힌다** —
+     * 라벨은 상태를 말하는데 그 상태를 아무도 다시 보지 않는 자리다. 그 이슈를 `factory:merged`로
+     * 잇는 팔(`sweepHumanMerged`)은 닫힌 것도 봐야 한다. 기본값은 건드리지 않으므로 기존 호출자의
+     * 인자 한 글자도 바뀌지 않는다.
+     *
+     * r3 should_fix 2 — 그런데 `--state all`은 **후보 풀에 바닥이 없다**: 열린 needs-human은 몇 개뿐이지만
+     * 닫힌 것은 저장소의 수명 내내 쌓인다. `gh issue list`는 생성 역순으로 답하므로, 그 라벨을 한 번이라도
+     * 달았던 이슈가 200개를 넘는 순간 **번호가 낮은 이슈는 페이지에서 떨어진다** — 방금 needs-human이
+     * 됐고 방금 사람이 머지한 그 이슈가, 아무 소리 없이. `sort: "updated-desc"`는 정렬을 API 쪽으로
+     * 옮겨 그 200개가 "가장 최근에 움직인 200개"가 되게 한다. 정렬 수식어는 `--search`로만 갈 수 있어
+     * 그때는 `--label`도 검색 문법(`label:"…"`)으로 옮긴다.
+     */
+    async searchIssues(label, { state = "open", sort = null } = {}) {
+      // 정렬을 쓰는 쪽(사람-머지 반영 팔)만 `state`도 받는다 — 그 팔은 닫힌 이슈까지 보므로 "열려
+      // 있는가"가 후보를 자르는 기준의 절반이다(r5 should_fix 2). 기본 호출은 바이트 그대로다.
+      const args = sort
+        ? ["issue", "list", "-R", repo, "--search", `label:"${label}" sort:${sort}`, "--state", state, "--limit", "200", "--json", "number,title,updatedAt,state"]
+        : ["issue", "list", "-R", repo, "--label", label, "--state", state, "--limit", "200", "--json", "number,title,updatedAt"];
+      return JSON.parse(await gh(args));
     },
     /**
      * 워크플로를 손으로 띄운다(KTB-8). 라벨은 이미 목적 상태에 있어 `labeled` 이벤트를 다시 만들 수
@@ -122,10 +424,81 @@ export function makeGh({ run, repo }) {
     async dispatchWorkflow(workflow, inputs = {}) {
       await gh(["workflow", "run", workflow, "-R", repo, ...Object.entries(inputs).flatMap(([k, v]) => ["-f", `${k}=${v}`])]);
     },
+    /**
+     * KTB-44 — **어떤 커밋이 이 경로를 마지막으로 바꿨는가**(기본 브랜치 기준). 리허설의 폴백
+     * commit status는 브랜치 head가 아니라 그 커밋에 붙는다: head는 무관한 머지마다 움직여서
+     * 기록이 첫 머지에 고아가 되지만, 지문 파일을 건드린 커밋은 지문이 바뀔 때만 바뀐다.
+     * `?path=`는 경로를 하나만 받으므로 호출자가 경로마다 부르고 더 새것을 고른다.
+     */
+    async commitsForPath(branch, path, perPage = 1) {
+      const j = JSON.parse(await gh(["api", `repos/${repo}/commits?sha=${encodeURIComponent(branch)}&path=${encodeURIComponent(path)}&per_page=${perPage}`]));
+      return (j || []).map((c) => ({ sha: c.sha, date: c.commit?.committer?.date ?? c.commit?.author?.date ?? null }));
+    },
+    /**
+     * KTB-44 — `factory rehearse`가 자기 dispatch가 만든 런을 찾는다. 최신순이고, `createdAt`으로
+     * "내가 부른 그 런"을 가른다(dispatch는 런 id를 돌려주지 않는다 — GitHub API의 한계).
+     */
+    async workflowRuns(workflow, limit = 10) {
+      return JSON.parse(await gh(["run", "list", "--workflow", workflow, "-R", repo, "--limit", String(limit), "--json", "databaseId,status,conclusion,createdAt,event"]));
+    },
+    /** 그 런이 올린 판정 표(`rehearsal.json`)를 로컬로 가져온다. */
+    async downloadRunArtifact(runId, name, dir) {
+      await gh(["run", "download", String(runId), "-R", repo, "-n", name, "-D", dir]);
+    },
+    /**
+     * ── Feedback loop Task 3 — **다른 저장소**의 개선 이슈를 열거나 거기에 증거를 덧붙인다(spec §7) ──
+     *
+     * 이 어댑터 안의 유일한 교차 저장소 쓰기다. 모든 호출에 `-R <repo>`가 붙는다 — 이 함수는
+     * `makeGh`가 묶고 있는 저장소를 **쓰지 않는다**(그 저장소는 발견이 난 곳이고, 이 이슈가 갈 곳은
+     * KTB다). 권한은 러너의 `FACTORY_BOT_TOKEN`이 쥔다(소유자가 상류 저장소에 `issues:write`를 준다).
+     *
+     * **문법은 한 글자도 모른다**: 지문으로 검색만 하고, 맞는 본문을 고르는 일(`match`)·새 이슈의
+     * 제목/본문/라벨을 만드는 일(`render`)·기존 본문에 증거를 덧붙이는 일(`append`)은 전부 호출자가
+     * 넘긴 함수다(`lib/feedback/upstream-issue.js`가 그 문법의 유일한 출처다). 그래야 쓰는 쪽과 읽는
+     * 쪽이 갈라져 같은 원인으로 이슈가 무한히 쌓이는 일이 없다.
+     *
+     * 검색은 `<fingerprint> in:body` + `--state open`이다. 닫힌 이슈는 **다시 열지 않는다**: 사람이
+     * "고쳤다"고 닫은 원인이 다시 나타났다면 그것은 같은 이슈의 재개가 아니라 **회귀**이고, 새 이슈로
+     * 열려야 사람이 그 사실을 본다. `append`가 본문을 바꾸지 않으면(같은 목격이 이미 실려 있으면)
+     * 편집 호출 자체를 보내지 않는다 — 같은 머지를 두 번 돌아도 상류에 아무 일도 일어나지 않는다.
+     */
+    async upstreamIssue({ repo: target, fingerprint, render, append, match, limit = 50 }) {
+      if (!target) throw new Error("gh.upstreamIssue: no upstream repo — [factory].upstream must name owner/repo");
+      const j = JSON.parse(await gh([
+        "issue", "list", "-R", target, "--search", `${fingerprint} in:body`,
+        "--state", "open", "--limit", String(limit), "--json", "number,body",
+      ]));
+      const found = (j || []).find((i) => match(String(i.body ?? "")));
+      if (found) {
+        const before = String(found.body ?? "");
+        const next = append(before);
+        if (next === before) return { issue: found.number, created: false, appended: false };
+        await gh(["issue", "edit", String(found.number), "-R", target, "--body-file", "-"], { input: next });
+        return { issue: found.number, created: false, appended: true };
+      }
+      const { title, body, labels = [] } = render();
+      const out = await gh(["issue", "create", "-R", target, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });
+      const m = /\/issues\/(\d+)/.exec(out);
+      return { issue: m ? Number(m[1]) : null, created: true, appended: false };
+    },
+    /**
+     * **이 저장소** 이슈의 본문을 통째로 갈아 끼운다(stdin — 본문이 argv에 실리지 않는다).
+     * 쓰는 곳은 하나다: 이미 열려 있는 `factory:harness` 이슈의 표에 빠진 줄을 덧붙이는 자리
+     * (`appendHarnessEntries`, T3 리뷰 SF-2). 교차 저장소 판은 따로 있다(`upstreamIssue`).
+     */
+    async editIssueBody(n, body) {
+      await gh(["issue", "edit", String(n), "-R", repo, "--body-file", "-"], { input: body });
+    },
     async createIssue({ title, body, labels = [] }) {
       const out = await gh(["issue", "create", "-R", repo, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });
       const m = /\/issues\/(\d+)/.exec(out); return m ? Number(m[1]) : null;
     },
+    /**
+     * 닫힌 이슈를 다시 연다. 쓰는 곳은 하나다: 건강 잡의 **오래 사는 보고서 이슈**(Task 4). 그 자리가
+     * 닫혀 있다고 새 이슈를 열면 라우팅 영수증 마커가 앵커를 잃고 같은 지문이 매주 상류에 새 이슈를
+     * 연다 — 대화의 자리는 옮기지 않는다.
+     */
+    async reopenIssue(n) { await gh(["issue", "reopen", String(n), "-R", repo]); },
     // gh variable get exits non-zero for a missing variable — go through run() directly, not the gh() helper that throws on non-zero.
     async getVariable(name) { const r = await run("gh", ["variable", "get", name, "-R", repo]); return r.code === 0 ? r.stdout.trim() : null; },
 
@@ -135,8 +508,42 @@ export function makeGh({ run, repo }) {
       const body = { state, context, description: (description || "").slice(0, 140), target_url: targetUrl };
       await gh(["api", "-X", "POST", `repos/${repo}/statuses/${sha}`, "--input", "-"], { input: JSON.stringify(body) });
     },
+    /**
+     * 외부 감사 2026-09-14 H1b — **누가 이 상태를 올렸는가.** `gh pr checks`도 combined status API도
+     * 게시자를 싣지 않는다(`allChecksGreen`이 게시자를 검증하지 못한 이유가 그것이다). 목록 API
+     * `GET /repos/{repo}/commits/{sha}/statuses`만이 항목마다 `creator`를 준다 — 그리고 **최신순**으로
+     * 답하므로, 같은 context가 여러 번 게시됐으면 첫 항목이 지금 유효한 상태다.
+     *
+     * 조회 대상 sha가 곧 "이 상태가 붙은 커밋"이다 — 호출자가 PR head로 물으면 target sha 검사는
+     * 구조적으로 참이 된다(따로 비교할 필드가 없다). 실패는 삼키지 않는다: 머지 스테이지가
+     * "확인 못 함"으로 받아 fail closed 한다.
+     */
+    async commitStatuses(sha) {
+      const j = JSON.parse(await gh(["api", `repos/${repo}/commits/${sha}/statuses?per_page=100`, "--paginate", "--slurp"])).flat();
+      // `description`은 KTB-44가 쓴다: 저장소 변수를 쓸 수 없는(admin이 필요한) 저장소에서 리허설의
+      // 해시는 이 필드에 실려 온다(`factory/rehearsal` context).
+      return j.map((s) => ({ context: s.context, state: s.state, description: s.description ?? null, creatorLogin: s.creator?.login ?? null, createdAt: s.created_at }));
+    },
     async listSecrets() {
       return JSON.parse(await gh(["secret", "list", "-R", repo, "--json", "name"])).map((s) => s.name);
+    },
+    /**
+     * ADR-021 r2 (KTB-33 finding MF-A) — **환경 시크릿은 저장소 시크릿과 다른 목록이다.**
+     * `listSecrets()`는 `gh secret list -R`(저장소 시크릿)만 보는데, 소유자 체크리스트는 정확히
+     * `FACTORY_MERGE_TOKEN`을 `factory-merge` **환경** 시크릿으로 옮기고 저장소 사본을 지우라고
+     * 시킨다(ADR-021 r1의 위험 문구가 이유였다) — 그 권고를 따른 저장소는 `listSecrets()`만 보는
+     * 판정에서 영원히 단일 배우 모드로 보이고, 재부트스트랩은 코드 오너 요건이 빠진 보호 규칙을
+     * 덮어쓴다.
+     *
+     * `getBranchProtection`·`getVariable`과 같은 패턴이다: gh가 0이 아닌 종료 코드로 답하면(환경이
+     * 아직 없거나 이 플랜이 환경을 지원하지 않는 경우) "확인 못 함"이 아니라 "시크릿이 없다"이므로
+     * throw하지 않고 빈 배열로 떨어뜨린다. stdout이 JSON으로 파싱되지 않아도(빈 문자열 등) 마찬가지다.
+     */
+    async listEnvSecrets(envName) {
+      const r = await run("gh", ["secret", "list", "--env", envName, "-R", repo, "--json", "name"]);
+      if (r.code !== 0) return [];
+      try { return JSON.parse(r.stdout).map((s) => s.name); }
+      catch { return []; }
     },
     async listLabels() {
       return JSON.parse(await gh(["label", "list", "-R", repo, "--json", "name", "--limit", "200"])).map((l) => l.name);
@@ -173,6 +580,78 @@ export function makeGh({ run, repo }) {
     async prReady(pr) {
       await gh(["pr", "ready", String(pr), "-R", repo]);
     },
+    /**
+     * ADR-021 — 두 배우 모드의 승인 한 번. **머지 배우의 토큰으로만** 의미가 있다: PR을 연 계정
+     * (에이전트 배우)이 이걸 부르면 GitHub이 422(`Can not approve your own pull request`)로 거부하고,
+     * 그 거부가 곧 이 설계가 증명하려는 사실이다 — 에이전트가 쥔 토큰으로는 승인도, 따라서 머지도
+     * 할 수 없다. 실패는 삼키지 않는다(호출자가 `needs-human`으로 올린다).
+     */
+    async approvePr(pr, body = "factory: approved by the merge actor (two-actor mode, ADR-021)") {
+      await gh(["pr", "review", String(pr), "-R", repo, "--approve", "--body-file", "-"], { input: body });
+    },
+    /**
+     * ADR-021 doctor — **지금 이 토큰이 누구인가**. 값은 절대 찍지 않고 로그인 이름만 돌려준다.
+     * `gh api user`는 PAT이 붙은 계정을 그대로 말한다(GitHub App 설치 토큰이면 `<app>[bot]`).
+     */
+    async viewerLogin() {
+      return JSON.parse(await gh(["api", "user"])).login;
+    },
+    /**
+     * T7 — **이 토큰이 붙은 계정의 종류**(`User`|`Organization`|`Bot`). 값(토큰)은 절대 읽지도 찍지도
+     * 않는다; 묻는 것은 "팩토리가 사람 계정으로 도는가" 하나다. 사람 계정이면 그 계정이 적은 모든
+     * 코멘트가 팩토리의 코멘트와 구별되지 않아 `human-decision:v1` 귀속이 통째로 불가능해진다.
+     * 빈 응답은 `null`("모른다")이다 — 빈 문자열을 종류로 읽으면 거짓 판정이 된다.
+     */
+    async viewerType() {
+      return (await gh(["api", "user", "--jq", ".type"])).trim() || null;
+    },
+    /**
+     * ADR-021 r1 MF-2 a — **지금 이 토큰이 어떤 스코프를 쥐고 있는가.** classic PAT은 응답 헤더
+     * `X-OAuth-Scopes`로 자기 스코프를 말한다(`gh api -i`가 헤더를 함께 찍는다). 값 자체는 절대
+     * 읽지 않는다 — 묻는 것은 "이 토큰에 `workflow`가 붙어 있는가" 하나다.
+     *
+     * `null`은 "모른다"가 아니라 **"classic PAT이 아니다"**의 신호다(fine-grained PAT·GitHub App
+     * 설치 토큰·GITHUB_TOKEN에는 이 헤더가 없다). 그 토큰들에는 classic `workflow` 스코프라는
+     * 개념 자체가 없으므로 doctor는 그 경우를 통과로 읽는다 — 없는 위험을 경보로 만들지 않는다.
+     */
+    async viewerScopes() {
+      const r = await run("gh", ["api", "-i", "user"]);
+      if (r.code !== 0) throw new Error(`gh api -i user failed (${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);
+      // `\s`는 `\r`·`\n`도 먹는다 — 헤더가 비어 있으면(`x-oauth-scopes: `) 그 다음 빈 줄을 건너뛰고
+      // **본문의 첫 줄**을 스코프로 읽는다(= `{}`가 스코프가 된다). 줄 안에서만 본다.
+      const m = /^x-oauth-scopes:[^\S\r\n]*([^\r\n]*)$/im.exec(r.stdout);
+      if (!m) return null;
+      return m[1].split(",").map((s) => s.trim()).filter(Boolean);
+    },
+    /**
+     * ADR-021 r1 MF-2 b — `factory-merge` 환경을 만든다(멱등: 같은 body의 PUT을 반복해도 같은 결과).
+     * `deployment_branch_policy.protected_branches: true`가 이 환경의 시크릿을 **보호된 브랜치에서
+     * 시작한 잡에만** 준다 — 에이전트의 `claude/fq-*` 브랜치에서 도는 워크플로는 빈 문자열을 본다.
+     */
+    async putEnvironment(name, body) {
+      await gh(["api", "-X", "PUT", `repos/${repo}/environments/${name}`, "--input", "-"], { input: JSON.stringify(body) });
+    },
+    /**
+     * ADR-021 doctor — 그 계정이 이 저장소에 대해 가진 권한(`admin`|`maintain`|`write`|`triage`|`read`).
+     * 두 배우 모드에서 에이전트 배우가 `admin`이면 branch protection의 승인 요건을 **스스로 바꿀 수**
+     * 있으므로 두 배우 모드는 이름만 남는다 — doctor가 FAIL로 세운다.
+     */
+    /**
+     * **다른** 저장소의 메타데이터 — 크로스-레포 라우팅의 대상(`[factory].upstream`)을 묻는 자리다.
+     * `gh api repos/<owner>/<name>`은 **지금 이 토큰이** 그 저장소에 대해 갖는 권한을 `permissions`로
+     * 함께 답하므로, 이슈를 **열어 보지 않고** "쓸 수 있는가"를 판정할 수 있다(진단이 상류 저장소에
+     * 쓰레기 이슈를 남기면 안 된다). 토큰 값은 읽지도 찍지도 않는다.
+     *
+     * 404는 **없는 저장소**와 **이 토큰에 안 보이는 저장소**를 구별하지 않는다 — GitHub이 일부러
+     * 그렇게 답한다. 그래서 호출자는 두 경우를 한 문장으로 말해야 한다(`repo`는 `owner/name`).
+     */
+    async repoInfo(nameWithOwner) {
+      const j = JSON.parse(await gh(["api", `repos/${nameWithOwner}`]));
+      return { fullName: j.full_name ?? nameWithOwner, private: Boolean(j.private), permissions: j.permissions ?? null };
+    },
+    async collaboratorPermission(login) {
+      return JSON.parse(await gh(["api", `repos/${repo}/collaborators/${login}/permission`])).permission;
+    },
     async mergePr(pr, { method = "squash", deleteBranch = true } = {}) {
       const args = ["pr", "merge", String(pr), "-R", repo, `--${method}`];
       if (deleteBranch) args.push("--delete-branch");
@@ -184,9 +663,11 @@ export function makeGh({ run, repo }) {
       await gh(args);
     },
     async issueList({ labels = [], state = "open", limit = 200 } = {}) {
-      const args = ["issue", "list", "-R", repo, "--state", state, "--limit", String(limit), ...labels.flatMap((l) => ["--label", l]), "--json", "number,title,labels,updatedAt,closedAt"];
+      // body까지 받는다(ADR-020 KTB-23 fix) — `factory:harness` 이슈의 dedupe 키는 제목이 아니라
+      // 본문의 `<!-- factory-harness-request for=<n> -->` 마커다(제목은 사람이 고쳐도 되는 줄이다).
+      const args = ["issue", "list", "-R", repo, "--state", state, "--limit", String(limit), ...labels.flatMap((l) => ["--label", l]), "--json", "number,title,body,labels,updatedAt,closedAt"];
       const j = JSON.parse(await gh(args));
-      return j.map((i) => ({ number: i.number, title: i.title, labels: (i.labels || []).map((l) => l.name), updatedAt: i.updatedAt, closedAt: i.closedAt }));
+      return j.map((i) => ({ number: i.number, title: i.title, body: i.body ?? "", labels: (i.labels || []).map((l) => l.name), updatedAt: i.updatedAt, closedAt: i.closedAt }));
     },
     async prList({ label, state = "open" } = {}) {
       const args = ["pr", "list", "-R", repo, "--state", state];

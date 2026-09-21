@@ -50,6 +50,18 @@ esac
 c=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
 [ -n "$c" ] || exit 0
 
+# ── 외부 감사 H1a: 판정 전에 한 문자열로 정규화한다(block-dangerous.sh와 같은 규칙, 같은 순서) ──
+# 이 훅의 규칙도 전부 줄 단위였다 — `rm \⏎-rf src`는 `rm \`(대상 없음)와 `-rf src`(`$T`가 `-`를
+# 대상에서 제외한다)로 쪼개져 둘 다 맞지 않았다. 감사는 block-dangerous.sh만 재현했지만 결함은
+# 한 몸이다: 쓰기 금지 역할에게 이 훅이 **유일한** 셸 경계다.
+# 1) `\`+개행 → 공백(이음줄), 2) 남은 개행 → `;`(명령 구분자 — `$CMD`가 이미 그렇게 읽는다),
+# 3) 탭 → 공백, 공백 런 → 하나.
+c=${c//$'\r'/}
+c=${c//\\$'\n'/ }
+c=${c//$'\n'/;}
+c=${c//$'\t'/ }
+while [ "$c" != "${c//  / }" ]; do c=${c//  / }; done
+
 deny() { echo "factory: this role must not write (bash: $1)" >&2; exit 2; }
 
 ere() { printf '%s' "$1" | sed -E 's/[][^$.*+?(){}|\\]/\\&/g'; }
@@ -61,19 +73,47 @@ QA_RE='\.factory/out/qa/'
 projqa=""
 [ -n "$PROJ" ] && projqa="$(ere "$PROJ")/$QA_RE[^[:space:]\"]*|"
 allow="(\./)?($projqa$esc/[^[:space:]\"]*|/tmp/[^[:space:]\"]*|/private/tmp/[^[:space:]\"]*|\\\$\{?TMPDIR\}?/[^[:space:]\"]*|$QA_RE[^[:space:]\"]*|/dev/(null|stdout|stderr))"
-# `..`가 허용 접두 뒤에 붙으면 카브아웃을 통째로 끈다(block-dangerous.sh와 같은 규칙).
-w="$c"
-printf '%s' "$c" | grep -Eq "($esc|/tmp|/private/tmp|$QA_RE)[^[:space:]\"]*\.\." || w=$(printf '%s' "$c" | sed -E "s#$allow##g")
 
 # 허용되지 않은 대상이 한 글자라도 남아 있는가. 앞의 `-`는 플래그이므로 대상이 아니다.
 T='["]?[^-[:space:]"&|;<>]'
-# 명령 위치(줄 시작 또는 `;`/`&`/`|` 뒤)에만 걸리는 접두사 — `grep -rn mkdir src/`의 인자 `mkdir`은 제외된다.
-CMD='(^|[;&|][[:space:]]*)'
+# 명령 위치에만 걸리는 접두사 — `grep -rn mkdir src/`의 인자 `mkdir`은 제외된다.
+#
+# ADR-020 최종 리뷰 MF-3 — "명령 위치"는 줄 시작과 `;`/`&`/`|` 뒤만이 아니다. **명령 치환**(`$(…)`,
+# 백틱), **할당**(`out=$(…)`), **그룹**(`{ … }`) 안도 전부 명령 위치다. r1의 클래스에는 `(`도 백틱도
+# 없어서 `x=$(rm -rf src)`·`` `git push` ``가 이 훅의 **모든** 규칙을 그대로 걸어 나갔다
+# (block-dangerous.sh의 같은 결함과 한 몸이다 — 둘은 같은 우회에 같이 열려 있었다).
+# `[[:space:]]*`는 그대로 둔다: `; rm x`처럼 구분자 뒤 공백을 흡수해야 한다.
+# 0452b5b **재리뷰 #1**: 경계 뒤의 **백슬래시**(`\rm -rf src`, `\git push origin HEAD`)도 흡수한다 —
+# bash는 alias 확장만 끄고 동사를 그대로 실행하는데 `\`가 클래스에 없어 한 글자로 빠져나갔다.
+# 따옴표는 넣지 않는다(`grep -rn mkdir src/`류 오탐) — 따옴표 뒤의 동사는 아래 래퍼 패스가 맡는다.
+CMD='(^|[;&|(`={][[:space:]]*)\\?'
+# **뒤쪽** 경계도 같이 넓어져야 한다: `$(docker compose down)`의 `down` 뒤는 공백도 줄 끝도 아닌 `)`다.
+# 앞만 고치면 앵커 하나를 고치고 다른 앵커에 같은 구멍을 남긴다. `$ZE`는 값이 `=`로 붙는 플래그까지 받는다.
+Z='([;&|)`}[:space:]]|$)'
+ZE='([;&|)`}=[:space:]]|$)'
 FLAGS='([[:space:]]+-[^[:space:];&|]+)*'
 # 짧은 옵션은 값을 **붙여** 받는다: `curl -osrc/a.js`, `curl -sLosrc/a.js`, `cp -tsrc/sub`.
 # r1의 규칙들은 플래그 뭉치 뒤에 공백이나 `=`를 요구해서 이 모양을 통째로 놓쳤다(KTB-13 r2).
 # 뭉치 뒤에 이걸 붙이면 "플래그 글자가 뭉치 안에 있다"만으로 판정이 선다 — 값이 붙어 있든 아니든.
 ATTACHED='[a-zA-Z]*[^[:space:];&|]*'
+
+# 규칙 표는 **하나의 함수** 안에 있다 — 아래 래퍼 패스(재리뷰 #4)가 같은 표를 원본 명령과 "따옴표를
+# 벗긴 사본"에 두 번 돌린다. 표를 두 벌 유지하면 반드시 한쪽이 뒤처진다. `$1`이 판정 대상이고,
+# 전역 `$CMD`가 그 패스의 명령 위치 클래스다.
+scan() {
+  local c="$1" w
+# `..`가 허용 접두 뒤에 붙으면 카브아웃을 통째로 끈다(block-dangerous.sh와 같은 규칙).
+w="$c"
+printf '%s' "$c" | grep -Eq "($esc|/tmp|/private/tmp|$QA_RE)[^[:space:]\"]*\.\." || w=$(printf '%s' "$c" | sed -E "s#$allow##g")
+
+# ── ADR-024 / KTB-42 — qa 증거 **매니페스트**는 도구가 쓴다(그 하나만 예외에서 다시 뺀다) ─────────
+# `.factory/out/qa/`는 qa가 쓸 수 있어야 하지만(그것이 이 카브아웃의 이유다), 그 안의 `manifest.json`으로
+# 가는 합법 경로는 `node .factory/bin/qa-evidence.js`의 **자식 프로세스**뿐이다 — 리다이렉션·tee·cp로
+# 그 파일을 만드는 것은 도구를 건너뛰고 계약을 손으로 지어내는 모양이다. 진위 경계는 아니다(qa는 여전히
+# 도구로 무엇이든 남길 수 있다): 가장 값싼 철자 하나를 닫아 비용과 가시성을 올릴 뿐이다.
+MANIFEST_RE="$QA_RE[^[:space:]\"']*manifest\.json"
+echo "$c" | grep -Eq "(>>?\|?[[:space:]]*|${CMD}tee$FLAGS[[:space:]]+)[\"']?[^[:space:]\"']*$MANIFEST_RE" && deny "writing the qa evidence manifest directly — it is written by \`node .factory/bin/qa-evidence.js record|attach|na\` (ADR-024)"
+echo "$c" | grep -Eq "${CMD}(cp|mv|install)[[:space:]][^;&|]*$MANIFEST_RE" && deny "copying onto the qa evidence manifest — it is written by \`node .factory/bin/qa-evidence.js\` (ADR-024)"
 
 # `>|`는 noclobber를 무시하는 리다이렉션이다 — `>`/`>>`와 같은 쓰기이므로 같이 잡는다.
 echo "$w" | grep -Eq "(^|[^-=<])>>?\|?[[:space:]]*$T" && deny "redirection to a path outside /tmp, \$TMPDIR or $QA_DIR"
@@ -82,13 +122,13 @@ echo "$w" | grep -Eq "${CMD}tee$FLAGS[[:space:]]+$T" && deny "tee"
 # $CMD가 **명령 위치**만 보므로 `npm`의 인자인 `install`은 대상이 아니다.
 echo "$w" | grep -Eq "${CMD}(rm|rmdir|mkdir|touch|truncate|ln|chmod|chown|dd|install)$FLAGS[[:space:]]+$T" && deny "file mutation"
 # cp/mv는 **목적지**(세그먼트의 마지막 토큰)만 본다 — 원본이 저장소 안이어도 목적지가 /tmp면 읽기에 가깝다.
-if echo "$c" | grep -Eq "${CMD}(cp|mv)([[:space:]]|$)"; then
+if echo "$c" | grep -Eq "${CMD}(cp|mv)${Z}"; then
   echo "$c" | grep -Eq "${CMD}(cp|mv)[[:space:]][^;&|]*[[:space:]][\"']?$allow[[:space:]]*($|[;&|])" || deny "cp/mv"
   # `-t`/`--target-directory`는 목적지를 마지막 토큰이 **아닌** 곳에 둔다 — 위 규칙은 `cp -t src /tmp/a.js`를
   # "목적지가 /tmp"로 읽고 통과시켰다(KTB-13 r1). 이 플래그가 보이면 목적지를 신뢰할 수 없으므로 그냥 막는다.
   # 짧은 옵션은 값을 **붙여** 쓸 수 있다(`cp -tsrc/sub a`) — 그래서 뭉치 뒤에 공백/`=`를 요구하지 않고
   # 플래그 글자가 뭉치 안에 있다는 사실로 판정한다(`$ATTACHED`, KTB-13 r2).
-  echo "$c" | grep -Eq "${CMD}(cp|mv)([[:space:]]+[^;&|]*)?[[:space:]](-[a-zA-Z]*t$ATTACHED|--target-directory)([[:space:]=]|$)" && deny "cp/mv --target-directory"
+  echo "$c" | grep -Eq "${CMD}(cp|mv)([[:space:]]+[^;&|]*)?[[:space:]](-[a-zA-Z]*t$ATTACHED|--target-directory)${ZE}" && deny "cp/mv --target-directory"
 fi
 # `node -e`/`-p`/`--eval`/`--print`는 fs를 직접 부를 수 있는 **인라인 스크립트**다 — sed -i·perl -i·python -c와
 # 같은 대접을 한다(대상이 어디든 차단). 저장소 스크립트를 **실행**하는 `node .factory/bin/gates.js`는 그대로다:
@@ -99,23 +139,56 @@ fi
 # 흡수하고, 그 뒤에 공백/끝이 오는지만 본다(그래야 `--experimental-vm-modules`처럼 우연히 `-e`를
 # 품은 긴 플래그가 오탐되지 않는다 — 그 부분 문자열 앞에 필수 공백이 없으므로 애초에 매치가
 # 시작될 수 없다).
-echo "$c" | grep -Eq "${CMD}node[0-9.]*[[:space:]]+([^;&|]*[[:space:]])?(-[a-zA-Z]*[ep][a-zA-Z]*[^[:space:];&|]*|--eval[^[:space:];&|]*|--print[^[:space:];&|]*)([[:space:]]|$)" && deny "node inline script (-e/-p/--eval/--print)"
+echo "$c" | grep -Eq "${CMD}node[0-9.]*[[:space:]]+([^;&|]*[[:space:]])?(-[a-zA-Z]*[ep][a-zA-Z]*[^[:space:];&|]*|--eval[^[:space:];&|]*|--print[^[:space:];&|]*)${Z}" && deny "node inline script (-e/-p/--eval/--print)"
 # 다운로드는 쓰기다. curl은 출력 플래그가 있을 때만(플래그가 없으면 stdout — 읽기다), wget은 **언제나**:
 # wget은 플래그가 없어도 URL의 마지막 세그먼트로 cwd에 파일을 만든다.
-echo "$c" | grep -Eq "${CMD}curl([[:space:]]+[^;&|]*)?[[:space:]](-[a-zA-Z]*[oO]$ATTACHED|--output|--output-dir|--remote-name)([[:space:]=]|$)" && deny "curl writing a file (-o/-O/--output)"
-echo "$c" | grep -Eq "${CMD}wget([[:space:]]|$)" && deny "wget (it writes into the cwd even without -O)"
+echo "$c" | grep -Eq "${CMD}curl([[:space:]]+[^;&|]*)?[[:space:]](-[a-zA-Z]*[oO]$ATTACHED|--output|--output-dir|--remote-name)${ZE}" && deny "curl writing a file (-o/-O/--output)"
+echo "$c" | grep -Eq "${CMD}wget${Z}" && deny "wget (it writes into the cwd even without -O)"
 # 제자리 편집·파이썬 파일 열기는 대상이 어디든 막는다. 쓰기 금지 역할에게 정당한 제자리 편집은 없고,
 # 임시 파일이 필요하면 /tmp로 리다이렉션하는 길이 이미 열려 있다.
 # KTB-15b: `-i`도 값을 붙여 받는다(`sed -i.bak …`, BSD/GNU 공통) — 뒤에 붙는 접미사가 문자가
 # 아니어도(`.bak`) 플래그 글자 'i'가 뭉치 안에 있다는 사실로 충분하다. GNU의 긴 옵션
 # `--in-place[=SUFFIX]`도 같은 일을 하므로 같이 잡는다.
-echo "$c" | grep -Eq "${CMD}sed[[:space:]]+[^;&|]*(-[a-zA-Z]*i[^[:space:];&|]*|--in-place(=[^[:space:];&|]*)?)([[:space:]]|$)" && deny "sed -i"
+echo "$c" | grep -Eq "${CMD}sed[[:space:]]+[^;&|]*(-[a-zA-Z]*i[^[:space:];&|]*|--in-place(=[^[:space:];&|]*)?)${Z}" && deny "sed -i"
 echo "$c" | grep -Eq "${CMD}perl[[:space:]]+-[a-zA-Z]*i[^;&|]*" && deny "perl -i"
 echo "$c" | grep -Eq "${CMD}python[0-9.]*[[:space:]]+[^;&|]*-c[^;&|]*open\(" && deny "python -c open(...)"
 # 트리·기록을 옮기는 git 서브커맨드. 읽기(diff/log/show/status/rev-parse/ls-files/blame/branch/merge-base)는 그대로.
-echo "$c" | grep -Eq "${CMD}git[[:space:]]+(commit|push|add|apply|am|checkout|switch|restore|reset|rm|mv|stash|clean|cherry-pick|revert|rebase|merge|tag|init|worktree|update-ref|notes)([[:space:]]|$)" && deny "git write subcommand"
+echo "$c" | grep -Eq "${CMD}git[[:space:]]+(commit|push|add|apply|am|checkout|switch|restore|reset|rm|mv|stash|clean|cherry-pick|revert|rebase|merge|tag|init|worktree|update-ref|notes)${Z}" && deny "git write subcommand"
 # `git config`는 읽기(--get*/--list/-l)만 허용한다 — 설정을 **쓰면** hooksPath·user·alias로 다른 훅을 우회할 수 있다.
-echo "$c" | grep -Eq "${CMD}git[[:space:]]+config([[:space:]]|$)" &&
-  ! echo "$c" | grep -Eq "${CMD}git[[:space:]]+config[^;&|]*(--get[a-z-]*|--list|-l)([[:space:]=]|$)" &&
+echo "$c" | grep -Eq "${CMD}git[[:space:]]+config${Z}" &&
+  ! echo "$c" | grep -Eq "${CMD}git[[:space:]]+config[^;&|]*(--get[a-z-]*|--list|-l)${ZE}" &&
   deny "git config write"
+
+# ── KTB-21: 읽기 전용 역할은 테스트 env를 세우거나 무너뜨릴 수 없다 ──────────────────────────────
+# 데모 #18: qa 리뷰어가 증거를 모으는 중 `docker compose down`으로 env를 내렸다 — 28분 뒤 review
+# 스테이지의 게이트가 죽은 env에 대고 돌아 4/4 승인인데도 `unit`이 `service "db" is not running`으로
+# RED였다. 읽기 전용 역할에게 env 상태를 바꿀 이유는 없다: `ps`·`logs`·`exec … psql` 같은 **점검**만
+# 정당하고, **시작(`up`)도 중지(`down`/`stop`/`rm`/`kill`/`restart`)도** 이 역할의 일이 아니다
+# (env를 세우는 것은 gates가 스스로 하는 일이다 — 아래 `gates.js` 재기동 참조).
+DOCKER_TEARDOWN_VERBS='(down|stop|rm|kill|restart)'
+echo "$c" | grep -Eq "${CMD}(docker[[:space:]]+compose|docker-compose)([[:space:]]+[^;&|]*)?[[:space:]]${DOCKER_TEARDOWN_VERBS}${Z}" && deny "docker compose down/stop/rm/kill/restart (read-only role must not change test-env state)"
+echo "$c" | grep -Eq "${CMD}(docker[[:space:]]+compose|docker-compose)([[:space:]]+[^;&|]*)?[[:space:]]up${Z}" && deny "docker compose up (read-only role must not change test-env state)"
+echo "$c" | grep -Eq "${CMD}docker[[:space:]]+${DOCKER_TEARDOWN_VERBS}${Z}" && deny "docker stop/rm/kill/restart (read-only role must not change test-env state)"
+echo "$c" | grep -Eq "${CMD}docker[[:space:]]+container[[:space:]]+(stop|rm|kill)${Z}" && deny "docker container stop/rm/kill (read-only role must not change test-env state)"
+}
+
+scan "$c"
+
+# ── 0452b5b 재리뷰 #4: 인터프리터 래퍼와 ANSI-C 인용 ────────────────────────────────────────────
+# `sh -c "rm -rf src"` · `eval "touch a"` · `$'rm' -rf src`는 동사가 명령줄에 그대로 있는데도 통과했다 —
+# 동사 앞 글자가 `"`/`'`라서다. 이 저장소의 allow는 `Bash(*)`이고 deny에 `sh`/`bash`/`eval`이 없으므로
+# (재리뷰가 확인했다) 이 훅이 유일한 층이다. `"`/`'`를 클래스에 넣는 대신 — 그러면 `grep -rn mkdir src/`
+# 류가 오탐이 된다 — **래퍼가 보일 때만** 따옴표를 지운 사본에 같은 표를 한 번 더 돌린다. 그 패스에서는
+# 페이로드 안의 동사가 평범한 토큰이 되므로 명령 위치 클래스에 **공백**과 (`$'rm'`→`$rm` 때문에) `$`를
+# 더한다. 런타임에 조립되는 동사(`x=$(printf "rm -rf src"); $x`)는 여전히 볼 수 없다 — 비목표다.
+WRAPPERS='((ba|z|da|k)?sh|eval|exec|source|\.)'
+wrap=0
+echo "$c" | grep -Eq "${CMD}${WRAPPERS}${Z}" && wrap=1
+case "$c" in *\$\'*|*\$\"*) wrap=1 ;; esac        # ANSI-C / 로케일 인용: $'rm' · $"rm"
+if [ "$wrap" = 1 ]; then
+  CMD='(^|[$;&|(`={[:space:]][[:space:]]*)\\?'
+  # `rm $'-rf'`처럼 동사 **뒤** 토큰이 ANSI-C 인용이면 `$-rf`가 남아 인접 검사가 깨진다 — 따옴표 앞의 `$`를
+  # 먼저 지운다(재리뷰 #5).
+  scan "$(printf '%s' "$c" | sed -E "s/\\\$([\"'])/\\1/g" | tr -d "\"'")"
+fi
 exit 0

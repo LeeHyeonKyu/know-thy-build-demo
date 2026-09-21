@@ -16,16 +16,18 @@ node  = "22"
 [commands]                       # all judged by exit code
 # 이 데모에는 린터가 없다(eslint 미설치). 게이트 자리를 비워 두면 `gates.required`가
 # MISCONFIGURED가 되므로, "항상 통과하는 명령"을 명시적으로 둔다 — 린터를 도입하면 이 두 줄만 바뀐다.
-lint       = "node -e 0"
+lint       = "for f in src/*.js test/*.js; do node --check \"$f\" || exit 1; done"   # audit P1-7: a real syntax gate (no linter in this demo)
 unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json"
 test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
 test_one   = "npx vitest run {file} -t {name}"   # classify-failure. Scripts quote {file}/{name} — do not add quotes here
-lint_file  = "node -e 0 {file}"                  # lint-touched.sh (logging only). {file}은 doctor가 요구하는 자리표시자 — 여기서는 무시되는 argv다
+lint_file  = "node --check {file}"
 
 [harness]
 maturity = "M1"                  # M0 | M1 | M2 — promotion is a factory:harness issue + human merge
 
 [factory]
+max_turns = 12
+upstream = "LeeHyeonKyu/know_thy_build"
 orchestration   = "workflow"     # workflow | agent
 required_checks = ["factory/gates", "factory/review", "factory/integrity"]
 
@@ -38,8 +40,8 @@ required_checks = ["factory/gates", "factory/review", "factory/integrity"]
 [gates]
 required = ["lint", "unit"]
 fast     = ["lint", "unit"]
-full     = ["lint", "unit"]
-deep     = ["lint", "unit"]
+full       = ["lint", "unit", "prove-test", "new-test-repeat"]   # audit H2: full adds the proof gates
+deep       = ["lint", "unit", "prove-test", "new-test-repeat"]
 
 [gates.thresholds]               # (protected)
 diff_coverage_pct       = 90
@@ -71,6 +73,7 @@ ready_timeout_sec = 90
 [test.fakes]
 
 [protected]                      # (protected)
+runner_only = ["docs/factory/runs/**"]   # audit batch-2: run records are runner-written evidence, sealed for agents
 # 빌드 설정 파일도 보호한다 — [commands]의 게이트 명령(lint/unit/test_files/…)이 전부 이 파일들을
 # 거쳐 해석되므로, 에이전트가 여기를 고치면 "게이트를 통과시키는" 가장 쉬운 길이 코드를 고치는 게
 # 아니라 판정 기준을 고치는 것이 된다(테스트 제외, 린트 규칙 해제, 의존성 교체).

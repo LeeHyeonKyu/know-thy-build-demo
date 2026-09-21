@@ -5,8 +5,42 @@
 
 export const NEEDS_HUMAN_LABEL = "factory:needs-human";
 
-export const TRANSITION_TO = /<!-- factory-transition:v1 from=(\S+) to=(\S+) by=(\S+) -->/;
+/**
+ * 네 번째 필드 `reason=`는 선택이다(r2 SF3): 요구사항 미달로 **라벨이 실제로 needs-human으로 옮겨진**
+ * 거부도 이제 이 마커를 단다(`reason=refused`) — 그것도 완료된 전이이기 때문이다. 옛 마커
+ * (`… by=script -->`)는 바이트 하나 안 바뀐 채 그대로 매치된다.
+ */
+export const TRANSITION_TO = /<!-- factory-transition:v1 from=(\S+) to=(\S+) by=(\S+)(?: reason=(\S+))? -->/;
 export const TRANSITION_REFUSED = /<!-- factory-transition-refused from=(\S+) to=(\S+) -->/;
+/**
+ * ADR-020 r2 (리뷰 (c)) — **"코멘트는 나갔는데 라벨은 못 옮겼다"의 기록.** 전이 코멘트가 스왑보다
+ * 먼저 나가는 이상(KTB-30 r1), 스왑이 통째로 실패하면 이슈에는 일어나지 않은 전이의 코멘트가 남는다.
+ * 그 한 줄은 사람에게도 거짓말이고(라벨은 그대로인데 "옮겼다"고 적혀 있다), 라운드 카운터에게도
+ * 거짓말이다(`countTransitionsTo`가 그것을 rework 한 번으로 센다 — K 예산을 태운다). 그래서 스왑이
+ * throw하면 그 자리에서 이 마커를 남긴다: 뒤따르는 이 마커가 앞의 전이 하나를 **무효로 만든다**.
+ */
+export const TRANSITION_FAILED = /<!-- factory-transition-failed:v1 from=(\S+) to=(\S+) -->/;
+export const transitionFailedMarker = ({ from, to }) => `<!-- factory-transition-failed:v1 from=${from} to=${to} -->`;
+/**
+ * 거부된 전이의 마커(위 `TRANSITION_REFUSED`가 읽는 바로 그 문자열). KTB-46까지 이 형식에는
+ * **생산자만 있고 생성자가 없었다** — `lib/transition.js`가 두 자리에서 템플릿 리터럴로 직접 쓰고,
+ * 그것을 읽는 쪽(sweeper의 사람-머지 반영 dedupe)은 같은 문자열을 손으로 베껴 왔다. 한쪽의 형식이
+ * 바뀌면 다른 쪽은 **테스트가 전부 초록인 채로** 아무것도 찾지 못한다. `transitionFailedMarker`와
+ * 같은 계약으로 맞춘다: 쓰는 쪽도 읽는 쪽도 이 함수 하나를 부른다.
+ */
+export const transitionRefusedMarker = ({ from, to }) => `<!-- factory-transition-refused from=${from} to=${to} -->`;
+
+/**
+ * 요구사항 미달로 **라벨이 실제로 `factory:needs-human`으로 옮겨진** 거부의 코멘트 전문. 마커 두 줄 +
+ * 사유 + 라벨 이동 문장이 한 덩어리이고, 읽는 쪽(`extractNeedsHuman`, 피드백 루프의 수확)이 그 네
+ * 조각을 전부 본다 — `transitionRefusedMarker`와 같은 이유로 생산자를 여기 둔다(쓰는 쪽은
+ * `transition.js` 하나, 읽는 쪽은 여럿, 그리고 테스트는 손으로 베끼면 안 된다).
+ */
+export const transitionRefusedComment = ({ from, to, reason }) =>
+  `<!-- factory-transition:v1 from=${from} to=${NEEDS_HUMAN_LABEL} by=script reason=refused -->\n` +
+  `${transitionRefusedMarker({ from, to })}\n` +
+  `**전이 거부** ${from} → ${to}: ${reason}\n\n` +
+  `라벨을 \`${NEEDS_HUMAN_LABEL}\`으로 옮겼습니다. 산출물을 보강한 뒤 \`:unstick\`으로 재개하세요.`;
 // label 이름 자체가 "factory:x" 형태라 콜론을 품는다 — 진짜 구분자는 "콜론+공백"뿐이다.
 export const REFUSAL_REASON = /\*\*전이 거부\*\*.*?: ([^\n]+)/;
 // 요구사항 미달로 실제 라벨이 needs-human으로 옮겨진 거부만 골라낸다(backtick 인용 — lib/transition.js의
@@ -48,7 +82,40 @@ export function flakyIdFromTitle(title) {
  * "이 blocked이 어디서, 어느 스테이지의 시도에서 왔는가"의 유일한 출처다. 코멘트 이력을 다시
  * 훑어 `TRANSITION_TO`로 추측하지 않는다 — 전이가 일어나는 바로 그 순간 이 마커가 사실을 싣는다.
  */
-export const BLOCKED_ORIGIN = /<!-- factory-blocked-origin from=(\S+) stage=(\S+) -->/;
+export const BLOCKED_ORIGIN = /<!-- factory-blocked-origin from=(\S+) stage=(\S+)(?: cause=(\S+))? -->/;
+
+/**
+ * ADR-020 O20 — **blocked의 원인 등급.** 마커에 `cause=`가 실린다(KTB-30 이전 마커에는 없다 — 그때는
+ * 사유 문구에서 되짚는다). 이 여섯은 sweeper가 다르게 다뤄야 하는 만큼만 갈랐다:
+ *   - `api-error` — 쿼터·레이트리밋·5xx. 몇 분~몇 시간이면 풀린다 → 3회까지 재시도(KTB-22).
+ *   - `cancelled` — 사람이(또는 concurrency가) 잡을 껐다. 공장의 실패가 아니다 → R 예산을 쓰지 않고
+ *     그 취소마다 한 번 다시 민다.
+ *   - `timeout` — 잡·턴 한도. 같은 자리에서 또 잘릴 수 있지만 한 번은 값어치가 있다.
+ *   - `gates` — 게이트 판정 자체가 BLOCKED(환경이 죽었다).
+ *   - `undecidable` — merge-base·diff 같은 판정 재료를 못 구했다.
+ *   - `gates-unhandled` — 테스트 명령이 exit≠0인데 리포트의 실패 테스트는 **0개**(KTB-35). 깨진
+ *     테스트가 없으므로 "제품이 틀렸다"가 아니고, 대개 테스트 **밖**의 일시적 인프라다(포크된
+ *     워커의 stderr `write EPIPE`가 실측 원인이었다) → 같은 스테이지를 한 번 다시 돌린다.
+ *   - `other` — 나머지(환경·크리덴셜). 예전의 유일한 문구가 이것이었다.
+ */
+export const BLOCKED_CAUSES = ["api-error", "timeout", "cancelled", "gates", "gates-unhandled", "undecidable", "other"];
+const CAUSE_RULES = [
+  ["api-error", /api error|rate ?limit|quota|overloaded|\b429\b|HTTP [45]\d\d|something went wrong/i],
+  ["cancelled", /cancell?ed/i],
+  ["timeout", /tim(?:e|ed)[ _-]?out|timeout|max turns|turn limit/i],
+  ["undecidable", /cannot compute|undecidable|unreadable|unparsable|merge-base|판정 불가/i],
+  // KTB-35는 `gates`보다 **먼저** 물려야 한다 — 그 사유 문구에는 "gate log"가 들어 있어서
+  // 뒤에 두면 전부 `gates`로 떨어진다(그러면 재시도 계약도 에스컬레이션 문장도 옛것이 된다).
+  ["gates-unhandled", /0 failing tests|unhandled error outside tests/i],
+  ["gates", /gates?\b/i],
+];
+
+/** 사유 문구 → 원인 등급(맞는 규칙이 없으면 `other`). 순수 함수 — 규칙 순서가 우선순위다. */
+export function blockedCause(reason) {
+  const text = String(reason ?? "");
+  for (const [cause, re] of CAUSE_RULES) if (re.test(text)) return cause;
+  return "other";
+}
 
 /**
  * `factory-blocked-origin` 마커를 만드는 유일한 곳(KTB-19 review I-2) — `lib/transition.js`가 실제
@@ -56,18 +123,272 @@ export const BLOCKED_ORIGIN = /<!-- factory-blocked-origin from=(\S+) stage=(\S+
  * 전이 없이) 그 마커만 새로 남길 때 둘 다 이 함수를 쓴다. 문구가 두 곳에서 따로 써지면 정규식
  * (`BLOCKED_ORIGIN`)과 어긋날 위험이 있다.
  */
-export const blockedOriginMarker = ({ from, stage }) => `<!-- factory-blocked-origin from=${from} stage=${stage ?? "unknown"} -->`;
+export const blockedOriginMarker = ({ from, stage, cause }) =>
+  `<!-- factory-blocked-origin from=${from} stage=${stage ?? "unknown"}${cause ? ` cause=${cause}` : ""} -->`;
 
 /**
- * 이슈 코멘트에서 **가장 최근** `factory-blocked-origin` 마커를 뽑는다. `{from, stage}` 또는
+ * `lib/transition.js`가 남기는 전이 코멘트에서 "→ factory:blocked" 줄의 사유(있으면)만 뽑는다 —
+ * `factory-blocked-origin` 마커와 **같은 코멘트**에서, 그 마커를 만든 전이 자체의 사유를 읽는다
+ * (KTB-22). `merge-stage.js`의 `toBlocked()`처럼 전이를 거치지 않고 마커만 재게시하는 자리는 이
+ * 줄 모양을 쓰지 않으므로 매치되지 않는다 — 그때는 사유를 "모른다"(빈 문자열)로 두는 것이 맞다
+ * (재시도 카운팅이 그 사유로 API 에러 여부를 잘못 판단하는 것보다는 낫다).
+ */
+const BLOCKED_TRANSITION_REASON = /→ factory:blocked(?: — ([^\n]+))?/;
+
+/**
+ * 이슈 코멘트에서 **가장 최근** `factory-blocked-origin` 마커를 뽑는다. `{from, stage, reason}` 또는
  * 마커가 하나도 없으면 null(사람이 API로 라벨을 직접 blocked에 붙인 경우 등 — "판정 불가"이지
- * "queue에서 왔다"가 아니다). 코멘트는 시간순으로 온다고 가정한다(sweeper의 다른 판정들과 같은 가정).
+ * "queue에서 왔다"가 아니다). `reason`은 그 전이가 남긴 사유 문구(없으면 빈 문자열) — sweeper가
+ * "이 blocked이 API 쿼터/장애에서 왔는가"(KTB-22)를 가르는 데 쓴다. 코멘트는 시간순으로 온다고
+ * 가정한다(sweeper의 다른 판정들과 같은 가정).
  */
 export function blockedOrigin(comments) {
   let found = null;
   for (const c of comments || []) {
-    const m = BLOCKED_ORIGIN.exec(String(c?.body ?? ""));
-    if (m) found = { from: m[1], stage: m[2] };
+    const body = String(c?.body ?? "");
+    const m = BLOCKED_ORIGIN.exec(body);
+    if (m) {
+      const rm = BLOCKED_TRANSITION_REASON.exec(body);
+      const reason = rm?.[1]?.trim() ?? "";
+      // `cause=`는 KTB-30부터 마커에 실린다 — 없는(옛) 마커는 사유 문구에서 되짚는다. 그래서
+      // 호출자는 언제나 등급 하나를 받는다(등급이 없는 경우를 따로 다루지 않아도 된다).
+      found = { from: m[1], stage: m[2], reason, cause: m[3] ?? blockedCause(reason) };
+    }
+  }
+  return found;
+}
+
+/**
+ * ── Structure B (리뷰 효율 Task 3) — self-gate RED 경로의 재시도 마커 ──────────────────────────
+ *
+ * self-gate가 `ok:false`(빌더가 고칠 수 있는 finding)로 handoff를 막을 때, 스테이지는 이 마커를 남기고
+ * `factory:planned`로 되돌려 빌더를 **정확히 한 번** 다시 돌린다. sweeper의 blocked-retry/stalled-restart
+ * 마커와 같은 계열이다: 마커를 **head sha로 키잉**하므로, 진짜 수정(새 커밋 → 새 head)은 카운터를
+ * 리셋하고, 같은 head에서 두 번째 RED면 `factory:needs-human`으로 에스컬레이션한다.
+ *
+ * K(`countTransitionsTo(…, rework)`)는 `→ rework`만 세고, `→ planned`에는 아무 카운터도 없었다 —
+ * 그래서 self-gate의 무한 implement↔planned 루프를 막는 유일한 상한이 이 마커다. Task 9(one-shot
+ * in-run repair)가 "스테이지 통째 재디스패치"를 세션 안 한 턴짜리 루프로 바꾸면, 이 카운터/에스컬레이션은
+ * 그 바깥의 안전망으로 남는다.
+ */
+export const SELF_GATE_RETRY = /<!-- factory-self-gate-retry issue=(\d+) head=(\S+) attempt=(\d+) -->/;
+export const selfGateRetryMarker = ({ issue, head, attempt }) =>
+  `<!-- factory-self-gate-retry issue=${issue} head=${head} attempt=${attempt} -->`;
+const SELF_GATE_FINDINGS_JSON = /```json\s*(\{[\s\S]*?"schema"\s*:\s*"factory\.self-gate-findings\.v1"[\s\S]*?\})\s*```/;
+
+/** 마커 + findings를 담은 코멘트 한 통. 다음 implement 런이 findings를 읽어 빌더에게 되먹인다. */
+export const selfGateRetryComment = ({ issue, head, attempt, findings = [] }) =>
+  `${selfGateRetryMarker({ issue, head, attempt })}\n` +
+  `**self-gate**: 결정적 self-gate가 이 head의 handoff를 막았습니다 (attempt ${attempt}). 리뷰로 보내기 ` +
+  `전에 빌더가 아래를 고쳐야 합니다:\n` +
+  "```json\n" +
+  JSON.stringify({ schema: "factory.self-gate-findings.v1", issue, head, attempt, findings }, null, 2) +
+  "\n```";
+
+/** 이 head sha에 대해 남은 self-gate-retry 마커의 개수(호출자가 창을 `commentsSinceRequeue`로 좁힌다). */
+export function countSelfGateRetries(comments, head) {
+  let n = 0;
+  for (const c of comments || []) {
+    const m = SELF_GATE_RETRY.exec(String(c?.body ?? ""));
+    if (m && m[2] === head) n += 1;
+  }
+  return n;
+}
+
+/**
+ * ── 리뷰 효율 Phase-1 finalfix (SF-A) — head-agnostic backstop ─────────────────────────────────
+ *
+ * `countSelfGateRetries`는 **head별** 상한이다(진짜 수정은 새 head라 카운터를 리셋한다) — 그것이
+ * 정상 경로의 1차 상한으로 옳다. 그러나 매 라운드 **새 head**를 뱉으면서도 self-gate를 계속 통과
+ * 못 하는 빌더는 head별 카운터를 영원히 1로 리셋하며 implement↔planned를 무한 ping-pong한다: head별
+ * 상한만으로는 누적 천장이 없다. 이 함수는 head를 무시하고 **이번 재큐 이후** 남은 self-gate-retry
+ * 마커를 전부 센다(호출자가 창을 `commentsSinceRequeue`로 좁힌다). 그 총합이 `SELF_GATE_RETRY_BACKSTOP`에
+ * 이르면 head가 매번 달라도 "빌더가 수렴하지 못한다"는 뜻이므로 needs-human으로 올린다. head별
+ * 1차 상한을 대체하지 않고 그 바깥의 안전망으로만 얹는다.
+ */
+export const SELF_GATE_RETRY_BACKSTOP = 3;
+export function countAllSelfGateRetries(comments) {
+  let n = 0;
+  for (const c of comments || []) {
+    if (SELF_GATE_RETRY.test(String(c?.body ?? ""))) n += 1;
+  }
+  return n;
+}
+
+/** 이 head sha에 대한 **가장 최근** self-gate findings(없으면 null) — 재디스패치된 빌더가 받는다. */
+export function latestSelfGateFindings(comments, head) {
+  let found = null;
+  for (const c of comments || []) {
+    const body = String(c?.body ?? "");
+    const m = SELF_GATE_RETRY.exec(body);
+    if (!m || m[2] !== head) continue;
+    const j = SELF_GATE_FINDINGS_JSON.exec(body);
+    if (!j) continue;
+    try { const obj = JSON.parse(j[1]); if (Array.isArray(obj.findings)) found = obj.findings; } catch { /* 깨진 블록은 건너뛴다 */ }
+  }
+  return found;
+}
+
+/**
+ * Feedback loop Task 3 — **이슈에 남은 모든 self-gate 차단.** `latestSelfGateFindings`는 재디스패치될
+ * 빌더에게 "지금 이 head에서 무엇을 고쳐야 하나"를 주는 함수라 head 하나만 본다. 회고는 반대 질문을
+ * 한다: "이 이슈가 결국 머지됐는데, 그 사이 self-gate가 무엇을 막았나." 머지된 이슈의 차단은 곧
+ * **공장이 스스로 만든 라운드**이고, 그것이 결정적 게이트의 오차단이면 KTB가 고칠 발견이다
+ * (데모 #39의 qa-manifest 오차단이 정확히 그것이었다). head별 `attempt`를 그대로 실어 둔다 —
+ * 같은 원인이 몇 번 반복됐는지가 증거의 무게다. 깨진 JSON 블록은 조용히 건너뛴다.
+ */
+export function allSelfGateFindings(comments) {
+  const out = [];
+  for (const c of comments || []) {
+    const body = String(c?.body ?? "");
+    const m = SELF_GATE_RETRY.exec(body);
+    if (!m) continue;
+    const j = SELF_GATE_FINDINGS_JSON.exec(body);
+    if (!j) continue;
+    let obj;
+    try { obj = JSON.parse(j[1]); } catch { continue; }
+    if (!Array.isArray(obj?.findings)) continue;
+    out.push({ head: m[2], attempt: Number(m[3]), at: c?.createdAt ?? null, findings: obj.findings });
+  }
+  return out;
+}
+
+/**
+ * ADR-020 KTB-25 — **마지막 `… to=factory:queue` 전이 코멘트 이후**의 코멘트만 돌려준다(그런 전이가
+ * 한 번도 없었으면 이력 전체).
+ *
+ * 라운드 번호는 에이전트의 자기 신고가 아니라 이슈에 남은 기록으로 센다(`run-stage.js`의 `reviewRounds`
+ * — r1 SF2 이후로는 완료된 rework 전이다) — 그 자체는 옳다. 틀린 것은 **세는 범위**였다: 데모 #18은 `needs-human`에서
+ * 재큐돼 triage부터 통째로 다시 돌았는데, 새 코드에 대한 **첫 리뷰**가 이전 주기의 review handoff
+ * 2개를 물려받아 `round: 2`로 시작했다(K=3 중 2를 이미 쓴 채로). 재큐(`* → factory:queue`)는 새
+ * 주기의 시작이다 — 그 앞의 라운드는 다른 코드에 대한 판정이므로 이번 예산에 세지 않는다.
+ *
+ * 코멘트는 시간순으로 온다고 가정한다(이 파일의 다른 판정들과 같은 가정).
+ */
+export function commentsSinceRequeue(comments) {
+  const list = Array.isArray(comments) ? comments : [];
+  let from = 0;
+  list.forEach((c, i) => {
+    const m = TRANSITION_TO.exec(String(c?.body ?? ""));
+    if (m && m[2] === "factory:queue") from = i + 1;
+  });
+  return list.slice(from);
+}
+
+/**
+ * ADR-020 KTB-29 r1(SF2) — 주어진 코멘트들 안에서 **`to=<label>`로 성공한 전이**의 개수.
+ *
+ * 리뷰 라운드를 세는 단위가 handoff에서 이것으로 바뀌었다: handoff 코멘트는 전이보다 **먼저** 나가므로
+ * "handoff를 남기고 전이에서 죽은 런"이 라운드를 하나 태웠고, K에 이빨이 생긴 뒤로는 그 사고가
+ * 멀쩡한 이슈를 needs-human으로 밀어냈다. `→ factory:rework` 전이는 **실제로 일어난 재작업 주기**이고,
+ * 그것이 스펙 §3.2가 K로 세는 단위다. 거부 코멘트(`factory-transition-refused`)는 다른 마커라 세지 않는다.
+ */
+/**
+ * r2 (리뷰 (c)) — 뒤따르는 `factory-transition-failed:v1 … to=<label>`은 **바로 앞의 세지 않은 전이
+ * 하나를 취소한다.** SF2의 전제("전이 코멘트 = 실제로 일어난 재작업 주기")는 전이 코멘트가 스왑보다
+ * 먼저 나가게 된 뒤로 한 가지 예외가 생겼다: 스왑이 4번의 CLI 시도 + REST까지 전부 실패하면 코멘트만
+ * 남는다. K=3에서 그런 장애 두 번이면 멀쩡한 이슈가 라운드를 다 쓴다 — 그 창을 이 마커가 닫는다.
+ */
+export function countTransitionsTo(comments, to) {
+  let n = 0;
+  for (const c of comments || []) {
+    const body = String(c?.body ?? "");
+    const f = TRANSITION_FAILED.exec(body);
+    if (f) { if (f[2] === to && n > 0) n -= 1; continue; }
+    const m = TRANSITION_TO.exec(body);
+    // ADR-020 KTB-32 — **사람의 재시도는 라운드가 아니다.** `reason=retry` 전이는 인프라가 끊은
+    // 자리로 **이미 얻었던 라벨을 되돌리는** 것이지 새 재작업 주기가 아니다. 세면 `rework`로
+    // 되돌아가는 재시도 한 번이 K 예산을 한 칸 태운다 — 재시도의 값어치가 그만큼 줄어든다.
+    if (m && m[2] === to && m[4] !== "retry") n += 1;
+  }
+  return n;
+}
+
+/**
+ * 이슈에 남은 **가장 최근** 전이 코멘트(`factory-transition:v1`)를 `{from, to, by, reason, at}`로
+ * 돌려준다(하나도 없으면 null). `reason`은 마커 다음 줄 `<from> → <to> — <사유>`의 `— ` 뒤 한 줄이다
+ * (사유가 없으면 빈 문자열) — `lib/transition.js`가 쓰는 그 문법 그대로다.
+ *
+ * ADR-020 KTB-23 fix에서 sweeper의 needs-info 해제 팔이 "이 이슈가 **왜** 주차됐는가"를 이것으로 읽는다:
+ * `factory:needs-info`는 두 가지 뜻을 겸한다(triage의 "이슈가 모호하다"와 하네스 대기). 그 둘을 가르는
+ * 유일한 기록이 마지막 전이의 사유다. 코멘트는 시간순으로 온다고 가정한다(이 파일의 다른 판정들과 같다).
+ */
+/**
+ * ADR-020 KTB-32 — **이 이슈가 멈춘 자리(resume point).** `factory:needs-human`에서 사람이
+ * `:unstick`의 `retry`를 고를 때, 되돌아갈 수 있는 라벨은 **하나**뿐이다: 인프라가 런을 죽이기 직전에
+ * 이슈가 갖고 있던 그 라벨. 그것을 추측하지 않고 기록에서 읽는다.
+ *
+ * 규칙: 전이 코멘트들 중 `to=`가 **정지 상태**(`blocked`·`needs-human`·`needs-info`)인 마지막 것의
+ * `from=`. 단 `from=`도 정지 상태인 전이는 건너뛴다 — `blocked → needs-human`은 sweeper의
+ * 에스컬레이션이지 "일이 멈춘 자리"가 아니다(라이브 KTB #3이 정확히 이 모양이다:
+ * `awaiting-review → blocked` 뒤에 `blocked → needs-human`). 그래서 되돌아갈 자리는 `awaiting-review`다.
+ *
+ * KTB-36 라운드 확장: `needs-info`가 정지 상태에 들어온 것은 KTB-23의 **하네스 대기 주차**가 그
+ * 라벨을 쓰기 때문이다(`in-progress → needs-info`). 그 자리는 blocked과 같은 뜻이다 — 일이 멈췄고,
+ * 멈춘 이유는 이 이슈의 산출물이 아니다. triage가 세운 `queue → needs-info`도 같은 규칙에 걸리지만
+ * `from=queue`라 `target: null`이 되어 재시도가 거부된다(그 이슈는 실제로 보강 후 재큐가 맞다).
+ * `needs-info → queue`(sweeper의 주차 해제)는 `to`가 정지 상태가 아니므로 이 판정을 흔들지 않는다.
+ *
+ * 그 `from`을 목적 라벨로 옮긴다:
+ *   - `ready`/`planned`/`rework`/`awaiting-review` → 그대로(전부 어느 스테이지의 진입 라벨이다).
+ *   - `in-progress` → implement는 그 자리에서 **끝나지 않았다**. 이번 주기(마지막 재큐 이후)에
+ *     implement handoff가 있으면 구현은 이미 한 번 완성됐다는 뜻이므로 `rework`로, 없으면 `planned`로
+ *     이어간다(둘 다 implement의 정상 진입 라벨이고, implement가 그 자리에서 다시 시작한다).
+ *   - 그 외(`queue` 등) → `target: null`. 재개할 자리를 모른다는 뜻이고, 호출자는 추측 대신 거부한다.
+ *
+ * 코멘트는 시간순으로 온다고 가정한다(이 파일의 다른 판정들과 같은 가정).
+ */
+export const STOP_STATES = new Set(["factory:blocked", "factory:needs-human", "factory:needs-info"]);
+const RESUME_TARGET = {
+  "factory:ready": "factory:ready",
+  "factory:planned": "factory:planned",
+  "factory:rework": "factory:rework",
+  "factory:awaiting-review": "factory:awaiting-review",
+};
+const IMPLEMENT_HANDOFF = /<!--\s*factory-handoff:v1\s+stage=implement\s+issue=\d+\s*-->/;
+
+export function resumePoint(comments) {
+  const list = Array.isArray(comments) ? comments : [];
+  let stop = null;
+  for (const c of list) {
+    const m = TRANSITION_TO.exec(String(c?.body ?? ""));
+    if (!m) continue;
+    const [, from, to] = m;
+    if (!STOP_STATES.has(to) || STOP_STATES.has(from)) continue;
+    stop = { stoppedAt: from, at: c?.createdAt ?? null };
+  }
+  if (!stop) return null;
+  if (stop.stoppedAt === "factory:in-progress") {
+    const implemented = commentsSinceRequeue(list).some((c) => IMPLEMENT_HANDOFF.test(String(c?.body ?? "")));
+    return { ...stop, target: implemented ? "factory:rework" : "factory:planned" };
+  }
+  return { ...stop, target: RESUME_TARGET[stop.stoppedAt] ?? null };
+}
+
+/**
+ * ADR-020 KTB-32 — 사람의 재시도가 인용하는 근거: 가장 최근 `human-decision:v1` 코멘트
+ * (`:unstick`이 전이 **직전**에 남긴다). 없으면 null — 전이를 막지는 않는다(막으면 스킬 밖에서
+ * 손으로 복구하는 길이 사라진다). 전이 코멘트가 그 사실을 그대로 적을 뿐이다.
+ */
+export const HUMAN_DECISION = /<!--\s*human-decision:v1\s+issue=(\d+)(?:\s+skill=(\S+))?\s*-->/;
+export function lastHumanDecision(comments) {
+  let found = null;
+  for (const c of comments || []) {
+    const m = HUMAN_DECISION.exec(String(c?.body ?? ""));
+    if (m) found = { issue: Number(m[1]), skill: m[2] ?? null, at: c?.createdAt ?? null };
+  }
+  return found;
+}
+
+export function lastTransition(comments) {
+  let found = null;
+  for (const c of comments || []) {
+    const body = String(c?.body ?? "");
+    const m = TRANSITION_TO.exec(body);
+    if (!m) continue;
+    const rest = body.slice(m.index + m[0].length);
+    const dash = rest.indexOf(" — ");
+    found = { from: m[1], to: m[2], by: m[3], reason: dash === -1 ? "" : rest.slice(dash + 3).split("\n")[0].trim(), at: c?.createdAt ?? null };
   }
   return found;
 }
@@ -80,9 +401,17 @@ export function extractNeedsHuman(issueNumber, comments, sinceMs = null) {
 
     const m = TRANSITION_TO.exec(body);
     if (m && m[2] === NEEDS_HUMAN_LABEL) {
-      const rest = body.slice(m.index + m[0].length);
-      const dash = rest.indexOf(" — ");
-      const reason = dash === -1 ? "" : rest.slice(dash + 3).split("\n")[0].trim();
+      // r2 SF3: 요구사항 미달 거부도 이제 전이 마커를 단다(`reason=refused`) — 그 코멘트의 사유는
+      // `— ` 뒤가 아니라 "**전이 거부** …: " 뒤에 있다. 마커가 어느 문법인지 말해 준다.
+      let reason;
+      if (m[4] === "refused") {
+        const rm = REFUSAL_REASON.exec(body);
+        reason = rm ? rm[1].trim() : "";
+      } else {
+        const rest = body.slice(m.index + m[0].length);
+        const dash = rest.indexOf(" — ");
+        reason = dash === -1 ? "" : rest.slice(dash + 3).split("\n")[0].trim();
+      }
       out.push({ issue: issueNumber, reason, at: c.createdAt });
       continue;
     }

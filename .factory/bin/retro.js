@@ -27,8 +27,11 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
-import { makeGh } from "../lib/gh.js";
-import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
+import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
+import { loadCharter, loadHarness, loadRoles, upstreamRepoOf } from "../lib/config.js";
+import { routeMergedIssues } from "../lib/feedback/route.js";
+import { announceFailure } from "../lib/gha.js";
+import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
 import { loadQuarantine, saveQuarantine } from "../lib/quarantine.js";
 import { readRecordsDetailed, syncRecords } from "../lib/records-branch.js";
 import { validate } from "../lib/schemas.js";
@@ -45,9 +48,11 @@ import {
 import { applyRoleAdditions as applyRoleAdditionsText } from "../lib/retro/role-additions.js";
 import { nextN, parseRetroState, renderRetroState, shouldRunFull } from "../lib/retro/state.js";
 import { stageMaxTurns } from "./run-stage.js";
+import { hitApiError, apiErrorReason } from "../lib/verify-stage.js";
+import { HARNESS_LABEL } from "../lib/label-catalog.js";
+export { HARNESS_LABEL };   // 재수출 — run-stage.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 
 const QUEUE_LABEL = "factory:queue";
-const HARNESS_LABEL = "factory:harness";
 const FLAKY_LABEL = "factory:flaky";
 const PROPOSAL_LABEL = "factory:retro-proposal";
 const MIN_EVIDENCE = 2;                                               // lesson·예시·관점의 최소 근거 run(§8.4)
@@ -102,6 +107,25 @@ export function earliestRecordAt(records) {
 
 /** 서로 다른 근거 run 수 — `String(r)`로 정규화한다(에이전트가 110과 "110"을 섞어도 창은 한 번만 찬다). */
 export const distinctRuns = (runs) => new Set((Array.isArray(runs) ? runs : []).map((r) => String(r))).size;
+
+/**
+ * 외부 감사 2026-09-14 M10/M11 — 근거로 적힌 run 중 **records 브랜치에 없는** 것들. 비어 있으면
+ * 모두 실재한다는 뜻이다. `known`이 비어 있으면(기록이 하나도 없는 저장소) 검사를 걸지 않는다 —
+ * 첫 retro에서 모든 제안을 거부해 버리면 그 회차가 통째로 무의미해지고, 그때의 "근거 없음"은
+ * 에이전트의 지어냄이 아니라 이 저장소에 아직 run 기록이 없다는 사실이기 때문이다.
+ */
+export function unknownRuns(runs, known) {
+  if (!(known instanceof Set) || known.size === 0) return [];
+  const seen = new Set();
+  const out = [];
+  for (const r of Array.isArray(runs) ? runs : []) {
+    const k = String(r);
+    if (seen.has(k) || known.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
+}
 
 /**
  * 성숙도 격차 이슈의 제목. `target`이 있으면 §5.2.1의 승격 제목(`harness: promote to M<n> — <reason>`)
@@ -169,11 +193,31 @@ export function accumulateStats(total, window) {
   const tMerged = Number(t.merged) || 0;
   const wMerged = Number(w.merged) || 0;
   const merged = tMerged + wMerged;
-  const avg = merged
-    ? ((Number(t.review_rounds_avg) || 0) * tMerged + (Number(w.review_rounds_avg) || 0) * wMerged) / merged
-    : 0;
+  const weightedAvg = (key) => (merged
+    ? ((Number(t[key]) || 0) * tMerged + (Number(w[key]) || 0) * wMerged) / merged
+    : 0);
+  const avg = weightedAvg("review_rounds_avg");
+  // Task 10 (Phase-2 gate) — escaped 결함은 단순 합, revert는 분자·분모를 쌓아 비율을 **다시** 낸다
+  // (비율의 평균은 비율이 아니다 — overlap_ratio·qa_na_ratio와 같은 규약). plan/implement 라운드는
+  // review와 같은 병합 가중 평균으로 롤업한다. revert_rate는 누적 머지가 0이면 null(잴 것이 없음).
+  const escapedDefects = (Number(t.escaped_defects) || 0) + (Number(w.escaped_defects) || 0);
+  // revert는 **합**이 아니라 되돌린 머지 이슈 번호의 **유니온**으로 센다 — 뒤늦게 관측된 revert(그
+  // 머지의 창보다 늦게 도착한 것)가 제 머지에 착지해야 하고(false-low 방지), 같은 revert가 여러 창에서
+  // 다시 관측돼도 이슈 번호로 중복이 제거돼야 한다. 누적 revert_rate는 그 유니온 크기 ÷ 누적 머지다.
+  const revertedSet = new Set([
+    ...(Array.isArray(t.reverted_issues) ? t.reverted_issues : []),
+    ...(Array.isArray(w.reverted_issues) ? w.reverted_issues : []),
+  ]);
+  const reverts = revertedSet.size;
   const rejects = { ...(t.rejects_by_role || {}) };
   for (const [role, n] of Object.entries(w.rejects_by_role || {})) rejects[role] = (rejects[role] || 0) + (Number(n) || 0);
+  // P2-13: 겹침은 **비율의 합**이 아니라 분자·분모의 합에서 다시 나온다(비율의 평균은 비율이 아니다).
+  const unique = { ...(t.unique_findings_by_role || {}) };
+  for (const [role, n] of Object.entries(w.unique_findings_by_role || {})) unique[role] = (unique[role] || 0) + (Number(n) || 0);
+  const findingsTotal = (Number(t.findings_total) || 0) + (Number(w.findings_total) || 0);
+  const overlapping = (Number(t.overlapping_findings) || 0) + (Number(w.overlapping_findings) || 0);
+  const qaClaims = (Number(t.qa_claims_total) || 0) + (Number(w.qa_claims_total) || 0);
+  const qaNa = (Number(t.qa_na_total) || 0) + (Number(w.qa_na_total) || 0);
   const tok = (key, side) => (Number(t[key]?.tokens?.[side]) || 0) + (Number(w[key]?.tokens?.[side]) || 0);
   // 누적 비용은 **1e-6 자리로만** 반올림한다(센트로 깎지 않는다) — 센트 미만인 창을 round2로 접으면
   // 그 창의 비용이 누적에서 영구히 사라지고(0을 더한다) 작은 회차를 많이 도는 공장의 총계가 0에 머문다.
@@ -185,8 +229,26 @@ export function accumulateStats(total, window) {
   return {
     merged,
     review_rounds_avg: round2(avg),
+    plan_rounds_avg: round2(weightedAvg("plan_rounds_avg")),
+    implement_rounds_avg: round2(weightedAvg("implement_rounds_avg")),
+    escaped_defects: escapedDefects,
+    reverts,
+    reverted_issues: [...revertedSet].sort((a, b) => a - b),
+    revert_rate: merged ? round2(reverts / merged) : null,
     rejects_by_role: rejects,
+    review_runs: (Number(t.review_runs) || 0) + (Number(w.review_runs) || 0),
+    findings_total: findingsTotal,
+    overlapping_findings: overlapping,
+    unique_findings_by_role: unique,
+    overlap_ratio: findingsTotal ? round2(overlapping / findingsTotal) : 0,
     needs_human: (Number(t.needs_human) || 0) + (Number(w.needs_human) || 0),
+    // ADR-024 / KTB-42 SF-3 — qa claim 구성(최종 리뷰 A-SF6). 겹침과 같은 규약이다: 비율은 쌓지 않고
+    // 분자·분모를 쌓아 거기서 다시 낸다(비율의 평균은 비율이 아니다).
+    qa_approvals: (Number(t.qa_approvals) || 0) + (Number(w.qa_approvals) || 0),
+    qa_claims_total: qaClaims,
+    qa_na_total: qaNa,
+    qa_na_ratio: qaClaims + qaNa ? round2(qaNa / (qaClaims + qaNa)) : 0,
+    qa_na_heavy_approvals: (Number(t.qa_na_heavy_approvals) || 0) + (Number(w.qa_na_heavy_approvals) || 0),
     usage: sumUsage("usage"),
     // retro 자신의 비용은 스테이지 비용과 **따로** 쌓는다 — 섞으면 "공장이 일하는 데 든 비용"과
     // "공장이 자기를 돌아보는 데 든 비용"을 다시 가를 수 없고, N 자가 조정의 근거가 흐려진다.
@@ -201,6 +263,93 @@ const rejectCell = (s) => {
 };
 
 /**
+ * 외부 감사 2026-09-14 P2-13 — 리뷰어 겹침. `overlap_ratio`만으로는 "0.00"이 "겹치지 않았다"인지
+ * "판정할 finding이 없었다"인지 가를 수 없어서, 분자/분모를 그대로 함께 적는다.
+ */
+const overlapCell = (s) => {
+  const total = Number(s?.findings_total) || 0;
+  if (total === 0) return "없음";
+  return `${Number(s?.overlap_ratio ?? 0).toFixed(2)} (${Number(s?.overlapping_findings) || 0}/${total}, runs ${Number(s?.review_runs) || 0})`;
+};
+const uniqueCell = (s) => {
+  const uniq = Object.entries(s?.unique_findings_by_role || {});
+  return uniq.length ? uniq.map(([r, n]) => `${r} ${n}`).join(", ") : "없음";
+};
+
+/**
+ * ADR-024 / KTB-42 SF-3 — qa 승인의 claim 구성(최종 리뷰 A-SF6). `overlapCell`과 같은 이유로 비율
+ * 하나로 끝내지 않는다: "0.00"이 "na가 없었다"인지 "qa 기록이 있는 승인이 한 건도 없었다"인지
+ * 가를 수 있어야 한다. 뒤의 괄호가 그 분모이고, `na-heavy`는 절반 이상을 `na`로 덮은 승인 수다.
+ */
+const qaNaCell = (s) => {
+  const approvals = Number(s?.qa_approvals) || 0;
+  if (approvals === 0) return "없음";
+  const na = Number(s?.qa_na_total) || 0;
+  const total = na + (Number(s?.qa_claims_total) || 0);
+  return `${Number(s?.qa_na_ratio ?? 0).toFixed(2)} (${na}/${total} claims, na-heavy ${Number(s?.qa_na_heavy_approvals) || 0}/${approvals} approvals)`;
+};
+
+/**
+ * Task 10 (Phase-2 gate) — escaped 결함 셀. 창 열은 이슈별 상세(`#N×k`)를 함께 싣고(어느 이슈에서
+ * 결함이 샜는지 사람이 바로 본다), 누적 열은 합계만 싣는다(상세는 누적하지 않는다).
+ */
+const escapedCell = (s) => {
+  const n = Number(s?.escaped_defects) || 0;
+  const detail = Array.isArray(s?.escaped_defects_detail) ? s.escaped_defects_detail : null;
+  return detail && detail.length ? `${n} (${detail.map((d) => `#${d.issue}×${d.count}`).join(", ")})` : String(n);
+};
+/**
+ * Task 10 (Phase-2 gate) — revert 비율 셀. `overlapCell`과 같은 규약: 비율 하나로 끝내지 않고 분자·분모를
+ * 함께 싣는다("0.00"이 "되돌림 0"인지 "잴 머지가 없음"인지 가른다). 창/누적 모두 머지가 0이면 "없음".
+ */
+const revertCell = (s) => {
+  const merged = Number(s?.merged) || 0;
+  if (merged === 0) return "없음";
+  return `${Number(s?.revert_rate ?? 0).toFixed(2)} (${Number(s?.reverts) || 0}/${merged})`;
+};
+
+/**
+ * Phase-2 게이트의 **기준선**(이 세션에서 동결). retro 출력과 ADR-026이 같은 값을 인용한다. 이 표가
+ * 관측 가능하게 만드는 위험은 스펙 §7의 "단순화가 품질을 떨어뜨릴 수 있는가"다 — 리뷰어 커버리지를
+ * 줄이는 Phase 2(Tasks 6,7)는 이 기준선 대비 escaped·revert가 나빠지지 않았음을 먼저 보여야 시작한다.
+ */
+export const QUALITY_BASELINE = Object.freeze({
+  note: "KTB #18 = $143 / 12 stage-runs; own-cal #3 = 4 review rounds",
+  // 게이트가 "≤ baseline"으로 비교할 **수치** 문턱(should_fix). $·라운드만으로는 escaped·revert에
+  // 문턱이 없어 실행자가 추론해야 했다 — 이 세션의 관측값으로 동결한다: 둘 다 0.
+  escaped_defects: 0,
+  revert_rate: 0,
+  // rounds_per_issue 예시(단순화가 목표로 낮추려는 값)와 escaped_defects 예시(post-approval find)는
+  // **서로 다른 두 신호**다 — 게이트가 둘 다 읽는다.
+  rounds_exemplar: "own-cal #3 = 4 review rounds (reject-heavy; caught in review, escaped_defects=0)",
+  must_not_recur: Object.freeze([
+    "KTB #18 R3 finish() regression (approve→reject flip — a post-approval escaped defect)",
+  ]),
+});
+
+/** 이슈별 라운드/escaped 상세 표(이번 창) — 롤업 표 밑에 붙는다. 없으면 빈 문자열. */
+function roundsPerIssueTable(window) {
+  const rows = Array.isArray(window?.rounds_per_issue) ? window.rounds_per_issue : [];
+  if (!rows.length) return "";
+  const esc = new Map((Array.isArray(window?.escaped_defects_detail) ? window.escaped_defects_detail : []).map((d) => [d.issue, d.count]));
+  const body = rows.map((r) => `| #${r.issue} | ${r.plan ?? 0} | ${r.implement ?? 0} | ${r.review ?? 0} | ${esc.get(r.issue) ?? 0} |`);
+  return ["### Rounds per issue (this window)", "", "| issue | plan | implement | review | escaped |", "| --- | --- | --- | --- | --- |", ...body].join("\n");
+}
+
+/** Phase-2 게이트 기준선 블록(이 세션에서 동결) — retro 출력에 기준선과 must-not-recur 집합을 남긴다. */
+function baselineNote() {
+  return [
+    "### Phase-2 gate baseline (this session)",
+    "",
+    `- baseline: ${QUALITY_BASELINE.note}`,
+    `- frozen thresholds: escaped_defects ≤ ${QUALITY_BASELINE.escaped_defects}, revert_rate ≤ ${QUALITY_BASELINE.revert_rate.toFixed(2)}`,
+    `- rounds-per-issue exemplar: ${QUALITY_BASELINE.rounds_exemplar}`,
+    `- must-not-recur escaped defects: ${QUALITY_BASELINE.must_not_recur.join("; ")}`,
+    "- gate (ADR-026): Phase 2 (plan Tasks 6, 7) starts only when, over ≥5 post-Phase-1 issues, escaped-defect rate AND revert rate are ≤ baseline while rounds-per-issue fell.",
+  ].join("\n");
+}
+
+/**
  * `_retro.md` 위쪽에 사람이 먼저 읽는 통계 표(§8.3 "통계" 절과 같은 수치). 두 열이다: 이번 창(N 자가
  * 조정을 움직이는 값)과 누적(공장의 전체 이력). 창만 보면 "공장이 지금까지 무엇을 했는가"를 알 수 없고,
  * 누적만 보면 "이번에 무엇이 달라졌는가"를 알 수 없다.
@@ -209,13 +358,21 @@ export function statsTable(window, total) {
   const w = window || {};
   const t = total || {};
   const row = (label, a, b) => `| ${label} | ${a} | ${b} |`;
-  return [
+  const roundsCell = (s) => `${s.plan_rounds_avg ?? 0} / ${s.implement_rounds_avg ?? 0} / ${s.review_rounds_avg ?? 0}`;
+  const table = [
     "| metric | this window | cumulative |",
     "| --- | --- | --- |",
     row("merged", w.merged ?? 0, t.merged ?? 0),
     row("review rounds avg", w.review_rounds_avg ?? 0, t.review_rounds_avg ?? 0),
+    // Task 10 (Phase-2 gate) — 게이트가 읽는 세 지표. 이슈별 상세는 이 표 밑의 rounds-per-issue 표에.
+    row("rounds/issue (plan/impl/review)", roundsCell(w), roundsCell(t)),
+    row("escaped defects", escapedCell(w), escapedCell(t)),
+    row("revert rate", revertCell(w), revertCell(t)),
     row("needs-human", w.needs_human ?? 0, t.needs_human ?? 0),
     row("rejects by role", rejectCell(w), rejectCell(t)),
+    row("reviewer overlap", overlapCell(w), overlapCell(t)),
+    row("unique findings by role", uniqueCell(w), uniqueCell(t)),
+    row("qa na ratio", qaNaCell(w), qaNaCell(t)),
     row("cost (usd)", Number(w.usage?.cost_usd || 0).toFixed(2), Number(t.usage?.cost_usd || 0).toFixed(2)),
     row("tokens", `input ${w.usage?.tokens?.input || 0} / output ${w.usage?.tokens?.output || 0}`, `input ${t.usage?.tokens?.input || 0} / output ${t.usage?.tokens?.output || 0}`),
     // retro 자신의 비용 — 스테이지 비용과 한 줄 떨어뜨려 둔다(§4.4). 이 줄이 없으면 공장은 자기를
@@ -224,6 +381,9 @@ export function statsTable(window, total) {
     row("retro tokens", `input ${w.retro_usage?.tokens?.input || 0} / output ${w.retro_usage?.tokens?.output || 0}`, `input ${t.retro_usage?.tokens?.input || 0} / output ${t.retro_usage?.tokens?.output || 0}`),
     row("full retros", "—", t.retros ?? 0),
   ].join("\n");
+  // 이슈별 상세(창)와 Phase-2 게이트 기준선을 표 밑에 붙인다 — 롤업만으로는 어느 이슈에서 결함이
+  // 샜는지 모르고, 기준선이 없으면 게이트가 무엇 대비 좋아졌는지 판단할 근거가 사라진다(스펙 §7).
+  return [table, roundsPerIssueTable(w), baselineNote()].filter(Boolean).join("\n\n");
 }
 
 /**
@@ -435,6 +595,46 @@ export async function runRetro({ deps, force = false, now } = {}) {
     const countBits = mergesSince != null ? { mergesSince } : { mergesDelta: force ? 0 : 1 };
     const harvestBits = harvestRan ? { candidates: h.candidates, stats: h.stats } : {};
 
+    /**
+     * ②' 피드백 루프 Task 3 — **분류·라우팅 팔**(spec §4의 "on merge" 가지).
+     *
+     * light 회차에서도 돈다: 이 팔의 단위는 "N번의 머지"가 아니라 **한 번의 머지**이고, 전체 분석을
+     * 기다리는 동안 원인의 증거(게이트 detail·self-gate 차단·전이 거부)는 그대로 남아 있지만 사람은
+     * 그것을 읽지 않는다 — 그게 이 루프가 고치려는 바로 그 상태다. 수확이 돌지 않은 회차
+     * (`light_on_merge: false`)에는 볼 이슈 목록이 없으므로 건너뛴다.
+     *
+     * `step`으로 감싸 **절대 회고를 죽이지 않는다**(spec §7 fail-safe): gh 실패는 `applied`의 한 줄과
+     * run 기록 한 줄로 남고 나머지 단계는 그대로 진행한다. 라우팅 때문에 회고가 죽으면 그 회차의
+     * lessons·통계·커서까지 같이 사라진다.
+     */
+    if (d.routeFeedback && harvestRan) {
+      const r = await step("feedback-route", () => d.routeFeedback({ issues: h.issues, commentsByIssue: h.commentsByIssue, records: hy.records, since }));
+      if (r.ok && r.value) {
+        // `author`는 기각된 결정(`unverifiable-decision`)에서만 온다 — **누구의** 결정이 사라졌는지를
+        // 적지 않으면 사람은 이 줄을 읽고도 자기 코멘트를 찾아가지 못한다.
+        for (const a of r.value.actions || []) record(`feedback-route: ${a.kind}${a.issue == null ? "" : ` #${a.issue}`}${a.author ? ` by @${a.author}` : ""}${a.upstream_issue ? ` → ${a.repo}#${a.upstream_issue}` : ""}${a.harness_issue ? ` → harness #${a.harness_issue}` : ""}${a.reason ? ` — ${a.reason}` : ""}`);
+        if ((r.value.actions || []).length) applied.push({ step: "feedback-route", issues: r.value.issues || [], actions: r.value.actions });
+        /**
+         * ── 리뷰 should_fix 2: **라우팅 팔의 실패는 exit 0이되 조용하지 않다** ────────────────
+         * 이 팔은 fail-safe라 상류 403을 `{kind:"error"}` 액션 한 줄로 삼킨다(그 계약은 옳다 —
+         * 라우팅 때문에 회고가 죽으면 그 회차의 lessons·통계·커서까지 사라진다). 그런데 그 한
+         * 줄이 `console.log`와 run 기록에만 남았다: 잡은 초록이고 `::error::`도 스텝 요약도 없다.
+         * 곧 `FACTORY_BOT_TOKEN`에 `[factory].upstream`의 `issues:write`가 없으면 **모든 `[ktb]`
+         * 발견이 머지마다 조용히 죽고**, 주인은 그 사실을 영영 모른다 — 루프가 존재하지 않는 것과
+         * 구별되지 않는 상태다. 종료 코드는 그대로 두고(§7 fail-safe) 러너가 보여 주는 두 채널로
+         * 올린다. 사람이 다음에 무엇을 해야 하는지는 `factory doctor`의 `factory.upstream`이 말한다.
+         */
+        const failures = (r.value.actions || []).filter((a) => a.kind === "error").map((a) => `${a.reason || "feedback routing failed"}${a.issue == null ? "" : ` (#${a.issue})`}`);
+        if (failures.length) {
+          announceFailure({
+            title: "factory-retro",
+            heading: "factory-retro — feedback routing",
+            reasons: [...failures, "the retro itself is unaffected (fail-safe); run `factory doctor` and check `factory.upstream` — the factory token needs `issues:write` on the upstream repo"],
+          });
+        }
+      }
+    }
+
     // ③ light — 전체 분석 없이 후보만 쌓고 물러난다.
     if (!decision?.full) {
       const finalMerges = mergesSince ?? baseMerges + (force ? 0 : 1);
@@ -474,9 +674,14 @@ export async function runRetro({ deps, force = false, now } = {}) {
     if (envelope && !envelope.is_error) {
       try { transcriptText = (await d.transcript?.(envelope)) || ""; } catch { transcriptText = ""; }
     }
+    // KTB-22: claude -p 자신의 API 쿼터/장애(429/5xx/스로틀)는 회차가 통째로 죽었다는 사실은 같지만
+    // 사유는 달라야 한다 — "claude -p reported is_error"는 사람에게 아무것도 말해주지 않지만
+    // 프로바이더 메시지 원문은 그대로 읽을 수 있다. `run-stage.js`(KTB-16)와 달리 여기서는 트랜스크립트
+    // 복구를 시도하지 않는다 — retro의 실패는 이미 무해하다(라벨을 옮기지 않고, `merges_since`를
+    // 리셋하지 않아 다음 머지가 다시 시도한다, 커서도 그대로다): 복구해서 얻는 것이 없다.
     const ex = envelope && !envelope.is_error
       ? extractStageArtifact({ envelopeResult: envelope.result, transcriptText, validate: (o) => validate("retro.v1", o) })
-      : { ok: false, reason: envelope ? "claude -p reported is_error" : (called.error || "claude -p failed") };
+      : { ok: false, reason: envelope ? (hitApiError(envelope) ? apiErrorReason(envelope) : "claude -p reported is_error") : (called.error || "claude -p failed") };
     const out = ex.ok ? ex.data : null;
     const v = { ok: ex.ok, errors: ex.ok ? [] : [ex.reason] };
     // 호출이 실패했어도 토큰은 이미 쓰였다 — 비용은 성공한 회차만의 것이 아니다(F10). `retroUsage`는
@@ -504,20 +709,42 @@ export async function runRetro({ deps, force = false, now } = {}) {
     const pending = [];
     let harnessIssues = 0;
 
+    /**
+     * 외부 감사 2026-09-14 M10/M11 — **근거 run은 실재해야 한다.** 예전 검사는 `evidence_runs`의
+     * *길이*만 셌다: `[1, 2]`라고 적으면 그 이슈가 존재하든 말든, 이 공장이 돌린 적이 있든 말든
+     * 창이 찼다. 곧 "근거 2건 이상"은 에이전트가 숫자 두 개를 타이핑했다는 뜻이었다.
+     * 이제 records 브랜치(`docs/factory/runs/<issue>.md`)에 실제로 있는 run id만 근거로 센다.
+     */
+    const knownRunIds = new Set([...(hy.records?.keys?.() ?? [])].map((k) => String(k)));
+    const unknownRunsOf = (runs) => unknownRuns(runs, knownRunIds);
+    const citationsOf = h.citations || {};
+
     // (a) lesson — 역할별로 한 번. 근거 run ≥2(서로 다른 이슈)는 `applyLessons`가 다시 센다.
-    for (const [role, items] of byRole(out.lessons)) {
+    // 인용이 있는 역할은 **채택이 없어도** 돈다(감사 M11): 인용 카운터를 올리는 것 자체가 변경이다.
+    const lessonsByRole = byRole(out.lessons);
+    const lessonRoles = [...new Set([...lessonsByRole.keys(), ...Object.keys(citationsOf)])];
+    for (const role of lessonRoles) {
+      const items = lessonsByRole.get(role) || [];
+      const unknownRejects = [];
+      const adopted = [];
+      for (const i of items) {
+        const bad = unknownRunsOf(i.evidence_runs);
+        if (bad.length) { unknownRejects.push({ text: i.text, reason: `unknown-evidence-run: ${bad.join(", ")}` }); continue; }
+        adopted.push({ text: i.text, evidence_runs: i.evidence_runs });
+      }
       const r = await step(`lessons:${role}`, () => d.applyLessons({
         role,
-        adopted: items.map((i) => ({ text: i.text, evidence_runs: i.evidence_runs })),
+        adopted,
         today: todayOf(at),
         minEvidence: MIN_EVIDENCE,
+        citations: citationsOf[role] || {},
       }));
       if (!r.ok || !r.value) continue;
       const res = r.value;
-      applied.push({ step: `lessons:${role}`, added: (res.added || []).map((a) => a.id), rejected: res.rejected || [], evicted: res.evicted || [] });
+      applied.push({ step: `lessons:${role}`, added: (res.added || []).map((a) => a.id), rejected: [...unknownRejects, ...(res.rejected || [])], evicted: res.evicted || [], cited: res.cited || [] });
       // 실제로 바뀐 파일만 PR에 싣는다 — 채택이 하나도 없으면 `applyLessons`는 원문을 바이트 그대로
       // 돌려주므로, 넣어도 빈 diff가 되고 "변경 없음" 커밋이 실패한다.
-      if (res.path && ((res.added || []).length || (res.evicted || []).length)) files[res.path] = res.text;
+      if (res.path && ((res.added || []).length || (res.evicted || []).length || (res.cited || []).length)) files[res.path] = res.text;
       if (res.path && (res.added || []).length) pending.push({ kind: "lessons", path: res.path, texts: res.added.map((a) => a.text) });
     }
 
@@ -530,10 +757,14 @@ export async function runRetro({ deps, force = false, now } = {}) {
       roleItems.get(role)[key].push(item);
     };
     for (const x of out.examples || []) {
+      const bad = unknownRunsOf(x?.evidence_runs);
+      if (bad.length) { push(x?.role, "deferred", { kind: x?.kind, text: x?.text, reason: `unknown-evidence-run: ${bad.join(", ")}` }); continue; }
       if (distinctRuns(x?.evidence_runs) < MIN_EVIDENCE) { push(x?.role, "deferred", { kind: x?.kind, text: x?.text, reason: "insufficient-evidence" }); continue; }
       push(x?.role, "examples", { kind: x.kind, text: x.text });
     }
     for (const p of out.perspectives || []) {
+      const bad = unknownRunsOf(p?.evidence_runs);
+      if (bad.length) { push(p?.role, "deferred", { kind: "perspectives", text: p?.text, reason: `unknown-evidence-run: ${bad.join(", ")}` }); continue; }
       if (distinctRuns(p?.evidence_runs) < MIN_EVIDENCE) { push(p?.role, "deferred", { kind: "perspectives", text: p?.text, reason: "insufficient-evidence" }); continue; }
       push(p?.role, "perspectives", { text: p.text });
     }
@@ -638,7 +869,7 @@ export async function runRetro({ deps, force = false, now } = {}) {
     }));
 
     // (h) 제안 PR — 최소 근거 창(§8.4)은 L1이 센다. 미달 제안은 버리지 않고 상태에 남긴다.
-    const { accepted, deferred } = filterByEvidence([...(out.proposals || []), ...deletionProposals]);
+    const { accepted, deferred } = filterByEvidence([...(out.proposals || []), ...deletionProposals], { knownRuns: knownRunIds });
     if (deferred.length) applied.push({ step: "proposals", deferred: deferred.map((x) => ({ kind: x.proposal?.kind, title: x.proposal?.title, reason: x.reason })) });
     let proposalPr = null;
     if (accepted.length) {
@@ -744,6 +975,77 @@ export function retroClaudeArgs({ harness, charter, ciSettingsPath }) {
   return args;
 }
 
+/**
+ * 피드백 루프 Task 3 — 이번 창에 머지된 이슈의 증거를 분류해 주인에게 보낸다(spec §7).
+ * `upstream`이 없으면 교차 저장소 호출은 **한 번도** 나가지 않는다(로컬 코멘트만).
+ *
+ * `main()`의 클로저가 아니라 여기 사는 이유(T7 리뷰 should_fix 5): 이 팔의 **배선**이 판정의 일부다 —
+ * 창의 코멘트를 `resolveFactoryLogins`에 넘기는 것(하트비트 작성자라는 출처가 거기서 열린다),
+ * `identity`를 읽는 것, 경보를 런당 한 번만 다는 것. 클로저 안에 있으면 그 셋 중 무엇이 빠져도
+ * 테스트는 초록이고, 빠진 날 dogfood 저장소는 다시 조용해진다.
+ */
+export async function routeFeedbackArm({
+  gh, repo, root, harness, issues, commentsByIssue, records, since, env,
+  loadManifest = loadInstallManifest, log = console.error,
+}) {
+  /**
+   * 1.4.0 핫픽스 — `env`는 **필수 주입**이다(`process.env`라는 기본값은 `main()`의 배선 한 줄에만
+   * 산다). `resolveFactoryLogins`가 주변 환경을 스스로 읽던 시절에는 이 팔의 판정이 프로세스가
+   * 어디서 도는지에 따라 갈렸다 — Actions 러너에서만 빨개지는 테스트가 그 증상이었다.
+   */
+  if (!env || typeof env !== "object") {
+    throw new TypeError("routeFeedbackArm: env is required — pass the caller's env explicitly (retro's main() supplies `process.env`; tests must pass `{}` for a laptop or `{ GITHUB_ACTIONS: \"true\" }` for a runner)");
+  }
+  const manifest = await loadManifest(root);
+  if (!manifest) {
+    return { issues: [], actions: [{ kind: "error", step: "feedback-route", reason: `install manifest not found (no ${INSTALL_MANIFEST_PATH}, no factory/cli/manifest.js) — refusing to classify without the real owner map; run \`npx know-thy-build factory init --upgrade\`` }] };
+  }
+  /**
+   * 재리뷰 NEW-MF-2 — `human-decision:v1`을 **권한**으로 읽으려면 작성자를 알아야 한다.
+   * `gh issue comment`는 훅이 일부러 열어 둔 문이라 어떤 스테이지 에이전트든 그 모양의 코멘트를
+   * 적을 수 있다. 팩토리 계정 이름을 못 얻으면 `null`을 넘긴다 — `[]`("봇이 없다")가 아니다.
+   *
+   * T5 MF-1 — `comments`를 넘기면 **하트비트 작성자**라는 출처가 열린다(러너만 쓰는 산출물이므로
+   * Actions 밖에서도 봇 이름이 정확하다). 회고는 이미 창의 코멘트를 전부 손에 들고 있다 —
+   * 추가 API 왕복은 없다. 그리고 그 코멘트들이 T7의 `identity`에 `authorType`이라는 계정 사실도 준다.
+   */
+  const allComments = [...(commentsByIssue instanceof Map ? commentsByIssue.values() : Object.values(commentsByIssue || {}))].flat();
+  const who = await resolveFactoryLogins({ gh, env, comments: allComments });
+  if (!who.ok) log(`factory: retro could not resolve the factory logins — ${who.reason}; human-decision attribution will be refused`);
+  const routed = await routeMergedIssues({
+    gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since,
+    ownerOf: manifest.ownerOf, isInstalled: manifest.isInstalled, ktbVersion: manifest.ktbVersion, harness,
+    factoryLogins: who.ok ? who.logins : null,
+    // 최종 리뷰 nit 5 — 거부 사유의 **문구**는 신원에 달려 있다: 진짜 봇 신원이면 "공유 신원"이
+    // 아니라 "에이전트가 적은 결정"이 참이고, 사람이 할 일도 정반대다(등록할 것이 없다).
+    identity: who.ok ? (who.identity ?? null) : null,
+  });
+  /**
+   * T7 — 팩토리가 **사람 계정**으로 돌면 작성자 기반 귀속은 원리상 불가능하다(팩토리 코멘트와
+   * 소유자의 코멘트가 같은 작성자다). 그 사실을 런마다 **한 번** 크게 적는다: 이슈마다 적으면
+   * 잡음이고, 안 적으면 dogfood 저장소에서 (b)가 영영 조용히 닫힌 채로 남는다.
+   */
+  const warn = who.ok ? sharedIdentityWarning(who.identity) : null;
+  if (warn) routed.actions.unshift(warn);
+  return routed;
+}
+
+/**
+ * T7 — 공유 신원 경보 한 줄(없으면 `null`). **런당 한 번**이다: 이슈마다 적으면 같은 문장이 창의
+ * 이슈 수만큼 쌓여 그 자체가 잡음이 되고, 한 번도 안 적으면 dogfood 저장소에서 증거 (b)가 영영
+ * 조용히 닫힌 채로 남는다(이 태스크가 고치는 것이 바로 그 침묵이다).
+ *
+ * `personal !== true`이면 아무것도 내지 않는다 — `null`(모른다)은 경보의 근거가 아니다. 모르는 것을
+ * 경보로 바꾸면 사람이 경보를 끄는 법부터 배우고, 그러면 진짜일 때도 안 읽는다.
+ */
+export function sharedIdentityWarning(identity) {
+  if (identity?.personal !== true) return null;
+  return {
+    kind: "warning", step: "feedback-route", login: identity.login,
+    reason: `factory identity is a personal account (${identity.login}) — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity`,
+  };
+}
+
 export function roleFileMap(roles) {
   const map = new Map();
   const add = (name, def) => {
@@ -823,8 +1125,8 @@ async function main() {
     /** 이슈 스냅샷(`collectIssues`) + 기록에서 뽑은 후보·창 통계. 둘 다 결정적이다(P4-R1). */
     harvest: async ({ since, records }) => {
       const snapshot = await collectIssues({ gh, since });
-      const { candidates, stats } = harvestRecords({ records, issues: snapshot.issues, commentsByIssue: snapshot.commentsByIssue, since });
-      return { candidates, stats, ...snapshot, first: earliestRecordAt(records) };
+      const { candidates, stats, citations } = harvestRecords({ records, issues: snapshot.issues, commentsByIssue: snapshot.commentsByIssue, since });
+      return { candidates, stats, citations, ...snapshot, first: earliestRecordAt(records) };
     },
     shouldRunFull: ({ state, force: f }) => shouldRunFull({ state, retro, force: f }),
     /**
@@ -846,12 +1148,12 @@ async function main() {
      * "트랜스크립트가 1순위 출처"라는 계약이 한쪽만 고쳐지는 순간 갈라진다.
      */
     transcript: (envelope) => readTranscript({ root, home: homedir(), sessionId: envelope?.session_id, readFile: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null) }) || "",
-    applyLessons: ({ role, adopted, today, minEvidence }) => {
+    applyLessons: ({ role, adopted, today, minEvidence, citations }) => {
       const rel = fileOf.get(role)?.lessons;
       const text = rel ? readText(join(root, rel)) : "";
       // 파일이 없으면 만들지 않는다 — lessons 파일은 역할의 존재 증명이고, retro는 역할을 신설하지 않는다.
-      if (!rel || !text) return { path: null, text: "", added: [], rejected: adopted.map((a) => ({ text: a.text, reason: rel ? "empty-lessons-file" : "unknown-role" })), evicted: [] };
-      return { path: rel, ...applyLessonsText({ text, adopted, today, minEvidence }) };
+      if (!rel || !text) return { path: null, text: "", added: [], rejected: (adopted || []).map((a) => ({ text: a.text, reason: rel ? "empty-lessons-file" : "unknown-role" })), evicted: [], cited: [] };
+      return { path: rel, ...applyLessonsText({ text, adopted, today, minEvidence, citations }) };
     },
     applyRoleAdditions: ({ role, examples, perspectives }) => {
       const rel = fileOf.get(role)?.agent;
@@ -888,6 +1190,12 @@ async function main() {
       return { registered };
     },
     expiredIds: ({ issues, commentsByIssue, since }) => expiredFromComments({ issues, commentsByIssue, since }),
+    /**
+     * 피드백 루프 Task 3 — 이번 창에 머지된 이슈의 증거를 분류해 주인에게 보낸다(spec §7).
+     * `upstream`이 없으면 교차 저장소 호출은 **한 번도** 나가지 않는다(로컬 코멘트만).
+     */
+    // `process.env`는 **워크플로 진입점인 여기** 한 줄에만 산다(1.4.0 핫픽스).
+    routeFeedback: (args) => routeFeedbackArm({ ...args, gh, repo, root, harness, env: process.env }),
     /** 열린 제안 PR — 같은 창의 제안을 두 번 열지 않기 위한 dedup 재료(본문 마커 또는 제목). */
     listProposalPrs: () => gh.prList({ label: PROPOSAL_LABEL, state: "open" }),
     publishProposal: ({ files, title, body, date }) => openProposalPr({ run, gh, cwd: root, defaultBranch, files, title, body, date, log: (m) => console.log(m) }),

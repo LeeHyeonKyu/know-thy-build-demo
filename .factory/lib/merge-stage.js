@@ -1,8 +1,91 @@
-import { verdictLine } from "./gates.js";
+import { gatesDetailLines, verdictLine } from "./gates.js";
 import { isMergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON } from "./blocked-errors.js";
 import { isGitDiffError } from "./changed-files.js";
-import { LESSONS_POLICY_RULE as LESSONS_RULE_RE } from "./integrity.js";
+import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as HARNESS_SECTION_RULE_RE, TESTS_MODIFIED_POLICY_RULE as TESTS_RULE_RE } from "./integrity.js";
 import { blockedOriginMarker } from "./retro/issue-comments.js";
+import { parseBlocks } from "./harness-request.js";
+import { verifyReviewQuorum, verifyReviewProvenance, NOT_BOUND } from "./review-quorum.js";
+
+/**
+ * 외부 감사 2026-09-14 H1b — 머지 직전에 **게시자까지** 확인하는 두 상태. `factory/integrity`는 빠져
+ * 있다: 그것은 L0 required check(브랜치 보호)라 GitHub 자신이 강제하고, 사람이 여는 PR에도 붙는다.
+ * 이 둘은 **이슈 파이프라인을 탄 PR에만** 게시자가 있는 상태이고(run-stage가 PR head sha에 올린다),
+ * 곧 "리뷰가 실제로 돌았다"의 기계적 흔적이다.
+ */
+export const REVIEW_EVIDENCE_STATUSES = ["factory/review", "factory/gates"];
+
+/**
+ * KTB-46 — **"이 `factory:needs-human`은 자동 머지 거부에서 왔는가"의 유일한 표식.**
+ *
+ * `handToHuman`이 만드는 사유 문구(보호 경로·역할 섹션·lessons 삭제·harness.toml 얼어붙은 섹션·
+ * 기존 테스트 편집)는 전이 코멘트에 그대로 실려 이슈에 남는다. sweeper의 `sweepHumanMerged` 팔은
+ * 그 한 줄만 보고 "사람이 머지해 주기를 기다리는 이슈"와 나머지 모든 needs-human(재점화 한도,
+ * 락 소유자 불명, 리뷰 라운드 소진…)을 가른다 — 그 둘을 섞으면 사람이 아직 보지도 않은 이슈를
+ * 머지된 것으로 이으려 든다.
+ *
+ * 그래서 문구와 판정은 **같은 출처**에서 나온다: 리터럴이 먼저이고 정규식이 그것에서 만들어지며,
+ * 아래 다섯 사유는 전부 그 리터럴로 조립된다. 문구를 고치면 판정이 따라 움직이고, 둘이 조용히
+ * 갈라질 수 없다(sweeper가 어제의 문구를 찾는 동안 merge 스테이지가 오늘의 문구를 쓰는 일 —
+ * 이 팔이 죽는 가장 조용한 방식이다). 방향이 이쪽인 이유(r3 nit 1): 반대로 하면 정규식의 `source`가
+ * 사람이 읽는 문장이 되고, 누군가 앵커·대안(`|`)·이스케이프를 하나 넣는 순간 다섯 개의 거부 메시지가
+ * 정규식 문법으로 바뀐다.
+ */
+const HUMAN_MERGE_REQUIRED_TEXT = "human merge required";
+/**
+ * 최종 리뷰 B-nit 3 — **구분자까지 포함해 앵커한다.** 맨 문구만 찾는 정규식은 자유 문장인 전이 사유
+ * 어디에 그 말이 나와도 참이다: `:unstick`의 결정 노트가 "human merge required였는데…"를 인용하기만
+ * 해도 sweeper의 사람-머지 팔이 그 이슈를 "사람의 머지를 기다리는 중"으로 읽는다. 아래 다섯 생산자는
+ * 전부 `— ${TEXT}: …` 꼴로 조립하므로, 구분자(`— `)를 함께 요구해도 다섯 개가 모두 계속 걸린다.
+ */
+export const HUMAN_MERGE_REQUIRED = new RegExp(`— ${HUMAN_MERGE_REQUIRED_TEXT}`);
+
+/**
+ * 외부 감사 H1b의 판정 (d)를 **순수 함수로** 꺼낸 것. 이 커밋에 `factory/review`·`factory/gates`
+ * 상태가 붙어 있고, 그 둘이 success이고, **팩토리 자신의 계정이 올린 것**인가.
+ *
+ * 상태는 repo 스코프 토큰을 쥔 무엇이든 쓸 수 있다 — 그래서 "success다"는 아무것도 증명하지 않고,
+ * 게시자까지 대조해야 비로소 "리뷰·게이트가 실제로 돌았다"의 기계적 흔적이 된다. 조회 대상 sha가 곧
+ * 그 상태가 붙은 커밋이므로 target sha 검사는 구조적으로 참이다(호출자가 PR head로 묻는다).
+ *
+ * KTB-46이 이것을 꺼낸 이유: 사람이 머지한 보호 경로 PR을 sweeper가 `factory:merged`로 이을 때
+ * **같은 판정**이 필요한데, 그 팔에는 체크아웃도 이번 런의 게이트 파일도 없다. 머지는 이미 일어났고
+ * 되돌릴 수 없으며, 그 커밋에 대해 남아 있는 증거는 GitHub이 들고 있는 이 두 상태다. 판정을 두 번
+ * 구현하면 두 판정이 갈라진다 — 같은 함수를 두 곳이 부른다.
+ *
+ * 순수 함수다: 조회(로그인 해석·상태 조회)와 그 실패 처리는 호출자의 몫이고, 여기서는 **이미 읽은
+ * 것**만 본다. `logins`가 비면 통과가 아니라 거부다(게시자를 대조할 기준이 없다 = 판정 불가).
+ */
+export function verifyFactoryStatuses({ sha, statuses, logins }) {
+  const short = String(sha || "").slice(0, 7);
+  const known = new Set((logins || []).filter(Boolean).map((l) => String(l).toLowerCase()));
+  if (!known.size) return { ok: false, reason: `the factory's own account could not be resolved — there is no way to tell who posted ${REVIEW_EVIDENCE_STATUSES.join(" / ")}` };
+  if (!Array.isArray(statuses)) return { ok: false, reason: `commit statuses for ${short} unreadable — no list returned` };
+  for (const context of REVIEW_EVIDENCE_STATUSES) {
+    // 같은 context가 여러 번 게시됐으면 **가장 최근 것**이 유효한 상태다 — GitHub의 목록 API가
+    // 최신순이므로 첫 항목을 본다(호출자가 그 순서를 지킨다).
+    const posted = statuses.filter((s) => s?.context === context);
+    if (!posted.length) return { ok: false, reason: `no ${context} commit status on PR head ${short} — the review stage never posted it for this commit` };
+    const latest = posted[0];
+    if (String(latest.state).toLowerCase() !== "success") return { ok: false, reason: `${context} on ${short} is "${latest.state}", not success` };
+    const by = String(latest.creatorLogin || "").trim();
+    if (!by) return { ok: false, reason: `${context} on ${short} names no creator — the poster cannot be identified` };
+    if (!known.has(by.toLowerCase())) {
+      return { ok: false, reason: `${context} on ${short} was posted by @${by}, which is not a factory account (${[...known].map((l) => `@${l}`).join(", ")}) — a commit status is writable by anything holding a repo-scoped token, so an unrecognised poster is a forged review signal` };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * 외부 감사 2026-09-14 H6 — 머지 전이 코멘트가 **사람의 서명이 어디 있었는지**를 한 줄로 말한다.
+ * `merge.human_gate`(CHARTER)는 설정이 아니라 선언이다: true면 `factory-merge` 환경의 required
+ * reviewer가 이 잡을 PR마다 한 번 멈춰 세웠고, false면 사람은 토큰을 한 번 등록했을 뿐이다.
+ */
+export function humanGateNote(humanGate) {
+  if (humanGate === true) return "merged after the factory-merge environment's required reviewer approved this job (CHARTER merge.human_gate=true)";
+  if (humanGate === false) return "dark merge — no per-PR human signature (CHARTER merge.human_gate=false)";
+  return "dark merge — CHARTER declares no merge.human_gate, so no per-PR human signature was required (run `factory doctor`: charter.merge-human-gate-unset)";
+}
 
 /** GitHub은 mergeable을 비동기로 계산한다 — UNKNOWN은 "영영 모름"이 아니라 "아직 안 끝남"이다.
  * 한 번만 재확인한다: 그사이 끝나면 믿고, 아니면 사람이 본다(무한정 기다리지 않는다). */
@@ -71,10 +154,24 @@ async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = D
  *    GitDiffError를 던질 수 있다), mergeGates() → { checksGreen, integrityGreen } (마찬가지),
  *    prReady?(pr) — draft PR을 ready로 뒤집는다(KTB-15; mergePr 직전. 없으면 건너뛰고 기록만 남긴다),
  *    mergePr(pr), transition({to,reason,mergeGatesResult?}), closeIssue(pr), sleep?(ms),
+ *    twoActor?(bool) + approvePr?(pr) — ADR-021 두 배우 모드: base 브랜치가 승인 1건을 요구하므로
+ *    머지 배우(`FACTORY_MERGE_TOKEN`)가 머지 **직전에** 승인한다. 단일 배우 모드면 `twoActor`가
+ *    falsy이고 이 경로는 통째로 없다(오늘까지의 동작 그대로),
  *    protectedPaths() → { ok, files, reason? } (KTB-5 — base 브랜치 코드로 계산한 보호 경로 목록),
  *    policyViolations() → { ok, files, reason? } (KTB-6 — `additive_only` 섹션 규칙을 벗어난 역할 파일).
  *    둘 다 ok:false거나 dep이 없으면 "위반 없음"이 아니라 **판정 불가**라 blocked다.
  *    comment?(number, body) → 그 번호(여기서는 PR)에 코멘트(best-effort).
+ *    외부 감사 H1c/H1b — 머지 직전 리뷰 검증(§(6b))의 재료. **전부 필수다**: 하나라도 없으면
+ *    "리뷰를 확인할 수 없다"이고 fail closed로 needs-human이다.
+ *      reviewEvidence() → { ok, data(review.v1), reason? }  최신 review handoff(스키마 검증 포함)
+ *      reviewRoster()   → { ok, roles: string[], reason? }  이 tier의 리뷰 로스터(정족수의 출처)
+ *      reviewRecord()   → { ok, record, reason? }  `factory/records`의 run 기록에 **러너가** 쓴
+ *        `review-evidence:` 줄(리뷰 batch-1 MF-2) — handoff의 출처 증명. 없거나 어긋나면 needs-human.
+ *      maxRounds        → K(charter.limits.K) | null
+ *      prHeadShaLive(pr)→ 지금 이 순간의 PR head sha(로컬 체크아웃이 아니라 GitHub이 답한 값)
+ *      commitStatuses(sha) → [{ context, state, creatorLogin }] — **최신순**
+ *      factoryLogins()  → { ok, logins: string[], reason? }  팩토리 자신의 계정 이름(값이 아니라 이름)
+ *    humanGate?       → CHARTER `merge.human_gate`(boolean|undefined) — 머지 전이 텍스트에만 쓴다.
  * headSha: review·merge가 checkoutHead로 고정한 PR head — 없으면 gates().head_sha로 대신한다(둘 다
  * 없으면 "unknown"으로 남긴다. 아무것도 지어내지 않는다).
  * postStatus({context,state,description,sha}): run-stage의 상태 게시 헬퍼(no-sha skip + best-effort 포함) —
@@ -96,7 +193,7 @@ async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = D
  * 자체가 맞는 결과이므로 전이를 부르지 않고 기록만 남기되, `factory-blocked-origin` 마커는
  * (transition()을 안 거치므로) 직접 새로 남긴다 — sweeper의 blocked 팔이 여전히 유효한 origin을 본다.
  */
-export async function runMergeStage({ issue, defaultBranch, headSha, d, record, refusal, postStatus, retryFromBlocked = false }) {
+export async function runMergeStage({ issue, defaultBranch, headSha, d, record, refusal, postStatus, retryFromBlocked = false, stamp = {} }) {
   const sleep = d.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let leftBlocked = !retryFromBlocked;             // 재시도가 아니면 애초에 "여전히 blocked"인 특수 케이스가 없다
   /**
@@ -201,7 +298,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   if (!prot?.ok) return await undecidable("protected-path check", prot?.reason);
   if (prot.files.length) {
     return await handToHuman({
-      reason: `protected paths changed — human merge required: ${prot.files.join(", ")}`,
+      reason: `protected paths changed — ${HUMAN_MERGE_REQUIRED_TEXT}: ${prot.files.join(", ")}`,
       sections: [{
         heading: "보호 경로 변경",
         why: [
@@ -227,10 +324,16 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // 뒤는 누적된 교훈이 통째로 사라지는 diff다. 그래서 파일 목록을 규칙으로 갈라 각자의 제목으로 낸다.
   if (pol.files.length) {
     const lessons = [...new Set((pol.violations || []).filter((v) => LESSONS_RULE_RE.test(v.rule)).map((v) => v.file))];
-    const additive = pol.files.filter((f) => !lessons.includes(f));
+    // M9(ADR-023): harness.toml의 얼어붙은 섹션도 같은 배열에 실려 온다 — 세 번째 제목으로 가른다.
+    const frozen = (pol.violations || []).filter((v) => HARNESS_SECTION_RULE_RE.test(v.rule));
+    const frozenFiles = [...new Set(frozen.map((v) => v.file))];
+    // 외부 감사 H5: 네 번째 제목 — 기존 테스트의 수정·삭제.
+    const testsChanged = (pol.violations || []).filter((v) => TESTS_RULE_RE.test(v.rule));
+    const testFiles = [...new Set(testsChanged.map((v) => v.file))];
+    const additive = pol.files.filter((f) => !lessons.includes(f) && !frozenFiles.includes(f) && !testFiles.includes(f));
     const sections = [], reasons = [];
     if (additive.length) {
-      reasons.push(`agent role sections edited outside Examples/Perspectives — human merge required: ${additive.join(", ")}`);
+      reasons.push(`agent role sections edited outside Examples/Perspectives — ${HUMAN_MERGE_REQUIRED_TEXT}: ${additive.join(", ")}`);
       sections.push({
         heading: "역할 프롬프트의 허용 섹션 밖 편집",
         why: [
@@ -243,7 +346,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       });
     }
     if (lessons.length) {
-      reasons.push(`lessons files deleted or moved away — human merge required: ${lessons.join(", ")}`);
+      reasons.push(`lessons files deleted or moved away — ${HUMAN_MERGE_REQUIRED_TEXT}: ${lessons.join(", ")}`);
       sections.push({
         heading: "lessons 파일 삭제/이동",
         why: [
@@ -254,6 +357,42 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
           "", "사라진 lessons 파일:",
         ],
         files: lessons,
+      });
+    }
+    if (frozen.length) {
+      const which = [...new Set(frozen.map((v) => /\[([a-z._]+)\]/.exec(v.rule)?.[1]).filter(Boolean))];
+      reasons.push(`harness.toml frozen sections edited — ${HUMAN_MERGE_REQUIRED_TEXT}: ${which.map((s) => `[${s}]`).join(", ")}`);
+      sections.push({
+        heading: "harness.toml의 판정 기준 섹션 편집",
+        why: [
+          "`factory:harness` 이슈의 builder는 `.factory/harness.toml`을 편집할 수 있지만(§5.2.1),",
+          "`[protected]`·`[gates.thresholds]`·`[load_bearing]`은 **판정 기준 자체**입니다 — 보호 목록을",
+          "넓히거나 임계값을 낮추면 그 PR이 스스로를 통과시키게 됩니다. 훅이나 경로 deny로는 막을 수",
+          "없습니다(어느 섹션에 떨어지는 편집인지는 내용을 읽어야 압니다). 그래서 사람이 머지합니다",
+          "(외부 감사 M9 / ADR-023).",
+          "", `바뀐 섹션: ${which.map((s) => `[${s}]`).join(", ")}`,
+        ],
+        files: frozenFiles,
+      });
+    }
+    /**
+     * 외부 감사 H5 — **기존 테스트를 고치는 것은 "무엇이 통과인가"를 고치는 것이다.** 변조로 다루지
+     * 않는 이유는 스펙이 바뀌면 기존 단언이 실제로 틀리기 때문이고(그때는 이슈 본문의
+     * `tests_changed_allowed:`가 길을 연다 — 그 표식은 **이슈**에 있어야 한다: PR diff 안에 있으면
+     * 그 PR이 스스로를 허가한다), 그럼에도 자동 머지가 안 되는 이유는 그 판단이 사람의 것이기 때문이다.
+     */
+    if (testsChanged.length) {
+      reasons.push(`existing tests modified or deleted — ${HUMAN_MERGE_REQUIRED_TEXT}: ${testFiles.join(", ")}`);
+      sections.push({
+        heading: "기존 테스트의 수정·삭제",
+        why: [
+          "`[protected].tests_are_load_bearing`이 이 저장소의 규약입니다: 테스트는 하중을 받습니다.",
+          "기존 테스트의 단언을 바꾸거나 파일을 지우는 것은 코드를 고치는 일이 아니라 **합격선을**",
+          "고치는 일이라, 팩토리가 스스로 머지하지 않습니다. 스펙이 바뀌어 그 단언이 실제로 틀렸다면",
+          "이슈 본문에 `tests_changed_allowed:`로 그 파일을 적으면 됩니다(외부 감사 H5 / ADR-023).",
+          "", "바뀌거나 사라진 기존 테스트:",
+        ],
+        files: testFiles,
       });
     }
     return await handToHuman({ reason: reasons.join("; "), sections });
@@ -276,10 +415,17 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   if (gates && gates.diagnostic !== true && postStatus) {
     await postStatus({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
   }
+  // KTB-21 parity with run-stage (implement/review): `[factory.test.env].compose`가 있으면 게이트가
+  // 명령을 돌리기 전에 env를 한 번 더 re-up했다(멱등) — 성공/실패 둘 다 run 기록에 남긴다. `ran`이
+  // 없으면(=이 하네스는 compose를 안 쓴다) 아무 줄도 붙지 않는다. merge에도 같은 dep(gates())이
+  // 붙어 있으므로 결과를 흘려버리지 않는다 — 아래 세 갈래(BLOCKED/비-GREEN/GREEN) 모두에 붙인다.
+  const testEnvNote = gates?.test_env_reup?.ran
+    ? [`test-env: re-up ${gates.test_env_reup.ok ? "ok" : `failed — ${gates.test_env_reup.detail}`}`]
+    : [];
   if (gates?.status === "BLOCKED") {
     const reason = gates.blocked_reason || "gates could not be decided";
     const t = await toBlocked(reason);
-    record([`merge: gates BLOCKED — ${reason}`, ...refusal(t)]);
+    record([`merge: gates BLOCKED — ${reason}`, ...refusal(t), ...testEnvNote]);
     return 2;
   }
   // gates가 아예 없는 것(null/undefined)은 "통과"가 아니라 **판정 없음**이다 — 게이트 파일이
@@ -288,10 +434,13 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   if (!gates || gates.status !== "GREEN") {
     const reason = `gates ${gates?.status ?? "missing"} at merge`;
     const t = await d.transition({ to: "factory:needs-human", reason });
-    record([`merge: gates ${gates?.status ?? "missing"}`, ...refusal(t)]);
+    // Feedback loop Task 1/3 — 이름뿐인 `merge: gates RED`는 **왜** 빨간지를 말하지 않는다. run-stage가
+    // 이미 닫은 그 구멍(7일짜리 아티팩트에만 남던 뿌리)이 머지 직전의 게이트에서만 열려 있었다.
+    // `stamp`가 이 줄을 이 런에 묶는다 — 묶이지 않은 줄은 Task 3의 harvester가 증거로 세지 않는다.
+    record([`merge: gates ${gates?.status ?? "missing"}`, ...gatesDetailLines(gates, stamp), ...refusal(t), ...testEnvNote]);
     return 2;
   }
-  record([`merge: gates ${gates.status}`]);
+  record([`merge: gates ${gates.status}`, ...testEnvNote]);
 
   // (4b) KTB-15b: blocked에서 재시도된 런이면, 게이트가 방금 다시 GREEN으로 확인된 지금이 라벨을
   // approved로 되돌릴 유일하게 정당한 시점이다(위 doc comment 참고) — 아래 mergeGates·prReady·mergePr는
@@ -429,6 +578,160 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     record(["merge: prReady dep not wired — merging without the draft flip"]);
   }
 
+  // (6b) 외부 감사 2026-09-14 H1c/H1b — **리뷰가 실제로 있었는가.** 여기까지 오는 동안 확인된 것은
+  // "게이트가 GREEN이다", "필수 체크가 GREEN이다", "무결성이 GREEN이다"뿐이고, 그 어느 것도 *리뷰어
+  // 다섯이 이 diff를 봤다*를 말하지 않는다. 감사 전 코드에서는 `factory:merged` 규칙만이 리뷰를
+  // 물었는데 그 규칙은 `mergePr` **뒤에** 평가되고(아래 (7)), 정족수·all-approve는 아예 묻지 않았다.
+  // 그래서 위조한 review handoff 코멘트 + 위조한 commit status + 라벨 편집 하나면 리뷰어가 한 번도
+  // 뜨지 않은 채 main에 들어갈 수 있었다(H1 체인).
+  //
+  // **자리가 여기인 이유**: PR head는 ready 플립과 체크 안정화가 끝난 지금 확정된다. 리뷰 증거는
+  // 그 커밋에 묶여야 의미가 있으므로, 이 순간의 라이브 PR head를 다시 물어 그것으로 판정한다.
+  // 승인(6c)보다도 **앞**이다 — 실패하면 머지도, 승인도 없다(승인 자체가 사람 눈에는 "팩토리가
+  // 이 PR을 통과시켰다"는 서명이다).
+  //
+  // 네 가지를 묻는다:
+  //   (a) 이 PR head sha에 묶인 `review.v1` handoff가 있는가
+  //   (b) 정족수(= 이 tier의 로스터 크기)와 all-approve — handoff의 자기 신고 `decision`이 아니라
+  //       `must_fix`에서 `aggregate`로 **다시 계산한다**(lib/review-quorum.js)
+  //   (c) 라운드가 K를 넘지 않는가
+  //   (d) `factory/review`·`factory/gates` 상태를 **팩토리가** 게시했는가(creator.login 대조) —
+  //       그리고 그 상태가 붙은 커밋이 PR head인가(이 sha로 조회하므로 구조적으로 참이다)
+  //
+  // 하나라도 확인 불가면(dep 미배선·조회 실패·로그인 미해결) GREEN이 아니라 **판정 불가**이고,
+  // 머지는 되돌릴 수 없으므로 fail closed로 `needs-human`이다.
+  // KTB-42 — review 런이 run 기록에 남긴 qa 증거 매니페스트의 지문. 아래 (b2)에서 채워지고
+  // `factory:merged` 전이에 그대로 실린다(`lib/requirements.js` qaEvidenceGate가 다시 묻는다).
+  let qaManifestRecorded = null;
+  const reviewRefused = async (reason) => {
+    const line = `review verification failed — ${reason}`;
+    const t = await d.transition({ to: "factory:needs-human", reason: line });
+    record([`merge: ${line}`, ...refusal(t)]);
+    return 2;
+  };
+  {
+    const missingDeps = ["reviewEvidence", "reviewRoster", "reviewRecord", "reviewRunId", "prHeadShaLive", "commitStatuses", "factoryLogins"].filter((k) => !d[k]);
+    if (missingDeps.length) {
+      return await reviewRefused(`review-evidence deps not wired (${missingDeps.join(", ")}) — the merge stage cannot prove a review happened, and an unverified review is not a passed review`);
+    }
+
+    let live;
+    try { live = await d.prHeadShaLive(pr); }
+    catch (e) { return await reviewRefused(`PR #${pr} head sha unreadable: ${e?.message || e}`); }
+    if (!live) return await reviewRefused(`PR #${pr} head sha unreadable — no sha returned`);
+    // checkoutHead가 고정한 sha와 지금의 PR head가 다르면, 게이트·리뷰가 본 트리가 아닌 것이 머지된다.
+    if (sha && live !== sha) return await reviewRefused(`PR head moved during this run — gates verified ${sha.slice(0, 7)}, PR head is now ${live.slice(0, 7)}`);
+
+    let ev;
+    try { ev = await d.reviewEvidence(); }
+    catch (e) { return await reviewRefused(`review handoff unreadable: ${e?.message || e}`); }
+    if (!ev?.ok) return await reviewRefused(ev?.reason || "review handoff missing or invalid");
+
+    let ros;
+    try { ros = await d.reviewRoster(); }
+    catch (e) { return await reviewRefused(`review roster unresolvable: ${e?.message || e}`); }
+    if (!ros?.ok || !Array.isArray(ros.roles) || ros.roles.length === 0) {
+      return await reviewRefused(ros?.reason || "review roster unresolvable — quorum cannot be checked");
+    }
+
+    const q = verifyReviewQuorum({ data: ev.data, rosterSize: ros.roles.length, rosterRoles: ros.roles, maxRounds: d.maxRounds ?? null, prHeadSha: live });
+    if (!q.ok) return await reviewRefused(q.reason);
+    record([`merge: review verified — ${ros.roles.length}/${ros.roles.length} approve on ${live.slice(0, 7)}, round ${ev.data.round}${Number.isInteger(d.maxRounds) ? ` (K=${d.maxRounds})` : ""}, decision recomputed from must_fix`]);
+
+    // (b2) 리뷰 batch-1 MF-2 — **그 handoff는 실제로 돈 review 런의 것인가.** 위 (b)까지가 보는 것은
+    // handoff의 *내용*뿐이고, 그 코멘트는 모든 스테이지가 공유하는 봇 계정으로 나간다(`gh issue comment`는
+    // 훅이 일부러 열어 둔 문이다) — 곧 all-approve handoff를 손으로 지어내면 (b)를 그대로 통과했다.
+    // 그래서 `factory/records`의 run 기록에 **러너가** 남긴 `review-evidence:` 줄과 대조한다: 같은 커밋,
+    // 같은 verdict 집합, 같은 라운드여야 한다. 기록을 못 읽는 것도 통과가 아니다(fail closed).
+    //
+    // 리뷰 batch-2 MF-2 — 그런데 **어느 줄이 그 런의 것인가**를 파일 순서로 정하면("마지막 줄") 그
+    // 기록 파일에 줄을 덧붙일 수 있는 누구든 판정을 대신 쓸 수 있다(재리뷰가 rc=0으로 확인했다).
+    // 그래서 런 id를 먼저, **기록과 다른 채널**에서 읽는다: 이 이슈의 review 하트비트가 싣는
+    // `runner: gha-<run id>`. 그 값을 기대값으로 넘겨 같은 런이 쓴 줄만 고르고, 대조한다.
+    let expected;
+    try { expected = await d.reviewRunId(); }
+    catch (e) { return await reviewRefused(`${NOT_BOUND} — the review run id could not be read from this issue: ${e?.message || e}`); }
+    if (!expected?.ok || !expected.runId) return await reviewRefused(`${NOT_BOUND} — ${expected?.reason || "the review run that produced this handoff could not be named"}`);
+
+    let rec;
+    try { rec = await d.reviewRecord({ runId: expected.runId }); }
+    catch (e) { return await reviewRefused(`${NOT_BOUND} — the records branch could not be read: ${e?.message || e}`); }
+    if (!rec?.ok) return await reviewRefused(`${NOT_BOUND} — ${rec?.reason || "the review run record is unavailable"}`);
+    const prov = verifyReviewProvenance({ handoff: ev.data, record: rec.record, prHeadSha: live, expectedRunId: expected.runId });
+    if (!prov.ok) return await reviewRefused(prov.reason);
+    record([`merge: review evidence bound to the factory/records run record — review run ${rec.record.runId} (${rec.record.runnerId || "unknown"}) on ${String(rec.record.headSha).slice(0, 7)}, round ${rec.record.round ?? "?"}`]);
+
+    /**
+     * ── ADR-024 / KTB-42 — **qa 증거도 그 줄에서 읽는다.** ──────────────────────────────────────
+     * 매니페스트 파일(`.factory/out/qa/<issue>/manifest.json`)은 커밋되지 않으므로 머지 스테이지의 새
+     * 체크아웃에는 존재하지 않는다. 볼 수 있는 것은 review 런이 run 기록에 남긴 지문 하나뿐이고,
+     * 그 자리는 러너만 쓴다(에이전트 세션의 `factory/records` push는 훅이 막는다).
+     * 로스터에 `qa`가 있는데 그 지문이 없다 = 유효한 증거가 있었다는 증인이 없다 = 판정 불가.
+     * KTB #3의 교훈을 뒤집어 적용한다: "증거가 없다"는 이제 빌더를 가리키지 않고, **되돌릴 수 없는
+     * 단계 앞에서 멈추는 이유**가 된다.
+     */
+    if (ros.roles.includes("qa")) {
+      qaManifestRecorded = rec.record.qaManifest ?? null;
+      if (!qaManifestRecorded) {
+        return await reviewRefused(`${NOT_BOUND} — this tier's roster includes qa, but the review run recorded no qa_manifest digest for ${live.slice(0, 7)}. A valid qa evidence manifest (\`node .factory/bin/qa-evidence.js finish --issue ${issue}\`) is what that digest names, and without it nothing witnesses that the evidence existed`);
+      }
+      record([`merge: qa evidence manifest ${qaManifestRecorded.slice(0, 12)} bound to the review run record`]);
+    }
+
+    // (d) 게시자. 에이전트 스테이지가 쥔 토큰으로도 `POST /statuses/<sha>`는 나갈 수 있으므로
+    // (감사 H1b — 훅은 그 위의 한 겹일 뿐이다), "상태가 success다"만으로는 아무것도 증명되지 않는다.
+    // 팩토리 자신의 계정(들)을 `gh api user`로 한 번 해석하고 그것과 대조한다. 해석 실패는 통과가
+    // 아니라 **판정 불가**다.
+    let logins;
+    try { logins = await d.factoryLogins(); }
+    catch (e) { logins = { ok: false, reason: `${e?.message || e}` }; }
+    if (!logins?.ok || !Array.isArray(logins.logins) || logins.logins.length === 0) {
+      return await reviewRefused(`the factory's own account could not be resolved (gh api user) — there is no way to tell who posted ${REVIEW_EVIDENCE_STATUSES.join(" / ")}: ${logins?.reason || "unknown"}`);
+    }
+    let statuses;
+    try { statuses = await d.commitStatuses(live); }
+    catch (e) { return await reviewRefused(`commit statuses for ${live.slice(0, 7)} unreadable: ${e?.message || e}`); }
+
+    // KTB-46: 판정 자체는 `verifyFactoryStatuses`(위) 하나다 — sweeper의 사람-머지 반영 팔이 같은
+    // 함수를 부른다. 여기서 하던 일과 문구는 한 글자도 바뀌지 않았다(r3 nit 5: "목록이 아니다"
+    // 검사는 그 함수 안에 한 벌만 남긴다 — 문장이 같으므로 여기서 먼저 접던 줄을 지웠다).
+    const posted = verifyFactoryStatuses({ sha: live, statuses, logins: logins.logins });
+    if (!posted.ok) return await reviewRefused(posted.reason);
+    record([`merge: ${REVIEW_EVIDENCE_STATUSES.join(" + ")} on ${live.slice(0, 7)} posted by the factory`]);
+  }
+
+  // (6c) ADR-021 — **두 배우 모드에서는 승인이 머지보다 먼저다.** 두 배우 모드의 base 브랜치는
+  // 승인 1건을 요구하므로(`required_pull_request_reviews`), 승인 없이 부른 `gh pr merge`는 GitHub이
+  // 거부한다. 승인은 **머지 배우**(`FACTORY_MERGE_TOKEN`, 이 잡의 `GH_TOKEN`)로 나가고, PR을 연
+  // 계정은 에이전트 배우라 서로 다르다 — 그래서 이 승인은 유효하다. 반대로 에이전트 스테이지가
+  // 자기 토큰으로 같은 호출을 해도 GitHub이 422(`Can not approve your own pull request`)로 막는다:
+  // 이 설계가 "명령 열거"가 아니라 "권한"으로 서 있는 지점이 여기다.
+  //
+  // **자리가 여기인 이유**: 승인은 PR head sha에 묶이고 `dismiss_stale_reviews: true`라 새 커밋이
+  // 들어오면 무효가 된다 — 모든 게이트·체크가 끝난 뒤, 머지 직전이 승인이 낡지 않는 유일한 자리다.
+  //
+  // **거부는 `needs-human`이지 `blocked`이 아니다.** blocked은 sweeper와 재시도 경로가 자동으로 다시
+  // 미는 상태인데(§KTB-15b), 승인 거부의 원인(같은 계정·토큰 스코프 부족·머지 배우가 협력자가 아님)은
+  // 전부 **사람이 계정 설정을 고쳐야** 풀린다. 같은 호출을 다시 하면 같은 422가 돌아올 뿐이고,
+  // 그 재시도는 비용만 태운다. 그래서 한 번 실패하면 사유를 이름으로 대고 사람에게 넘긴다.
+  if (d.twoActor) {
+    if (!d.approvePr) {
+      const reason = "two-actor mode is on but the approvePr dep is not wired — the merge actor cannot approve, and the base branch requires 1 approving review (ADR-021)";
+      const t = await d.transition({ to: "factory:needs-human", reason });
+      record([`merge: ${reason}`, ...refusal(t)]);
+      return 2;
+    }
+    try {
+      await d.approvePr(pr);
+      record([`merge: PR #${pr} approved by the merge actor (two-actor mode)`]);
+    } catch (e) {
+      const reason = `two-actor approval refused — the merge actor could not approve PR #${pr}: ${e?.message || e}. The approving account must differ from the PR author (GitHub rejects self-approval with 422) — check that FACTORY_MERGE_TOKEN belongs to an admin account other than the FACTORY_BOT_TOKEN account (ADR-021)`;
+      const t = await d.transition({ to: "factory:needs-human", reason });
+      record([`merge: approvePr FAIL — ${reason}`, ...refusal(t)]);
+      return 2;
+    }
+  }
+
   try {
     await d.mergePr(pr);
   } catch (e) {
@@ -441,7 +744,12 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
 
   // (7) 라벨 전이. 이 시점부터는 되돌릴 수 없다 — 거부돼도 needs-human 코멘트는 transition() 자신이
   // 남기므로 여기서는 record만 하고 계속 진행한다(이슈는 그래도 닫는다).
-  const t = await d.transition({ to: "factory:merged", mergeGatesResult: mg });
+  //
+  // 외부 감사 H6 — **사람의 서명이 이 머지에 있었는가를 전이 텍스트가 말한다.** `merge.human_gate`가
+  // true이면 이 잡 자체가 `factory-merge` 환경의 required reviewer 앞에서 한 번 멈췄다는 뜻이고
+  // (곧 사람이 PR마다 "돌려라"를 눌렀다), false이면 사람의 서명은 토큰 등록 1회뿐이다 — 그것이
+  // 다크 루프의 정의이고, 기록에 소리 내어 남아야 한다. 값이 없으면(구형 CHARTER) 그 사실을 적는다.
+  const t = await d.transition({ to: "factory:merged", reason: humanGateNote(d.humanGate), mergeGatesResult: mg, qaManifestRecorded });
   record([...(t.ok ? [`transition: ${t.to}`] : refusal(t))]);
 
   // (8) 추적 이슈를 닫는다 — 코드는 이미 머지됐다. 이것도 실패해도 머지 자체는 되돌릴 게 없으므로
@@ -451,6 +759,37 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     record([`merge: issue #${issue} closed via PR #${pr}`]);
   } catch (e) {
     record([`merge: issue close failed — ${e?.message || e}`]);
+  }
+
+  // (9) ADR-020 KTB-23 — 방금 머지한 것이 **하네스 이슈**였다면, 그것이 막고 있던 피처 이슈를 푼다.
+  // 연결고리는 하네스 이슈 본문의 `Blocks: #<n>` 한 줄뿐이다(`lib/harness-request.js`가 그 줄을 쓰고
+  // 이 자리가 읽는다 — 같은 모듈이라 두 문법이 갈라질 수 없다). 평범한 이슈의 머지는 그런 줄이
+  // 없으므로 아무 일도 하지 않는다.
+  //
+  // **retro가 아니라 merge에서 하는 이유**: retro는 머지 N건마다 도는 학습 잡이라 "이번 머지"와 1:1이
+  // 아니다(경량 회차는 아예 이 판단을 하지 않는다). 차단 해제는 머지 그 자체의 결과여야 한다 —
+  // 하네스가 들어온 순간이 피처가 다시 돌 수 있게 된 순간이다.
+  //
+  // **여기는 빠른 경로일 뿐이다**(ADR-020 KTB-23 fix). 하네스 PR은 구성상 보호 경로를 건드리므로
+  // 단계 (3)이 자동 머지를 거부하고 `needs-human`으로 넘긴다 — 실제 머지는 사람이 GitHub에서 하고,
+  // 그 경로에서 이 코드는 **한 줄도 실행되지 않는다**. 해제의 1차 경로는 sweeper의 needs-info 팔
+  // (`lib/sweeper.js`의 `sweepHarnessUnpark`)이고, 이 자리는 팩토리가 스스로 머지할 수 있었던 드문
+  // 경우(보호 경로에 걸리지 않는 변경만 남은 재시도)를 몇 초 일찍 푸는 값이다. 둘은 마커가 아니라
+  // 라벨로 겹침을 피한다: 이 전이가 성공하면 이슈는 더 이상 `factory:needs-info`가 아니라서 sweeper의
+  // 조회에 잡히지 않고, 실패하면 sweeper가 다음 sweep에서 다시 시도한다.
+  //
+  // 전부 best-effort다: 머지는 이미 일어났고 되돌릴 것이 없다. 전이가 거부돼도(사람이 그 사이 라벨을
+  // 옮겼을 수 있다) 기록만 남기고 exit 0을 유지한다 — `needs-info → queue`는 사람도 `:unstick`으로 할 수 있다.
+  if (d.issueBody && d.transitionOther) {
+    try {
+      for (const blocked of parseBlocks(await d.issueBody())) {
+        if (blocked === issue) continue;                 // 자기 자신을 가리키는 본문은 무시한다
+        try {
+          const t = await d.transitionOther({ issue: blocked, to: "factory:queue", reason: `harness issue #${issue} merged` });
+          record([t.ok ? `merge: unblocked #${blocked} — ${t.from} → ${t.to}` : `merge: unblock #${blocked} refused — ${t.reason}`]);
+        } catch (e) { record([`merge: unblock #${blocked} failed — ${e?.message || e}`]); }
+      }
+    } catch (e) { record([`merge: blocked-issue lookup failed — ${e?.message || e}`]); }
   }
 
   return 0;

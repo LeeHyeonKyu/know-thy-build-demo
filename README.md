@@ -46,6 +46,17 @@ npm test
    `test/integration/db.test.js`는 가용성을 스스로 확인하지 않고 곧바로 `psql`을 부르므로,
    기다리지 않고 다음 줄로 넘어가면 그 실패는 "DB가 아직 안 떴다"가 아니라 불투명한 연결 오류로 보인다.
    고정 대기(`sleep`)로 대신하지 않는다 — `docs/QA.md`의 결정성 규칙이 조건 대기만 허용한다.
+
+   이 실패는 **데이터 디렉터리를 처음 초기화하는 컨테이너**에서만 보인다. 그때는 `--wait` 없이
+   곧바로 다음 줄로 넘어가면 `psql`이 소켓을 찾지 못해 죽고(`No such file or directory`),
+   `--wait`을 붙이면 반환 직후의 같은 명령이 성공한다. 반대로 이미 초기화를 마친 컨테이너를
+   다시 쓰면 `--wait` 없이도 통과한다 — 그러니 "지난번엔 없어도 됐다"는 이 줄을 지울 근거가
+   되지 못하고, 이미 떠 있는 DB에 대고 한 번 더 돌려 본 실행은 이 순서를 검증하지 않는다.
+   DB가 준비됐는지 손으로 확인하려면 통합 테스트가 부르는 것과 **같은** 명령을 쓴다:
+
+   ```bash
+   docker compose -f docker-compose.test.yml exec -T db psql -U postgres -d demo -tAc "select 1"
+   ```
 3. `npm test` — `test/` 아래 unit과 integration이 **한 실행**에 함께 돈다(러너는 vitest).
 
 docker를 쓸 수 없는 환경이라면 통합 테스트만 제외하고 돌린다 — 파일을 하나씩 열거하지 않으므로

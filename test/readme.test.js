@@ -82,13 +82,24 @@ function sectionProblems(text) {
 
 // ---------------------------------------------------------------- dw3
 
+/**
+ * `application/json` 같은 **MIME 타입**과 `HTTP/1.1` 같은 **프로토콜 버전**. 둘 다 슬래시를 품지만
+ * 저장소 상대경로 주장이 아니다 — 걸러 내지 않으면 정직한 curl/HTTP 예시 한 줄이 "존재하지 않는
+ * 경로"로 오진된다(review cf2 실측). 확장자가 붙은 토큰(`docs/a.md`)은 isPathClaim에서 이 필터보다
+ * **먼저** 통과하므로 여기에 걸리지 않는다 — 펜스 안의 진짜 경로를 보는 눈은 그대로다.
+ */
+const MIME_TOKEN = /^(?:application|audio|example|font|image|message|model|multipart|text|video|x-[A-Za-z0-9.+-]+)\/[A-Za-z0-9.+-]+$/i;
+const PROTO_TOKEN = /^[A-Za-z][A-Za-z0-9.+-]*\/\d[\d.]*$/;
+
 /** 토큰이 "저장소 상대경로 주장"인가. 낱말(PORT, express)과 URL과 글로브는 주장이 아니다. */
 function isPathClaim(token) {
   if (!token || /\s/.test(token)) return false;
   if (token.includes("*")) return false; // 글로브는 경로 주장이 아니다
   if (token.includes("://") || token.startsWith("/") || token.startsWith("~") || token.startsWith("-") || token.startsWith("$")) return false;
   if (token.startsWith("#") || token.startsWith("mailto:")) return false;
-  return token.includes("/") || PATH_EXT.test(token);
+  if (PATH_EXT.test(token)) return true; // 확장자가 있으면 경로 주장이다 (아래 필터보다 먼저 본다)
+  if (MIME_TOKEN.test(token) || PROTO_TOKEN.test(token)) return false;
+  return token.includes("/");
 }
 
 const trimToken = (t) => t.replace(/^[('"`\[]+/, "").replace(/[)'"`\],;:.]+$/, "");

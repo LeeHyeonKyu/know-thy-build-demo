@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { once } from "node:events";
@@ -269,7 +269,7 @@ async function startEntrypoint() {
   const entry = entrypointOf(readPkg().scripts ?? {});
   if (!entry) throw new Error("package.json scripts.start에서 진입점 파일을 찾을 수 없다");
   const port = await reserveLoopbackPort();
-  const child = spawn(process.execPath, [new URL(entry, gateRoot).pathname], {
+  const child = spawn(process.execPath, [fileURLToPath(new URL(entry, gateRoot))], {
     cwd: process.cwd(),
     env: { ...process.env, PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
@@ -397,8 +397,10 @@ describe("#18 README guard", () => {
       expect.stringContaining("GET /version"),
     ]);
     // 오늘 응답하는데 "오늘 응답한다"로 적지 않으면 RED — dw5가 물어볼 줄이 사라지기 때문이다
+    // (그 줄은 "아직 없는 것"으로 읽히므로 스펙 귀속까지 요구받는다 — 두 진단이 같이 난다)
     expect(endpointProblems(eps(`- GET /healthz — 200\n${today("- GET /version")}`), fakeEnv())).toEqual([
       expect.stringContaining(`'${TODAY_CLAIM}'라고 적혀 있지 않다`),
+      expect.stringContaining("귀속되지 않았다"),
     ]);
     // 항목이 0개인 섹션도 RED
     expect(endpointProblems(eps("엔드포인트는 여러 개 있다."), fakeEnv())).toEqual([expect.stringContaining("하나도 적지 않았다")]);

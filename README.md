@@ -12,18 +12,23 @@ HTTP로 메모를 남기고 되찾기 위한 최소 노트 API다. Node 22 + Exp
 
 ## Endpoints
 
-오늘 이 서비스가 등록하는 라우트는 하나뿐이다. 나머지 줄은 스펙 문서를 가리키며, 그 문서가
-묘사하는 것은 아직 코드가 아니다 — 구현하는 사람은 해당 스펙부터 읽는다.
+오늘 이 서비스가 등록하는 라우트는 둘이다 — 아래에서 **오늘 응답한다**고 밝힌 줄이 그것이다.
+그 줄은 `test/readme.test.js`가 진입점을 띄워 직접 물어보고, 404가 돌아오면 게이트가 RED가 된다.
+나머지 줄은 스펙 문서를 가리키며 그 문서가 묘사하는 것은 아직 코드가 아니다 — 구현하는 사람은
+해당 스펙부터 읽는다.
 
 - GET /healthz — 오늘 응답한다. 200 `{"ok":true}` + 응답 헤더 `Cache-Control: no-store`
+- GET /version — 오늘 응답한다. 200 `{"version": …, "node": …}` — 빌드가 선언한 버전과 응답한 프로세스의 Node 런타임
 - POST /notes — 스펙: `docs/features/001-create-note.md`
 - GET /notes — 스펙: `docs/features/002-list-notes.md`(목록), `docs/features/003-search.md`(검색)
 
-서비스를 띄워 오늘 응답하는 라우트를 직접 확인하려면(기본 3000 포트, 환경변수 **PORT**로 바꾼다):
+응답 계약의 정본은 `docs/TECHNICAL.md` §Interfaces다. 서비스를 띄워 직접 확인하려면
+(기본 3000 포트, 환경변수 **PORT**로 바꾼다):
 
 ```bash
 npm start
 curl -i http://localhost:3000/healthz
+curl -i http://localhost:3000/version
 ```
 
 ## Run tests
@@ -59,7 +64,7 @@ e2e는 게이트 밖이다(`docs/TECHNICAL.md` §Testing Strategy).
 
 | 경로 | 무엇이 있나 |
 |---|---|
-| `src/app.js` | 소스 전부. Express 앱 구성 + 헬스 라우트 등록 + `app.listen()` 호출. `npm start`의 진입점 |
+| `src/app.js` | 소스 전부. Express 앱 구성 + 위 두 라우트 등록 + `app.listen()` 호출. `npm start`의 진입점 |
 | `test/smoke.test.js` | unit 스모크 + 헬스 응답 계약 회귀 가드 |
 | `test/readme.test.js` | 이 README의 회귀 가드 — 아래 규칙을 강제한다 |
 | `test/integration/db.test.js` | integration 스모크 — 컴포즈로 띄운 Postgres에 접속한다 |
@@ -67,10 +72,18 @@ e2e는 게이트 밖이다(`docs/TECHNICAL.md` §Testing Strategy).
 | `docker-compose.test.yml` | 테스트용 PostgreSQL 16 |
 | `docs/` | 제품·기술·QA 문서와 기능 스펙 |
 
-`src/` 아래에는 오늘 `src/app.js` 하나뿐이다. `docs/TECHNICAL.md` §Architecture가 그리는
-`routes → service → repository` 3층은 001~003을 구현할 때 만들어질 목표 구조다 —
-`src/routes/notes.js`·`src/service/notes.js`·`src/repo/notes.js` (아직 없음).
+`src/` 아래에는 오늘 `src/app.js` 하나뿐이다. `docs/TECHNICAL.md:36-44` §Architecture가 그리는
+`routes → service → repository` 3층은 001~003을 구현할 때 만들어질 목표 구조다:
 
-이 README에서 백틱으로 적힌 저장소 경로는 (아직 없음) 이라고 밝힌 것을 빼면 전부 디스크에
-실재해야 하고, 안내하는 npm 스크립트는 `package.json`에 실재해야 한다. 경로가 아닌 낱말
-(환경변수, 어휘)은 백틱 대신 굵게 적는다. 그래서 이 파일을 고칠 때는 `npm test`가 같이 돈다.
+- `src/routes/notes.js` · `src/service/notes.js` · `src/repo/notes.js` (아직 없음)
+
+이 파일을 고치는 사람을 위한 규칙 — `test/readme.test.js`가 강제하므로 `npm test`가 같이 돈다:
+
+1. 백틱으로 적은 저장소 경로는 디스크에 실재해야 한다. `docs/QA.md:37` 같은 줄 인용도 경로
+   부분으로 판정하므로 인용을 백틱 밖으로 뺄 필요가 없다.
+2. 마커는 **아직 없는** 경로에만 붙인다. 이미 생긴 경로가 마커 뒤에 남아 있으면 그것도 실패다 —
+   마커 하나가 그 줄의 모든 주장을 끄지 않는다. 마커는 이 섹션에서만 쓴다.
+3. 경로가 아닌 낱말(환경변수, 어휘)은 백틱 대신 굵게 적는다.
+4. `## Endpoints`에서 **오늘 응답한다**고 적은 METHOD+경로는 진입점에 실제로 물어본다.
+   아직 없는 것은 그렇게 적지 말고 `docs/features/` 아래의 스펙에 귀속시킨다.
+5. 안내하는 npm 스크립트는 `package.json`에 실재해야 한다.

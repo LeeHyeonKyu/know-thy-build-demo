@@ -1,6 +1,6 @@
 # Retro State
 
-- last retro: 2026-09-20T11:32:45.992Z
+- last retro: 2026-09-21T02:34:43.093Z
 - merges since last retro: 0
 - current N: 1
 
@@ -10,26 +10,33 @@
 | --- | --- | --- | --- | --- |
 | 2026-09-12T17:07:22.748Z | 1 | 1 | 1 | 3 |
 | 2026-09-20T11:32:45.992Z | 7 | 1 | 1 | 16 |
+| 2026-09-21T02:34:43.093Z | 3 | 1 | 1 | 2 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 2 |
-| review rounds avg | 0 | 1 |
-| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.5 / 1 / 1 |
+| merged | 1 | 3 |
+| review rounds avg | 1 | 1 |
+| rounds/issue (plan/impl/review) | 1 / 1 / 1 | 0.67 / 1 / 1 |
 | escaped defects | 0 | 0 |
-| revert rate | 없음 | 0.00 (0/2) |
-| needs-human | 2 | 19 |
+| revert rate | 0.00 (0/1) | 0.00 (0/3) |
+| needs-human | 2 | 21 |
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
-| qa na ratio | 0.09 (1/11 claims, na-heavy 0/1 approvals) | 0.00 (0/15 claims, na-heavy 0/1 approvals) |
-| cost (usd) | 19.18 | 578.70 |
-| tokens | input 420417 / output 43089 | input 9329121 / output 1029151 |
-| retro cost (usd) | 0.00 | 2.55 |
-| retro tokens | input 0 / output 0 | input 4 / output 6012 |
-| full retros | — | 2 |
+| qa na ratio | 0.09 (1/11 claims, na-heavy 0/1 approvals) | 0.04 (1/26 claims, na-heavy 0/2 approvals) |
+| cost (usd) | 19.18 | 597.88 |
+| tokens | input 420417 / output 43089 | input 9749538 / output 1072240 |
+| retro cost (usd) | 1.65 | 4.20 |
+| retro tokens | input 2 / output 2568 | input 6 / output 8580 |
+| full retros | — | 3 |
+
+### Rounds per issue (this window)
+
+| issue | plan | implement | review | escaped |
+| --- | --- | --- | --- | --- |
+| #45 | 1 | 1 | 1 | 0 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -43,7 +50,7 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-09-20T11:32:45.992Z",
+    "last_retro_at": "2026-09-21T02:34:43.093Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
@@ -171,6 +178,82 @@
             ".factory/lessons/plan-synthesizer.md",
             ".claude/agents/reviewer-qa.md",
             ".claude/agents/plan-skeptic.md"
+          ]
+        },
+        {
+          "step": "harness",
+          "title": "harness: promote to M2 — HTTP route surface present (express/fastify/hono/koa/next dependency, or routes-style files) but harness maturity is M1 or below",
+          "skipped": "duplicate"
+        }
+      ],
+      "n_before": 1,
+      "n_after": 1
+    },
+    {
+      "at": "2026-09-21T02:34:43.093Z",
+      "yield": 3,
+      "needs_human_since": 2,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            45
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "reason": "factory identity is a personal account (LeeHyeonKyu) — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity"
+            }
+          ]
+        },
+        {
+          "step": "lessons:factory-builder",
+          "added": [
+            "L-2026-09-21-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "lessons:qa",
+          "added": [],
+          "rejected": [],
+          "evicted": [],
+          "cited": [
+            {
+              "id": "L-2026-09-20-02",
+              "from": 0,
+              "to": 1
+            }
+          ]
+        },
+        {
+          "step": "role:factory-builder",
+          "added": [
+            {
+              "section": "### 나쁜 발견",
+              "text": "\"#39이 쓴 `test_39_version_*` 다섯 개(`test/smoke.test.js:228·240·260·272·308`)가 `expect(body).toEqual({ version: expect.any(String) })`로 응답 키 집합을 닫아 놔서, `node` 필드를 더하려면 그 다섯 줄을 고치는 수밖에 없었다 — 고쳤다.\" — 두 번 틀렸다. (1) 기존 테스트의 단언 변경은 `tests_are_load_bearing`(harness.toml:88)·CHARTER:53 위반이고, merge 스테이지가 'exis…"
+            },
+            {
+              "section": "## Perspectives",
+              "text": "**다음 필드를 더하는 사람**: 내가 지금 쓰는 단언이, 이 응답에 필드 하나를 더하려는 다음 이슈에게 '기존 테스트 수정' 말고 다른 길을 남기는가 — 지켜야 할 계약만, 한 테스트에서 닫는다."
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 49,
+          "merged": true,
+          "reason": null,
+          "files": [
+            ".factory/lessons/factory-builder.md",
+            ".factory/lessons/reviewer-qa.md",
+            ".claude/agents/factory-builder.md"
           ]
         },
         {
@@ -703,18 +786,25 @@
     ]
   },
   "stats": {
-    "merged": 0,
-    "review_rounds_avg": 0,
-    "plan_rounds_avg": 0,
-    "implement_rounds_avg": 0,
-    "rounds_per_issue": [],
+    "merged": 1,
+    "review_rounds_avg": 1,
+    "plan_rounds_avg": 1,
+    "implement_rounds_avg": 1,
+    "rounds_per_issue": [
+      {
+        "issue": 45,
+        "plan": 1,
+        "implement": 1,
+        "review": 1
+      }
+    ],
     "escaped_defects": 0,
     "escaped_defects_detail": [],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": null,
+    "revert_rate": 0,
     "rejects_by_role": {},
-    "review_runs": 0,
+    "review_runs": 1,
     "findings_total": 0,
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
@@ -731,44 +821,51 @@
         "input": 420417,
         "output": 43089
       }
+    },
+    "retro_usage": {
+      "cost_usd": 1.649486,
+      "tokens": {
+        "input": 2,
+        "output": 2568
+      }
     }
   },
   "stats_total": {
-    "merged": 2,
+    "merged": 3,
     "review_rounds_avg": 1,
-    "plan_rounds_avg": 0.5,
+    "plan_rounds_avg": 0.67,
     "implement_rounds_avg": 1,
     "escaped_defects": 0,
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {},
-    "review_runs": 1,
+    "review_runs": 2,
     "findings_total": 0,
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 19,
-    "qa_approvals": 1,
-    "qa_claims_total": 15,
-    "qa_na_total": 0,
-    "qa_na_ratio": 0,
+    "needs_human": 21,
+    "qa_approvals": 2,
+    "qa_claims_total": 25,
+    "qa_na_total": 1,
+    "qa_na_ratio": 0.04,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 578.698447,
+      "cost_usd": 597.876841,
       "tokens": {
-        "input": 9329121,
-        "output": 1029151
+        "input": 9749538,
+        "output": 1072240
       }
     },
     "retro_usage": {
-      "cost_usd": 2.554638,
+      "cost_usd": 4.204124,
       "tokens": {
-        "input": 4,
-        "output": 6012
+        "input": 6,
+        "output": 8580
       }
     },
-    "retros": 2
+    "retros": 3
   },
   "deferred_proposals": [],
   "deletion_candidates": []

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
@@ -320,6 +320,22 @@ const withSection = (heading, body) => {
 };
 const readmeExists = () => expect(existsSync(readmeUrl), `저장소 루트(${process.cwd()})에 README.md가 없다 (이슈 #18의 증상)`).toBe(true);
 
+/**
+ * dw5의 합성 "오늘 응답한다" 주장에 쓰는 경로. 이 저장소가 등록한 적도, `docs/features/*.md`가
+ * 예고한 적도 없는 이름이어야 한다 — 계획된 라우트로 뽑으면 그것을 구현하는 PR이 README와
+ * 무관하게 이 가드를 RED로 만든다(review cf1).
+ */
+const ABSENT_PATH = "/__readme_guard_absent__";
+
+/** 실재하는 기능 스펙 전문. 위 이름이 '예고된 라우트'가 아님을 기계로 확인하는 데만 쓴다. */
+function featureSpecText() {
+  const dir = new URL("docs/features/", gateRoot);
+  const names = readdirSync(dir).filter((n) => n.endsWith(".md"));
+  // 스펙이 0개면 아래 핀은 공허하게 참이 된다.
+  expect(names.length, "docs/features/*.md를 하나도 찾지 못했다").toBeGreaterThan(0);
+  return names.map((n) => readFileSync(new URL(n, dir), "utf8")).join("\n");
+}
+
 describe("#18 README guard", () => {
   it("test_18_readme_sections", () => {
     // README.md 부재는 이 이슈의 증상 그 자체다 — 조용히 skip하지 않고 시끄럽게 실패한다.
@@ -378,6 +394,21 @@ describe("#18 README guard", () => {
     // 판별력 (f) 마크다운 링크도 경로 주장이다 — title 문법에서도 수집한다(review qa-should_fix-2)
     expect(referenceProblems(layout("[앱](src/app.js)과 [스펙](docs/NOPE.md \"제목\")"), fakeEnv())).toEqual([expect.stringContaining("존재하지 않는 경로 'docs/NOPE.md'")]);
 
+    // 판별력 (h) 코드펜스 안의 **진짜 경로**는 여전히 본다 — 아래 (i)가 펜스 스캔을 끄지 않았음을
+    //           같은 실행에서 증명한다.
+    expect(referenceProblems(layout("`src/app.js`\n\n```bash\ndocker compose -f docker-compose.test.yml up -d --wait\n```"), fakeEnv())).toEqual([]);
+    expect(referenceProblems(layout("`src/app.js`\n\n```bash\ndocker compose -f docker-compose.nope.yml up -d\n```"), fakeEnv())).toEqual([
+      expect.stringContaining("존재하지 않는 경로 'docker-compose.nope.yml'"),
+    ]);
+
+    // 판별력 (i) 정직한 HTTP 예시는 '존재하지 않는 경로'가 아니다 (review cf2 실측): MIME 타입과
+    //           프로토콜 버전은 저장소 상대경로 주장이 아니다. 이 오진이 남으면 001을 문서화하는
+    //           사람은 Content-Type 헤더를 뺀 — 즉 Express 5의 json 파싱에서 **거짓인** — curl만
+    //           적을 수 있고, dw3 텍스트가 계약의 절반으로 명시한 "정직한 README는 RED가 되지
+    //           않는다"가 깨진다.
+    expect(referenceProblems(layout("`src/app.js`\n\n```bash\ncurl -i -H 'Content-Type: application/json' http://localhost:3000/notes\n```"), fakeEnv())).toEqual([]);
+    expect(referenceProblems(layout("`src/app.js`\n\n```http\nPOST /notes HTTP/1.1\nContent-Type: application/vnd.api+json\nAccept: text/markdown\n```"), fakeEnv())).toEqual([]);
+
     // 판별력 (g) 마커는 `## Layout` 밖에서 쓸 수 없다 (엔드포인트 상태 어휘로 번지지 않게)
     expect(markerProblems(withSection("## Endpoints", `- POST /notes ${PLANNED_MARKER}`))).toEqual([expect.stringContaining("'## Layout' 밖에서 쓸 수 없다")]);
     expect(markerProblems(layout(`\`src/routes/notes.js\` ${PLANNED_MARKER}`))).toEqual([]);
@@ -432,15 +463,21 @@ describe("#18 README guard", () => {
 
       // 판별력 (1) 없는 엔드포인트를 "오늘 응답한다"고 적으면 RED이고, 메시지는 관측된 404를 말한다
       //           (review cs4가 영구 GREEN으로 실측했던 바로 그 줄).
-      expect(await answerProblems(eps(`- POST /notes — ${TODAY_CLAIM}. 201 \`docs/features/001-create-note.md\``), app.port)).toEqual([
+      //           합성 주장의 경로는 **이 저장소가 앞으로도 등록하지 않을** 이름이어야 한다:
+      //           `POST /notes`로 뽑으면 001(P0)을 구현하는 PR이 README를 한 글자도 건드리지 않고
+      //           이 가드를 RED로 만든다(review cf1 실측). 판별력은 같고 src/app.js 결합만 없다.
+      expect(await answerProblems(eps(`- POST ${ABSENT_PATH} — ${TODAY_CLAIM}. 201`), app.port)).toEqual([
         expect.stringContaining("404"),
       ]);
+      // 그 이름이 계획된 라우트로 바뀌면 위 결합이 되살아나므로, 스펙이 예고한 경로가 아님을
+      // 기계로 붙들어 둔다 (rework 회귀 핀 cf1).
+      expect(featureSpecText()).not.toContain(ABSENT_PATH);
 
       // 판별력 (2) 라우트 목록을 얼리지 않는다: README가 /healthz만 주장하면 그것만 본다.
-      //           같은 프로세스가 /version에도 답하지만 이 검사는 그것을 요구하지 않으므로,
-      //           README를 건드리지 않은 다음 라우트 PR이 여기서 RED가 되지 않는다.
+      //           같은 프로세스가 다른 라우트에도 답하지만 이 검사는 그것을 요구하지 않으므로,
+      //           README를 건드리지 않은 다음 라우트 PR이 여기서 RED가 되지 않는다. (`/version`의
+      //           응답 계약을 여기서 다시 단언하지 않는다 — 그 계약은 test/smoke.test.js의 것이다.)
       expect(await answerProblems(eps(`- GET /healthz — ${TODAY_CLAIM}`), app.port)).toEqual([]);
-      expect((await fetch(`http://127.0.0.1:${app.port}/version`)).status).toBe(200);
 
       // 판별력 (3) 스펙에 귀속된 줄("오늘 응답한다"가 없는 줄)은 오늘 404여도 RED가 아니다
       expect(await answerProblems(eps("- POST /notes — 스펙: `docs/features/001-create-note.md`"), app.port)).toEqual([]);

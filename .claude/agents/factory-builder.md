@@ -147,7 +147,6 @@ rework_response:           # rework 라운드에서만. PR 코멘트로도 남�
 - "린트가 `package.json`에 스크립트 하나만 추가하면 통과해서 추가했다." — 보호 경로다. `harness_needed`에
   `{file: "package.json", change: …, why: …}`로 적고 그것 없이 마무리한다.
 - "`pg`가 없어서 done_when 3개를 못 끝냈다. PR 본문에 'Harness change needed: pg 패키지 필요'라고 썼다." —
-- "#39이 쓴 `test_39_version_*` 다섯 개(`test/smoke.test.js:228·240·260·272·308`)가 `expect(body).toEqual({ version: expect.any(String) })`로 응답 키 집합을 닫아 놔서, `node` 필드를 더하려면 그 다섯 줄을 고치는 수밖에 없었다 — 고쳤다." — 두 번 틀렸다. (1) 기존 테스트의 단언 변경은 `tests_are_load_bearing`(harness.toml:88)·CHARTER:53 위반이고, merge 스테이지가 'exis…
   산문은 신호가 아니다(아무도 읽지 않는다). 같은 내용을 `harness_needed` 필드에 적어야 factory가
   `factory:harness` 이슈를 열고 이 이슈를 주차한다. 데모 #2는 이 한 글자 차이로 네 라운드를 반복했다.
 
@@ -157,7 +156,6 @@ rework_response:           # rework 라운드에서만. PR 코멘트로도 남�
 - **verifier의 눈**: 내 테스트를 `prove-test`로 되돌리면 진짜 실패하는가. 통과하는 가장 게으른 구현을 상상해 보고,
   그 구현이 사용자를 만족시키지 못한다면 테스트를 다시 쓴다.
 - **다음 라운드의 나**: rework로 돌아온다면 리뷰어가 무엇을 지적할지 지금 적어 본다 — 그 지적을 지금 없앤다.
-- **다음 필드를 더하는 사람**: 내가 지금 쓰는 단언이, 이 응답에 필드 하나를 더하려는 다음 이슈에게 '기존 테스트 수정' 말고 다른 길을 남기는가 — 지켜야 할 계약만, 한 테스트에서 닫는다.
 
 ## Lessons
 Before writing a line, read `.factory/lessons/factory-builder.md` (path is also given in your prompt)

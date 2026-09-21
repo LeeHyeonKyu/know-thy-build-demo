@@ -225,7 +225,7 @@ describe("issue #39 — GET /version", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toMatch(/application\/json/);
-    expect(body).toEqual({ version: expect.any(String) });
+    expect(body).toEqual({ version: expect.any(String), node: expect.any(String) });
     expect(body.version.trim()).not.toBe("");
   });
 
@@ -237,7 +237,7 @@ describe("issue #39 — GET /version", () => {
     const declared = declaredManifestVersion();
     const { res, body } = await getJson(app.port, "/version");
     expect(res.status).toBe(200);
-    expect(body).toEqual({ version: expect.any(String) });
+    expect(body).toEqual({ version: expect.any(String), node: expect.any(String) });
 
     if (declared !== null) {
       expect(body.version).toBe(declared);
@@ -257,7 +257,7 @@ describe("issue #39 — GET /version", () => {
     try {
       const fromFixture = await getJson(fixture.port, "/version");
       expect(fromFixture.res.status).toBe(200);
-      expect(fromFixture.body).toEqual({ version: FIXTURE_MANIFEST_VERSION });
+      expect(fromFixture.body).toEqual({ version: FIXTURE_MANIFEST_VERSION, node: expect.any(String) });
     } finally {
       await fixture.stop();
     }
@@ -269,7 +269,7 @@ describe("issue #39 — GET /version", () => {
   test("test_39_version_and_healthz_survive_foreign_cwd", async () => {
     const fromRoot = await getJson(app.port, "/version");
     expect(fromRoot.res.status).toBe(200);
-    expect(fromRoot.body).toEqual({ version: expect.any(String) });
+    expect(fromRoot.body).toEqual({ version: expect.any(String), node: expect.any(String) });
     const rootVersion = fromRoot.body.version;
 
     // cwd에 "그럴듯한 다른 매니페스트"를 놓는다. 이게 없으면 cwd 기준으로 읽는 구현도
@@ -305,7 +305,7 @@ describe("issue #39 — GET /version", () => {
     const declared = declaredManifestVersion();
     const { res, body } = await getJson(app.port, "/version");
     expect(res.status).toBe(200);
-    expect(body).toEqual({ version: expect.any(String) });
+    expect(body).toEqual({ version: expect.any(String), node: expect.any(String) });
 
     if (declared !== null) {
       expect(body.version).toBe(declared);

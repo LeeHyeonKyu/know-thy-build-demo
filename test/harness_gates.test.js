@@ -1,7 +1,8 @@
 // #15 — 하네스 M2 승격의 회귀 가드 (issue #15 "Spec revision 2").
 //
 // 앞의 두 테스트는 `.factory/harness.toml`을 **텍스트로** 읽는다(factory 런타임 없이 `npm ci`만으로 돈다).
-// 뒤의 테스트들은 factory의 실제 판정 함수(doctor·감지기·게이트 러너·test-env)를 동적으로 불러 쓴다.
+// 뒤의 테스트들은 factory의 실제 판정 함수(doctor·감지기·게이트 러너·test-env)를 동적으로 불러 쓴다 —
+// 그 런타임의 `smol-toml`은 이 파일이 vi.mock으로 공급하므로 이것들도 `npm ci`만으로 돈다(아래 설명).
 // Playwright는 이 파일 어디에서도 실행하지 않는다(e2e는 `[commands].e2e` 게이트가 돌린다 — Spec revision 2).
 import { test, expect, vi } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
@@ -99,11 +100,120 @@ test("test_15_lint_checks_integration_tests", () => {
 });
 
 // ── factory의 실제 판정 함수로 본 M2 승격 (dw1·dw2) ──────────────────────────────────────────────
-// factory 런타임(`.factory/lib/**`)은 **테스트 안에서** 동적으로 import한다. 런타임의 외부 의존(smol-toml)은
-// 모든 factory 스테이지의 setup(`.factory/actions/setup/action.yml`: `npm install --prefix .factory`)이 설치하고,
-// 이 저장소의 package.json에는 핀하지 않는다(issue #15 Spec revision 2). 정적 import가 아니므로 런타임이 없는
-// 트리에서도 위의 텍스트 기반 테스트들은 수집·실행되고, 이 테스트들만 이유를 밝히며 실패한다.
+// factory 런타임(`.factory/lib/**`)은 **테스트 안에서** 동적으로 import한다. 런타임의 유일한 외부 의존은
+// `smol-toml`인데, 그것은 factory setup이 `.factory/node_modules`에 깔 뿐 이 저장소의 package.json에는 없고
+// 핀하지도 않는다(issue #15 Spec revision 2: factory 내부용 devDependency 금지). 그래서 이 파일은 `smol-toml`을
+// **스스로 공급한다**: 아래의 엄격한 TOML 부분집합 파서로 vi.mock한다. 그러면 `npm ci` 뒤 `npx vitest run`만으로
+// (`.factory/node_modules` 없이) 돌고, factory CI에서도 같은 파서를 쓰므로 결과가 환경에 따라 갈리지 않는다(dw2).
+// 파서는 모르는 문법을 만나면 추측하지 않고 던진다 — 조용히 잘못 읽어 공허한 초록을 만들지 않게.
+function parseTomlSubset(src) {
+  let i = 0;
+  const fail = (msg) => { throw new Error(`toml-subset: ${msg} at line ${src.slice(0, i).split("\n").length}`); };
+  const peek = () => src[i];
+  const skipWs = () => { while (i < src.length && (src[i] === " " || src[i] === "\t")) i++; };
+  const skipComment = () => { if (src[i] === "#") while (i < src.length && src[i] !== "\n") i++; };
+  const skipBlank = () => { for (;;) { skipWs(); skipComment(); if (src[i] === "\n" || src[i] === "\r") { i++; continue; } return; } };
+  const endOfLine = () => { skipWs(); skipComment(); if (i < src.length && src[i] !== "\n" && src[i] !== "\r") fail(`unexpected '${src[i]}'`); };
+  const str = () => {
+    if (src.startsWith("\"\"\"", i) || src.startsWith("'''", i)) fail("multi-line strings unsupported");
+    const q = src[i++]; let out = "";
+    while (i < src.length && src[i] !== q) {
+      if (src[i] === "\n") fail("newline in string");
+      if (q === "\"" && src[i] === "\\") {
+        const m = /^\\(?:["\\\/bfnrt]|u[0-9a-fA-F]{4})/.exec(src.slice(i));
+        if (!m) fail("bad escape");
+        out += JSON.parse(`"${m[0]}"`); i += m[0].length;
+      } else out += src[i++];
+    }
+    if (src[i] !== q) fail("unterminated string");
+    i++; return out;
+  };
+  const key = () => {
+    const parts = [];
+    for (;;) {
+      skipWs();
+      if (peek() === "\"" || peek() === "'") parts.push(str());
+      else { const m = /^[A-Za-z0-9_-]+/.exec(src.slice(i)); if (!m) fail("bad key"); parts.push(m[0]); i += m[0].length; }
+      skipWs();
+      if (peek() !== ".") return parts;
+      i++;
+    }
+  };
+  const assign = (table, parts, value) => {
+    let t = table;
+    for (const p of parts.slice(0, -1)) { t[p] ??= {}; if (typeof t[p] !== "object" || Array.isArray(t[p])) fail(`key ${p} is not a table`); t = t[p]; }
+    const last = parts[parts.length - 1];
+    if (Object.hasOwn(t, last)) fail(`duplicate key ${parts.join(".")}`);
+    t[last] = value;
+  };
+  const value = () => {
+    const c = peek();
+    if (c === "\"" || c === "'") return str();
+    if (c === "[") {
+      i++; const arr = [];
+      for (;;) { skipBlank(); if (peek() === "]") { i++; return arr; } arr.push(value()); skipBlank(); if (peek() === ",") { i++; continue; } if (peek() === "]") { i++; return arr; } fail("bad array"); }
+    }
+    if (c === "{") {
+      i++; const t = {};
+      skipWs(); if (peek() === "}") { i++; return t; }
+      for (;;) { const k = key(); if (peek() !== "=") fail("expected ="); i++; skipWs(); assign(t, k, value()); skipWs(); if (peek() === ",") { i++; continue; } if (peek() === "}") { i++; return t; } fail("bad inline table"); }
+    }
+    const m = /^(?:true|false|[+-]?\d+(?:\.\d+)?)(?![A-Za-z0-9_.:-])/.exec(src.slice(i));
+    if (!m) fail("unsupported value");
+    i += m[0].length;
+    return m[0] === "true" ? true : m[0] === "false" ? false : Number(m[0]);
+  };
+  const root = {}; let cur = root;
+  for (;;) {
+    skipBlank();
+    if (i >= src.length) return root;
+    if (peek() === "[") {
+      if (src[i + 1] === "[") fail("arrays of tables unsupported");
+      i++; const parts = key(); if (peek() !== "]") fail("bad table header"); i++; endOfLine();
+      cur = root;
+      for (const p of parts) { cur[p] ??= {}; if (typeof cur[p] !== "object" || Array.isArray(cur[p])) fail(`${p} is not a table`); cur = cur[p]; }
+      continue;
+    }
+    const k = key(); if (peek() !== "=") fail("expected ="); i++; skipWs();
+    assign(cur, k, value()); endOfLine();
+  }
+}
+vi.mock("smol-toml", () => ({
+  parse: parseTomlSubset,
+  stringify: () => { throw new Error("smol-toml.stringify is not provided in test/harness_gates.test.js"); },
+}));
+
 const factoryLib = (p) => import(pathToFileURL(join(ROOT, ".factory/lib", p)).href);
+
+test("test_15_factory_runtime_tests_need_only_npm_ci", async () => {
+  // factory 런타임이 보는 `smol-toml`은 이 파일이 공급한 것이다 — `.factory/node_modules`의 것이 아니다.
+  // (vi.mock을 지우면 factory CI에서는 다른 parse가 잡혀 실패하고, 깨끗한 체크아웃에서는 import부터 실패한다.)
+  expect((await import("smol-toml")).parse).toBe(parseTomlSubset);
+  const { loadHarness } = await factoryLib("config.js");
+  expect(loadHarness(ROOT).harness.maturity).toBe("M2");
+
+  // 파서의 충실도: 이 하네스가 쓰는 문법(점 헤더, 여러 줄 배열, 인라인 테이블, 따옴표 키, 이스케이프, 주석).
+  expect(parseTomlSubset([
+    "schema = 1  # c",
+    "[a.b]",
+    "s = \"x \\\"q\\\" # not a comment\"",
+    "arr = [\"p\",",
+    "       \"q\",   # c",
+    "]",
+    "it = { unit = \"u.js\", \"k/*.md\" = [\"## E\"] }",
+    "[c]",
+    "on = true",
+    "n = 90",
+  ].join("\n"))).toEqual({
+    schema: 1,
+    a: { b: { s: "x \"q\" # not a comment", arr: ["p", "q"], it: { unit: "u.js", "k/*.md": ["## E"] } } },
+    c: { on: true, n: 90 },
+  });
+  // 모르는 문법·중복 키는 추측하지 않고 던진다.
+  for (const bad of ["x = \"\"\"m\"\"\"", "[[t]]", "x = 1979-05-27", "x = 1\nx = 2", "x = 1 y"]) {
+    expect(() => parseTomlSubset(bad), bad).toThrow(/toml-subset/);
+  }
+});
 const readJson = (p) => JSON.parse(readFileSync(join(ROOT, p), "utf8"));
 
 // doctor가 받는 `files`와 같은 모양(저장소 상대 경로, `/` 구분).

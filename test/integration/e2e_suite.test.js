@@ -69,7 +69,7 @@ function runShell(cmd, { cwd, env }) {
   return once(child, "close").then(([code]) => ({ code, out: out.replace(/\x1b\[[0-9;]*m/g, "") }));
 }
 
-let work, port, app, run, harness;
+let work, port, app, run, harness, runStartedAt;
 
 beforeAll(async () => {
   harness = readHarness();
@@ -103,6 +103,7 @@ beforeAll(async () => {
     if (s !== 200) throw new Error(`app_ready not yet 200 (got ${s})`);
   }, { timeout: 30_000, interval: 50 });
 
+  runStartedAt = Date.now();
   run = await runShell(e2e, { cwd: work, env });
 }, STEP_TIMEOUT_MS);
 
@@ -142,6 +143,8 @@ test("test_15_e2e_report_fresh_and_healthz_passed", () => {
   expect(healthz[0].tests.flatMap((t) => t.results.map((r) => r.status))).toEqual(["passed"]);
   expect(report.stats.unexpected).toBe(0);
   expect(report.stats.expected).toBeGreaterThanOrEqual(1);
+  // 이 실행이 쓴 리포트다: Playwright가 기록한 시작 시각이 이 테스트가 e2e를 띄운 시각 뒤다(옛 리포트는 앞이다).
+  expect(Date.parse(report.stats.startTime)).toBeGreaterThanOrEqual(runStartedAt - 1000);
 }, STEP_TIMEOUT_MS);
 
 // 브라우저 케이스의 선택 해제는 "크로미움 실행 파일이 없을 때"에만 일어나야 한다. 무조건 빼는 설정

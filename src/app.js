@@ -14,5 +14,18 @@ app.get("/healthz", (_req, res) => res.set("Cache-Control", "no-store").status(2
 // (docs/TECHNICAL.md Constraints) 여기에 붙는 필드는 곧 무인증 노출이다. 세 번째 키를 더하면
 // test_45_version_body_carries_no_third_field가 RED가 된다 — 늘리려면 그 가드부터 마주한다.
 app.get("/version", (_req, res) => res.status(200).json({ version, node: process.version }));
-const port = process.env.PORT ?? 3000;
+// PORT는 바인딩 전에 검증한다 (#59). 설정돼 있으면 [0,65535] 안의 10진 정수 문자열이어야 한다.
+// 검증이 없으면 `abc`·`-1` 같은 값은 listen()이 유닉스 소켓/파이프 경로로 받아 조용히 엉뚱한 곳에
+// 바인딩하고, `99999`는 Node의 ERR_SOCKET_BAD_PORT 스택 트레이스로 죽는다. 그래서 소켓 경로를
+// PORT로 넘기는 사용법은 더 이상 지원하지 않는다(#59 plan d3). 빈 문자열(`PORT=`)도 "설정된 값"으로
+// 보고 거절한다 — 기본값 3000으로의 조용한 폴백은 PORT가 아예 없을 때만이다.
+const DEFAULT_PORT = 3000;
+const MAX_PORT = 65535;
+function resolvePort(raw) {
+  if (raw === undefined) return DEFAULT_PORT;
+  if (/^\d+$/.test(raw) && Number(raw) <= MAX_PORT) return Number(raw);
+  console.error(`invalid PORT "${raw}": must be an integer between 0 and ${MAX_PORT}`);
+  process.exit(1);
+}
+const port = resolvePort(process.env.PORT);
 app.listen(port, () => console.log(`listening on ${port}`));

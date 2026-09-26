@@ -1,7 +1,7 @@
 ---
 id: 001
 title: 노트 생성
-status: complete
+status: not-started
 priority: P0
 class: Bounded
 depends_on: []
@@ -14,6 +14,8 @@ generatedBy: know-thy-build-feature
 ---
 
 # 노트 생성
+
+> **Status: not-started.** 구현 시도(#2, PR #17)는 리뷰 라운드 상한에 도달해 wont-do로 닫혔다. 사유: `code`가 없는 pg 연결 오류에 대한 실제 정확성(correctness) 지적. `main`에는 이 기능의 코드가 없다.
 
 `POST /notes` 한 번으로 제목과 본문을 남기고, 생성된 id와 시각을 돌려받는다.
 

@@ -427,3 +427,94 @@ describe("issue #45 — GET /version reports the Node runtime", () => {
     expect(health.body).toEqual({ ok: true });
   });
 });
+
+// --- issue #59 가드: PORT가 정수 [0,65535]가 아니면 진입점은 바인딩 전에 크게 실패한다 --------
+// #8/#39/#45 블록과 그 헬퍼는 load-bearing이라 읽기만 하고 고치지 않는다 — 여기 전용 헬퍼를 둔다.
+// 자식은 레포와 무관한 임시 cwd에서 띄운다: 검증이 없는 구현(base)에서 PORT=abc는 cwd에
+// `abc`라는 유닉스 소켓을 만들고 리스닝하므로, 레포 루트에서 띄우면 소켓 파일이 레포에 남는다.
+// 대기는 조건 대기뿐이다(docs/QA.md No sleep): "프로세스가 끝났다" 또는 "리스닝했다"가 될 때까지.
+async function runEntrypointWithPort(portValue) {
+  const cwd = mkdtempSync(join(tmpdir(), "issue-59-port-"));
+  const child = spawn(process.execPath, [APP_ENTRYPOINT], {
+    cwd,
+    env: { ...process.env, PORT: portValue },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const exited = once(child, "exit");
+  const dead = () => child.exitCode !== null || child.signalCode !== null;
+  try {
+    await vi.waitFor(
+      () => {
+        if (!dead() && !stdout.includes(READY_LINE)) {
+          throw new Error("entrypoint neither exited nor listened yet: " + JSON.stringify(stdout + stderr));
+        }
+      },
+      { timeout: BOOT_TIMEOUT_MS, interval: 20 },
+    );
+    const listened = stdout.includes(READY_LINE);
+    if (!dead()) child.kill();
+    await exited;
+    // exit 이벤트 뒤에도 파이프에 남은 출력이 있을 수 있다 — 스트림이 닫힐 때까지 기다린다.
+    await Promise.all([
+      child.stdout.readableEnded ? null : once(child.stdout, "end"),
+      child.stderr.readableEnded ? null : once(child.stderr, "end"),
+    ]);
+    return { exitCode: child.exitCode, listened, stdout, stderr, output: stdout + stderr };
+  } finally {
+    if (!dead()) {
+      child.kill("SIGKILL");
+      await exited;
+    }
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
+// 앱이 스스로 내는 거절 문구의 모양. 값이 인용부호 안에 그대로 들어가야 운영자가 무엇이
+// 잘못 들어왔는지(공백·부호 포함) 읽을 수 있다.
+const appPortRejection = (value) => 'invalid PORT "' + value + '"';
+// Node가 대신 죽을 때의 흔적 — 잡히지 않은 예외의 코드와 스택 프레임.
+const NODE_CRASH_TRACE = /ERR_SOCKET_BAD_PORT|^\s+at\s/m;
+
+describe("issue #59 — PORT is validated before binding", () => {
+  // dw1: 숫자가 아닌 PORT. base에서는 `abc`를 파이프 경로로 받아 리스닝하므로 여기서 RED다.
+  test("test_59_non_numeric_port_exits_loudly", async () => {
+    const run = await runEntrypointWithPort("abc");
+    expect(run.listened).toBe(false);
+    expect(run.output).not.toContain(READY_LINE);
+    expect(run.exitCode).not.toBeNull();
+    expect(run.exitCode).not.toBe(0);
+    expect(run.output).toContain("abc");
+    expect(run.stderr).toContain(appPortRejection("abc"));
+  }, BOOT_TIMEOUT_MS + 5000);
+
+  // dw2: 범위 밖(-1, 99999 — 이슈 본문의 예시)과 정수가 아닌 숫자 모양(3000.5)도 똑같이 거절된다.
+  test("test_59_out_of_range_port_exits_loudly", async () => {
+    for (const value of ["-1", "99999", "65536", "3000.5"]) {
+      const run = await runEntrypointWithPort(value);
+      expect(run.listened, "PORT=" + value + " must not listen").toBe(false);
+      expect(run.exitCode, "PORT=" + value + " exit code").toBe(1);
+      expect(run.output).toContain(value);
+      expect(run.stderr).toContain(appPortRejection(value));
+    }
+  }, BOOT_TIMEOUT_MS * 4 + 5000);
+
+  // dw4: 범위 밖 값에서 사용자가 보는 것은 앱의 한 줄 메시지여야 한다. base에서도 Node의
+  // ERR_SOCKET_BAD_PORT가 exit 1 + 값 + 리스닝 없음을 만족하므로, 구별점은 "스택 트레이스가
+  // 아니라 앱 문구"다 — 그래서 이 테스트는 이 파일의 다른 테스트 없이 혼자서도 base에서 RED다.
+  test("test_59_out_of_range_port_rejected_by_app_not_node", async () => {
+    for (const value of ["-1", "99999"]) {
+      const run = await runEntrypointWithPort(value);
+      expect(run.listened).toBe(false);
+      expect(run.output).not.toMatch(NODE_CRASH_TRACE);
+      expect(run.stderr).toContain(appPortRejection(value));
+      // 한 줄 메시지: 출력 전체가 비어 있지 않은 한 줄뿐이다.
+      expect(run.output.trim().split("\n")).toHaveLength(1);
+    }
+  }, BOOT_TIMEOUT_MS * 2 + 5000);
+});

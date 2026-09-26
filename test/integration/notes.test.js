@@ -341,3 +341,155 @@ describe("issue #76 — real driver outage on first use", () => {
     }
   }, CASE_TIMEOUT_MS);
 });
+
+// cf-s1 (rework): a link that ACCEPTS the TCP connection and then never forwards a byte — a hung
+// Postgres, a half-open NAT/LB, a proxy that never connects upstream. Unlike startLink's "down"
+// (immediate destroy → RST), nothing here ever errors: without a timer in the app, a request
+// through this link waits forever. `stall()` also freezes connections already open through it,
+// so an idle pooled client that is reused sends its query into silence.
+async function startStallableLink(target) {
+  const state = { mode: "blackhole", pairs: new Set(), held: new Set(), accepted: 0 };
+  const server = createServer((client) => {
+    state.accepted += 1;
+    client.on("error", () => {});
+    if (state.mode !== "up") {
+      // Accept and hold: read nothing back, answer nothing, never close.
+      state.held.add(client);
+      client.on("close", () => state.held.delete(client));
+      return;
+    }
+    const upstream = connect(target.port, target.host);
+    upstream.on("error", () => {});
+    const pair = { client, upstream };
+    state.pairs.add(pair);
+    const drop = () => {
+      client.destroy();
+      upstream.destroy();
+      state.pairs.delete(pair);
+    };
+    client.on("close", drop);
+    upstream.on("close", drop);
+    client.pipe(upstream);
+    upstream.pipe(client);
+  });
+  server.listen(0, LOOPBACK);
+  await once(server, "listening");
+  return {
+    port: server.address().port,
+    state,
+    setUp: () => { state.mode = "up"; },
+    // New connections are held silently; open ones stop forwarding in both directions.
+    stall: () => {
+      state.mode = "blackhole";
+      for (const { client, upstream } of state.pairs) {
+        client.unpipe(upstream);
+        upstream.unpipe(client);
+        client.pause();
+        upstream.pause();
+      }
+      return state.pairs.size;
+    },
+    close: async () => {
+      for (const { client, upstream } of [...state.pairs]) {
+        client.destroy();
+        upstream.destroy();
+      }
+      for (const client of [...state.held]) client.destroy();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+// The bound a stalled database may hold a POST before the client gets its 503. Generous compared
+// to the app's own timers so a loaded CI box does not flake, but finite: "never answers" fails.
+const STALL_BOUND_MS = 20000;
+
+// POST that never waits past `bound`: a hang is recorded as status "no response" instead of
+// hanging the case until its own timeout, so the assertion names the actual failure.
+async function postWithin(base, payload, bound) {
+  const started = Date.now();
+  try {
+    const r = await send(base, "/notes", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(bound),
+    });
+    return { ...r, status: r.res.status, elapsed: Date.now() - started };
+  } catch (err) {
+    if (err?.name === "TimeoutError" || err?.name === "AbortError") {
+      return { status: "no response within " + bound + "ms", body: null, text: "", elapsed: Date.now() - started };
+    }
+    throw err;
+  }
+}
+
+describe("issue #76 rework — a stalled database answers 503 within a bound (cf-s1)", () => {
+  test("test_76_stalled_db_answers_503_within_bound", async () => {
+    const link = await startStallableLink({ host: DB.host, port: DB.port });
+    let app;
+    try {
+      app = await startApp(pgEnv(LOOPBACK, link.port));
+
+      // (a) First use, the DB accepts TCP and then says nothing: a connect-phase stall.
+      const firstTitle = marker("stall-connect");
+      const first = await postWithin(app.base, makeNote({ title: firstTitle, body: "secret " + firstTitle }), STALL_BOUND_MS);
+      expect(link.state.accepted).toBeGreaterThan(0); // the driver really dialled through the link
+      expect(first.status).toBe(503);
+      expect(first.body?.error?.code).toBe("db_unavailable");
+      expect(first.text).not.toContain(firstTitle);
+
+      // (b) The link recovers: the same process writes (a pooled connection now exists).
+      link.setUp();
+      const okTitle = marker("stall-ok");
+      const ok = await postWithin(app.base, makeNote({ title: okTitle }), STALL_BOUND_MS);
+      expect(ok.status).toBe(201);
+      expect(await rowsWithMarker(okTitle)).toHaveLength(1);
+
+      // (c) The DB goes silent under an open pooled connection, and more requests arrive than
+      // the pool has slots (pg default max 10): the reused idle client stalls mid-query, new
+      // clients stall mid-connect, and the rest queue for a slot. Every one must get its 503 —
+      // none may hang, none may be a 500.
+      expect(link.stall()).toBeGreaterThan(0);
+      const titles = Array.from({ length: 12 }, (_, i) => marker("stall-query-" + i));
+      const results = await Promise.all(titles.map((t) => postWithin(app.base, makeNote({ title: t, body: "secret " + t }), STALL_BOUND_MS)));
+      for (const [i, r] of results.entries()) {
+        expect(r.status, "request " + i + " after " + r.elapsed + "ms").toBe(503);
+        expect(r.body?.error?.code).toBe("db_unavailable");
+        expect(r.text).not.toContain(titles[i]);
+      }
+
+      // The process is still serving.
+      expect(app.dead()).toBe(false);
+      const health = await send(app.base, "/healthz");
+      expect(health.res.status).toBe(200);
+    } finally {
+      await app?.stop();
+      await link.close();
+    }
+  }, 120000);
+});
+
+// cf4 (rework): spec 001 Assumptions — "본문 길이 제한이 필요 없다"; a size cap with 413 is a separate
+// issue (plan non_goals). A pasted incident log past body-parser's implicit 100kb default is
+// stored whole through the real entrypoint and the real database.
+describe("issue #76 rework — no hidden request-size cap (cf4)", () => {
+  let app;
+  beforeAll(async () => { app = await startApp(pgEnv(DB.host, DB.port)); }, BOOT_TIMEOUT_MS + 5000);
+  afterAll(async () => { await app?.stop(); });
+
+  test("test_76_large_note_body_persists_without_413", async () => {
+    for (const lines of [7500, 75000]) { // ~165 KB and ~1.6 MB
+      const m = marker("big-" + lines);
+      const big = "incident log line 0042\n".repeat(lines).trim();
+      const { res, body } = await postJson(app.base, makeNote({ title: m, body: big }));
+      expect(res.status, "body of " + big.length + " chars").toBe(201);
+      expect(body?.body?.length).toBe(big.length);
+      const { rows } = await db.query("select length(body) as n, md5(body) as h from notes where title = $1", [m]);
+      expect(rows).toHaveLength(1);
+      expect(Number(rows[0].n)).toBe(big.length);
+      const { rows: expected } = await db.query("select md5($1::text) as h", [big]);
+      expect(rows[0].h).toBe(expected[0].h);
+    }
+  }, CASE_TIMEOUT_MS);
+});

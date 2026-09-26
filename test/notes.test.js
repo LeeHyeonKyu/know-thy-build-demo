@@ -182,3 +182,31 @@ describe("issue #76 — service validation without a database", () => {
     expect(repo.calls).toHaveLength(0);
   });
 });
+
+describe("issue #76 rework — stalls and large bodies (cf-s1, cf4)", () => {
+  // cf-s1: when a pooled connection stalls mid-query, pg's client-side query_timeout rejects with a
+  // bare `Error("Query read timeout")` (no `.code`). That is the database not answering: 503, not 500.
+  test("test_76_query_read_timeout_maps_to_503", async () => {
+    const secretBody = "stalled-body-must-not-echo-41d0";
+    const stalled = new Error("Query read timeout");
+    expect(stalled.code).toBeUndefined();
+    const base = await startWith(fakeRepo(async () => { throw stalled; }));
+    const { res, text, body } = await postNote(base, makeNote({ body: secretBody }));
+    expect(res.status).toBe(503);
+    expect(body?.error?.code).toBe("db_unavailable");
+    expect(text).not.toContain(secretBody);
+  });
+
+  // cf4: spec 001 Assumptions — no length limit on the note body (a size cap with 413 is a separate
+  // issue). A body well past body-parser's implicit 100kb default reaches storage intact.
+  test("test_76_body_over_100kb_reaches_storage_without_413", async () => {
+    const repo = fakeRepo(async (note) => ({ id: 1, ...note, created_at: new Date("2026-01-01T00:00:00Z") }));
+    const base = await startWith(repo);
+    const big = "incident log line\n".repeat(20000).trim(); // ~360 KB
+    const { res, body } = await postNote(base, makeNote({ body: big }));
+    expect(res.status).toBe(201);
+    expect(body?.body).toBe(big);
+    expect(repo.calls).toHaveLength(1);
+    expect(repo.calls[0].body).toBe(big);
+  });
+});

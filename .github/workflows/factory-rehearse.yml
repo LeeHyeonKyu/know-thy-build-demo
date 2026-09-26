@@ -47,7 +47,7 @@ jobs:
     # 게이트 전체(unit 포함) + base 워크트리 설치가 한 잡 안에서 돈다 — 스테이지의 상한과 같은 자리.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # 트리거가 dispatch든 push든 **기본 브랜치의 트리**를 본다(위 `if:`와 한 쌍이다).
           ref: ${{ github.event.repository.default_branch }}

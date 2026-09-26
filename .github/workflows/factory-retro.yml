@@ -30,7 +30,7 @@ jobs:
         # 하지 않는다(빈 아티팩트가 조용히 올라간다). 트랜스크립트는 산출물 추출의 **1순위 출처**라서
         # (KTB-7) 그 침묵이 사후 조사를 통째로 날린다. 러너의 실제 $HOME을 여기서 굳힌다.
         run: echo "CLAUDE_TRANSCRIPTS=$HOME/.claude/projects" >> "$GITHUB_ENV"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # 머지된 PR의 head/merge ref가 아니라 **머지된 결과가 있는 base 브랜치**를 본다 — retro는
           # 이 저장소의 현재 상태(하네스·역할·lessons·파일 목록)를 읽어 판단한다.

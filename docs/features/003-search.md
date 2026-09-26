@@ -1,7 +1,7 @@
 ---
 id: 003
 title: 노트 검색
-status: complete
+status: backlog
 priority: P0
 class: Bounded
 depends_on: [001, 002]
@@ -14,6 +14,8 @@ generatedBy: know-thy-build-feature
 ---
 
 # 노트 검색
+
+> **Status: backlog.** 백로그 이슈 #6으로 대기 중이다. `main`에는 이 기능의 코드가 없다.
 
 `GET /notes?q=`로 제목·본문을 부분일치 검색해 되찾는다.
 

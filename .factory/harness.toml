@@ -22,8 +22,8 @@ unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json
 test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
 test_one   = "npx vitest run {file} -t {name}"   # classify-failure. Scripts quote {file}/{name} — do not add quotes here
 lint_file  = "node --check {file}"
-# #15 (M2): Playwright e2e. 앱은 playwright.config.js의 webServer가 **현재 체크아웃**(= PR의 코드)에서 띄운다.
-# factory는 앱을 미리 띄우지 않는다([test.env].app_start 없음) — 그 앱은 PR head가 아니라 base에서 뜬다.
+# #15 (M2): Playwright e2e. factory가 [test.env].app_start로 앱을 먼저 띄운다. playwright.config.js는 그 앱이
+# **현재 체크아웃**(= PR의 코드)에서 뜬 것일 때만 재사용하고, 아니면(base에서 뜬 옛 앱) PR 트리의 앱을 새로 띄운다.
 e2e        = "npx playwright test"
 
 [harness]
@@ -71,8 +71,11 @@ unit_report = ".factory/out/unit.json"
 compose   = "docker-compose.test.yml"
 # env_file  = ".env.test"
 # seed      = ""
-# app_start = ""                                 # #15: 비워 둔다 — e2e 앱은 playwright webServer가 PR 트리에서 띄운다
-# app_ready = "http://localhost:3000/healthz"
+app_start = "node src/app.js"
+app_ready = "http://localhost:3000/healthz"    # #15: e2e 게이트 전에 factory가 앱을 띄우고 여기까지 기다린다.
+# playwright.config.js는 이 앱을 **이 트리의 현재 코드임을 증명할 수 있을 때만** 재사용한다(cwd가 이 트리이고
+# src/의 마지막 쓰기 뒤에 기동). review/merge에서 base 체크아웃에서 뜬 옛 앱은 재사용하지 않고, 빈 포트에
+# PR 트리의 앱을 띄운다(#15 review cf1/qa1).
 ready_timeout_sec = 90
 
 [test.fakes]

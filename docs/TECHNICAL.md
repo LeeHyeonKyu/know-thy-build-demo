@@ -70,7 +70,7 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 |-------|-------|------|-----------|
 | unit | service 규칙(검증·정규화·정렬 키), 순수 함수 | vitest | DB 없이 빠르게 규칙을 고정 |
 | integration | routes→service→repo, 실제 Postgres에 SQL 실행 | vitest + docker compose | SQL·스키마 오류는 unit이 못 잡는다 |
-| e2e | 앱 기동 후 HTTP 표면 | Playwright | full·deep 게이트(M2, #15). `playwright.config.js`의 `webServer`가 현재 체크아웃(PR의 코드)에서 앱을 띄우고, 이미 떠 있는 프로세스는 재사용하지 않는다(`reuseExistingServer: false`). required·fast에는 없다 |
+| e2e | 앱 기동 후 HTTP 표면 | Playwright | full·deep 게이트(M2, #15). factory가 `[test.env].app_start`로 앱을 먼저 띄우고, `playwright.config.js`는 그 앱이 이 트리의 현재 코드임을 증명할 수 있을 때만(cwd가 이 트리, `src/`의 마지막 쓰기 뒤 기동) 재사용한다. 아니면(base에서 뜬 옛 앱, 낯선 서버) 빈 포트에 현재 체크아웃(PR의 코드)의 앱을 띄운다. required·fast에는 없다 |
 
 **Coverage Principle:** 변경된 줄 기준 diff coverage 90% — 전체 % 는 쓰지 않는다.
 **What NOT to Test:** Express 내부, pg 드라이버, 라우팅 등록 같은 글루 — 프레임워크가 이미 보장하는 것.

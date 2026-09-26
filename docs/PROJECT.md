@@ -130,7 +130,7 @@ date: 2026-09-12
 | **`.factory/harness.toml` maturity** | M2 (#15 — M1에서 승격: e2e가 full·deep 게이트) |
 | **`factory doctor`** | PASS — 2026-09-12 |
 
-**Next:** MVP 기능 001–003은 아직 구현되지 않았다 — `src/`에는 `/healthz`·`/version`만 있다. 001은 재계획이 필요하고(#2 wont-do), 002·003은 백로그(#5, #6)에 있다. 그와 별개로 하네스는 #15에서 M2로 승격했다 — e2e(`e2e/smoke.spec.js`, `npx playwright test`)가 full·deep 게이트이고, Playwright `webServer`가 현재 체크아웃(PR의 코드)에서 앱을 띄워 그것을 상대로 돈다.
+**Next:** MVP 기능 001–003은 아직 구현되지 않았다 — `src/`에는 `/healthz`·`/version`만 있다. 001은 재계획이 필요하고(#2 wont-do), 002·003은 백로그(#5, #6)에 있다. 그와 별개로 하네스는 #15에서 M2로 승격했다 — e2e(`e2e/smoke.spec.js`, `npx playwright test`)가 full·deep 게이트이고, factory가 먼저 띄운 앱(`[test.env].app_start`)이 현재 체크아웃의 코드일 때만 그것을 상대로 돌고, 아니면 Playwright `webServer`가 현재 체크아웃(PR의 코드)의 앱을 띄운다.
 
 ---
 

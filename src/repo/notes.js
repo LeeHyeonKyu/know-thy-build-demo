@@ -63,12 +63,24 @@ export function createNotesRepo({ pool = createPool() } = {}) {
 //    timeout" / "timeout exceeded when trying to connect".
 //  - query_timeout is a client-side read timer: a query sent on a connection that stops answering
 //    fails with "Query read timeout", and pool.query discards that client instead of reusing it.
-// Both errors are classified as db_unavailable by the service layer.
+//  - statement_timeout is the SERVER-side bound (review cf2/qa2). query_timeout alone only stops the
+//    client waiting: a statement that is merely slow (e.g. an INSERT queued behind a table lock)
+//    keeps running on the server and commits after the client was told 503 "try again later", and
+//    the retry duplicates the note. Postgres aborts and rolls back a statement that passes
+//    statement_timeout and reports SQLSTATE 57014, so on a live server the abort always lands
+//    before the client-side timer: a 503 then means nothing was written. query_timeout remains
+//    the backstop for a connection that has gone silent, where the server's fate cannot be known.
+// All three errors are classified as db_unavailable by the service layer.
 export const CONNECT_TIMEOUT_MS = 3000;
+export const STATEMENT_TIMEOUT_MS = 3000;
 export const QUERY_TIMEOUT_MS = 5000;
 
 function createPool() {
-  const pool = new pg.Pool({ connectionTimeoutMillis: CONNECT_TIMEOUT_MS, query_timeout: QUERY_TIMEOUT_MS });
+  const pool = new pg.Pool({
+    connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+    statement_timeout: STATEMENT_TIMEOUT_MS,
+    query_timeout: QUERY_TIMEOUT_MS,
+  });
   // An idle pooled client whose connection drops (Postgres restart, network cut) is reported as
   // an 'error' event on the pool. Without a listener Node treats it as an unhandled error and the
   // whole process exits — /healthz and /version included (dissent d8). The pool has already

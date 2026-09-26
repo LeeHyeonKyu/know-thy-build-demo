@@ -57,6 +57,7 @@ const CONNECTION_ERROR_CODES = new Set([
   "57P02", // crash_shutdown
   "57P03", // cannot_connect_now (starting up / shutting down)
   "53300", // too_many_connections
+  "57014", // query_canceled: the server aborted the statement (statement_timeout) and rolled it back
 ]);
 
 // Messages the pg driver uses for connection loss WITHOUT setting `.code` — the PR #17 finding:

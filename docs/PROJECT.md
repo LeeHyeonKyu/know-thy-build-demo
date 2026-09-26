@@ -121,7 +121,7 @@ date: 2026-09-12
 
 **Technical Foundation:** [TECHNICAL.md](TECHNICAL.md)
 
-## Operations — M1 Harness
+## Operations — M2 Harness
 
 | | Value |
 |---|---|

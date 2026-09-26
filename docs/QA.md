@@ -37,7 +37,7 @@ date: 2026-09-12
 - 테스트 이름은 `test_{issue}_{slug}` — 예: `test_12_create_note_rejects_empty_title`.
 - `{issue}`는 GitHub 이슈 번호, `{slug}`는 done_when 항목을 소문자 snake로 줄인 것.
 - 회귀 가드도 같은 규칙을 따른다 — 나중에 이슈 번호로 "이 테스트가 왜 있는지"를 되짚을 수 있어야 한다.
-- 파일 위치: unit은 `test/*.test.js`, integration은 `test/integration/*.test.js`. e2e는 `e2e/*.spec.js` — `[commands].e2e`(`npx playwright test`)로 full·deep 게이트에서 돈다(#15). 포트는 `PORT`(기본 3000)로 앱과 `playwright.config.js`가 함께 읽는다. 크로미움이 없는 환경에서는 브라우저 케이스가 선택에서 빠지고 stderr에 그 사실이 찍힌다.
+- 파일 위치: unit은 `test/*.test.js`, integration은 `test/integration/*.test.js`. e2e는 `e2e/*.spec.js` — `[commands].e2e`(`npx playwright test`)로 full·deep 게이트에서 돈다(#15). 포트는 `PORT`(기본 3000)로 앱과 `playwright.config.js`가 함께 읽는다. 앱은 `webServer`가 현재 트리에서 띄우고(포트가 이미 차 있으면 재사용하지 않고 실패한다), 브라우저 케이스용 크로미움은 `[runtime].setup`(`npx playwright install --with-deps chromium`)이 설치한다.
 
 ## Evidence
 

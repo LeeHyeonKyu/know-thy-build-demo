@@ -11,7 +11,7 @@ runs_dir       = "docs/factory/runs"
 default_branch = "main"
 
 [runtime]
-setup = "npm ci"
+setup = "npm ci && npx playwright install --with-deps chromium"   # #15: e2e(full·deep)의 브라우저 케이스용 크로미움
 node  = "22"
 
 [commands]                       # all judged by exit code
@@ -22,8 +22,8 @@ unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json
 test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
 test_one   = "npx vitest run {file} -t {name}"   # classify-failure. Scripts quote {file}/{name} — do not add quotes here
 lint_file  = "node --check {file}"
-# #15 (M2): Playwright e2e. 앱은 factory가 [test.env].app_start로 먼저 띄우고, playwright.config.js의
-# webServer는 reuseExistingServer로 그 프로세스를 재사용한다(:3000을 둘이 바인딩하지 않는다).
+# #15 (M2): Playwright e2e. 앱은 playwright.config.js의 webServer가 **현재 체크아웃**(= PR의 코드)에서 띄운다.
+# factory는 앱을 미리 띄우지 않는다([test.env].app_start 없음) — 그 앱은 PR head가 아니라 base에서 뜬다.
 e2e        = "npx playwright test"
 
 [harness]
@@ -71,8 +71,8 @@ unit_report = ".factory/out/unit.json"
 compose   = "docker-compose.test.yml"
 # env_file  = ".env.test"
 # seed      = ""
-app_start = "node src/app.js"
-app_ready = "http://localhost:3000/healthz"    # #15: e2e 게이트 전에 factory가 앱을 띄우고 여기까지 기다린다
+# app_start = ""                                 # #15: 비워 둔다 — e2e 앱은 playwright webServer가 PR 트리에서 띄운다
+# app_ready = "http://localhost:3000/healthz"
 ready_timeout_sec = 90
 
 [test.fakes]

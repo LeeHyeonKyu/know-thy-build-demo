@@ -14,7 +14,10 @@ export function createNotesRouter(service) {
   // The body is parsed as JSON whatever the Content-Type says: spec 001's curl one-liner
   // (`curl -d '{...}'`) labels its JSON application/x-www-form-urlencoded. Anything that is not
   // JSON is then a parse error → 400 below, never an undefined body → 500 (dissent d12).
-  router.post("/", express.json({ type: () => true }), async (req, res) => {
+  // No size cap: spec 001 Assumptions say notes have no length limit, and a limit with 413 is a
+  // separate issue (plan non_goals). body-parser would otherwise impose an implicit 100kb default
+  // and reject a pasted incident log with 413 (review cf4). `Infinity` disables that check.
+  router.post("/", express.json({ type: () => true, limit: Infinity }), async (req, res) => {
     try {
       const note = await service.createNote(req.body ?? {});
       res.status(201).json({
@@ -33,7 +36,7 @@ export function createNotesRouter(service) {
     }
   });
 
-  // Body-parser failures (malformed JSON, oversized payload, bad charset) reach here with a 4xx
+  // Body-parser failures (malformed JSON, bad charset/encoding) reach here with a 4xx
   // status. Answer in the API's format instead of Express's HTML error page.
   router.use((err, _req, res, next) => {
     if (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 500) {

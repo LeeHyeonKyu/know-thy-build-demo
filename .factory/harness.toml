@@ -1,6 +1,7 @@
 schema = 1
 
-# know-thy-build-demo harness — M1 (DB가 등장해 compose + integration 스모크가 있다, §5.2.1).
+# know-thy-build-demo harness — M2 (HTTP 표면 /healthz를 e2e 게이트가 지킨다, #15 · §5.2.1).
+# M1 → M2: DB가 등장해 compose + integration 스모크가 생겼고(M1), #15에서 e2e가 full·deep 게이트가 됐다.
 # Sections marked (protected) can only change through a human-merged PR (integrity blocks agents).
 
 [project]
@@ -16,14 +17,17 @@ node  = "22"
 [commands]                       # all judged by exit code
 # 이 데모에는 린터가 없다(eslint 미설치). 게이트 자리를 비워 두면 `gates.required`가
 # MISCONFIGURED가 되므로, "항상 통과하는 명령"을 명시적으로 둔다 — 린터를 도입하면 이 두 줄만 바뀐다.
-lint       = "for f in src/*.js test/*.js; do node --check \"$f\" || exit 1; done"   # audit P1-7: a real syntax gate (no linter in this demo)
+lint       = "for f in src/*.js test/*.js test/integration/*.js; do node --check \"$f\" || exit 1; done"   # audit P1-7: a real syntax gate (no linter in this demo); #15: covers test/integration too
 unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json"
 test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
 test_one   = "npx vitest run {file} -t {name}"   # classify-failure. Scripts quote {file}/{name} — do not add quotes here
 lint_file  = "node --check {file}"
+# #15 (M2): Playwright e2e. 앱은 factory가 [test.env].app_start로 먼저 띄우고, playwright.config.js의
+# webServer는 reuseExistingServer로 그 프로세스를 재사용한다(:3000을 둘이 바인딩하지 않는다).
+e2e        = "npx playwright test"
 
 [harness]
-maturity = "M1"                  # M0 | M1 | M2 — promotion is a factory:harness issue + human merge
+maturity = "M2"                  # M0 | M1 | M2 — promotion is a factory:harness issue + human merge
 
 [factory]
 max_turns = 12
@@ -40,8 +44,9 @@ required_checks = ["factory/gates", "factory/review", "factory/integrity"]
 [gates]
 required = ["lint", "unit"]
 fast     = ["lint", "unit"]
-full       = ["lint", "unit", "prove-test", "new-test-repeat"]   # audit H2: full adds the proof gates
-deep       = ["lint", "unit", "prove-test", "new-test-repeat"]
+full       = ["lint", "unit", "prove-test", "new-test-repeat", "e2e"]   # audit H2: full adds the proof gates; #15: + e2e
+deep       = ["lint", "unit", "prove-test", "new-test-repeat", "e2e"]
+# e2e는 required·fast에 넣지 않는다(#15 owner spec) — docs tier PR에 앱 기동 비용을 물리지 않는다.
 
 [gates.thresholds]               # (protected)
 diff_coverage_pct       = 90
@@ -66,8 +71,8 @@ unit_report = ".factory/out/unit.json"
 compose   = "docker-compose.test.yml"
 # env_file  = ".env.test"
 # seed      = ""
-# app_start = ""
-# app_ready = "http://localhost:3000/healthz"    # e2e(M2 승격)에서 켠다
+app_start = "node src/app.js"
+app_ready = "http://localhost:3000/healthz"    # #15: e2e 게이트 전에 factory가 앱을 띄우고 여기까지 기다린다
 ready_timeout_sec = 90
 
 [test.fakes]

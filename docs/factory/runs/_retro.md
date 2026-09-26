@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 1 / 1 / 1 | 0.8 / 1 / 1 |
 | escaped defects | 0 | 0 |
 | revert rate | 0.00 (0/1) | 0.00 (0/5) |
-| needs-human | 1 | 24 |
+| needs-human | 2 | 24 |
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
 | qa na ratio | 0.11 (1/9 claims, na-heavy 0/1 approvals) | 0.03 (1/38 claims, na-heavy 0/3 approvals) |
-| cost (usd) | 12.88 | 675.31 |
-| tokens | input 1452178 / output 39663 | input 12029982 / output 1254954 |
+| cost (usd) | 21.76 | 675.31 |
+| tokens | input 2350227 / output 58384 | input 12029982 / output 1254954 |
 | retro cost (usd) | 0.00 | 5.79 |
 | retro tokens | input 0 / output 0 | input 10 / output 11866 |
 | full retros | — | 5 |
@@ -618,6 +618,30 @@
           15
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "In review and merge (and implement), the e2e gate tests the app process that `test-env up` started from the base checkout, not the PR's code. Because of `reuseExistingServer: true`, Playwright never starts the PR's `src/app.js`. The KTB-21 re-up that runs before the gates does not fix this. It never kills the base process, and its own PR-head `app_start` cannot bind :3000, so `app_ready` gets 200 from the stale base process. As a result, the new full/deep gate does not guard the HTTP contract of the change under review. It passes when a PR breaks a route it doesn't cover. It always fails when a PR adds e2e cases for a new route, because they get a 404 from the stale base app.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw5 names four locations that must stop contradicting 'e2e is now a full/deep gate at M2': docs/TECHNICAL.md:28,73; docs/QA.md:25,40; and 'CLAUDE.md 명령표의 e2e 행'. Its own rubric is '머지 후 이 저장소를 처음 여는 사람이 문서 어디에서도 maturity M1이나 e2e는 게이트 밖을 읽지 않는가'. At HEAD 1045aee, docs/PROJECT.md, docs/TECHNICAL.md and docs/QA.md are correctly rewritten to M2/full-deep-gate language, but CLAUDE.md is untouched and still asserts both forbidden statements verbatim. dw5 as literally written is unmet, and this is not a builder oversight to rework: the same issue body carries a later 'Constraint (2026-09-27)' that explicitly forbids editing CLAUDE.md and restricts the M1→M2 note to docs/PROJECT.md only, and CLAUDE.md is not on the harness issue's own writable list (.factory/harness.toml, playwright.config.js, package.json, package-lock.json, docker-compose.test.yml, .env.test). No compliant diff can satisfy dw5's CLAUDE.md clause without violating that constraint and the protected-path rule — this is a plan defect (dw5's text was never reconciled with the issue's own later constraint; no dissent_log/open_risks entry in handoffs.plan addresses the contradiction). Per my lens, an unmet done_when is a reject regardless of whether the defect sits in the plan rather than the diff; the correct resolution is a plan correction (drop CLAUDE.md from dw5, or route the two lines to a human-merged follow-up) rather than another builder rework attempt.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "In the actual review/merge pipeline, the e2e gate's pre-boot mechanism can silently keep testing the OLD (pre-PR-head) app process instead of the PR's own code, and nothing in the pipeline detects or reports this. Setup's `test-env.js up` spawns `app_start` (\"node src/app.js\") against the base checkout via `spawnBackground` (detached:true, stdio:'ignore', fire-and-forget, no pid tracking across invocations). `checkoutHead` then detaches the tree to the PR head. `runStageGates` calls `reUpTestEnv`, which (since `[test.env].compose` is set in this harness) re-invokes `node .factory/bin/test-env.js up` -> `envUp()` again, which re-spawns `app_start` a second time -- but never kills the first process. If the first process is still alive and holding :3000, the second spawn dies with EADDRINUSE while `app_ready`'s health check keeps polling :3000 and gets 200 from the SURVIVING FIRST process. `reUpTestEnv` and `envUp` both report `ok:true` because they only check HTTP status, never which process answered or whether the newly-spawned pid is still alive. dw3's own text promises 'e2e is green against a pre-booted app, without port conflicts' -- but the only automated proof of that (test_15_e2e_runs_against_preboot_without_browser) boots the app exactly once inside a single vitest process and never exercises this checkout-then-reup double-boot sequence, so it cannot see this gap. The practical consequence: if a PR changes an HTTP route/response, the review-stage e2e gate can still pass by continuing to hit the pre-PR app that setup already booted, as long as that process is still alive and holding the port when reUpTestEnv fires.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -938,8 +962,8 @@
       },
       {
         "issue": 15,
-        "reason": "blocked (environment/credentials) — needs human",
-        "at": "2026-09-26T17:06:37Z"
+        "reason": "stage artifact missing or invalid: gates RED: failing=prove-test",
+        "at": "2026-09-26T18:25:38Z"
       },
       {
         "issue": 39,
@@ -987,17 +1011,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 1,
+    "needs_human": 2,
     "qa_approvals": 1,
     "qa_claims_total": 8,
     "qa_na_total": 1,
     "qa_na_ratio": 0.11,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 12.875139,
+      "cost_usd": 21.759604,
       "tokens": {
-        "input": 1452178,
-        "output": 39663
+        "input": 2350227,
+        "output": 58384
       }
     }
   },

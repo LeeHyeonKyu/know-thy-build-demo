@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 1 / 1 / 1 | 0.8 / 1 / 1 |
 | escaped defects | 0 | 0 |
 | revert rate | 0.00 (0/1) | 0.00 (0/5) |
-| needs-human | 2 | 24 |
+| needs-human | 3 | 24 |
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
 | qa na ratio | 0.11 (1/9 claims, na-heavy 0/1 approvals) | 0.03 (1/38 claims, na-heavy 0/3 approvals) |
-| cost (usd) | 25.39 | 675.31 |
-| tokens | input 2547560 / output 62892 | input 12029982 / output 1254954 |
+| cost (usd) | 39.72 | 675.31 |
+| tokens | input 4227560 / output 94819 | input 12029982 / output 1254954 |
 | retro cost (usd) | 0.00 | 5.79 |
 | retro tokens | input 0 / output 0 | input 10 / output 11866 |
 | full retros | — | 5 |
@@ -642,6 +642,94 @@
           15
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The check that decides whether to reuse the pre-booted app only looks at mtimes under src/. The app also reads package.json when it boots, so a stale base process is reused whenever a PR changes package.json but not src/. The config promises to reuse only a server it can prove runs this tree's current code, and that promise does not hold.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "If something is listening on PORT but its owning pid cannot be found, the reuse check fails open. listenerPid() returns null both when nothing listens and when the listener exists but no pid could be matched, and resolvePort() treats both the same. It keeps REQUESTED_PORT, and with reuseExistingServer:true Playwright silently tests whatever server answers /healthz. That contradicts the config's own rule: if it cannot prove the server, it should use a free port.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "This diff adds three separate readers for `.factory/harness.toml`, and they already parse it differently. Beside them sits the factory's own `loadHarness`, which the same test file imports. So one test file reaches its verdicts through two different sources for the same config.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The project's own `unit` gate (in required/fast) now depends on how the factory is installed internally. The test mocks `../.factory/node_modules/smol-toml/dist/index.js` by file path. It then replaces the factory's TOML parser with a hand-written one, and checks the doctor and gates verdicts through that substitute. If the factory bumps or swaps its TOML dependency, this repo's required gate goes RED. The verdicts being checked are also not the ones the factory reaches in production.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The diff says e2e belongs only in full/deep so docs-tier PRs do not pay the cost of booting the app. But the new vitest file boots the app and runs `npx playwright test` six times: five e2e runs plus one `--list` call. Vitest collects that file, so all of this runs inside the `unit` gate, which is in `required` and `fast`. The gate layering the diff declares no longer holds.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "Stands, re-verified at head aea71c58. dw5 names four locations that must stop contradicting 'e2e is now a full/deep gate at M2': docs/TECHNICAL.md, docs/QA.md and 'CLAUDE.md 명령표의 e2e 행'. Its rubric is '머지 후 처음 여는 사람이 어디서도 M1이나 e2e는 게이트 밖을 읽지 않는가'. `git diff origin/main...HEAD -- CLAUDE.md` is still empty; CLAUDE.md:18 still reads '(M2 승격 전까지 게이트 밖)' and CLAUDE.md:10 still says '성숙도(M1)'. Three of dw5's four locations are fixed; CLAUDE.md is not — dw5 is unmet. This is a plan defect, not a reworkable builder gap: the issue's own later 'Constraint (2026-09-27)' forbids editing CLAUDE.md and restricts the M1→M2 note to docs/PROJECT.md, and CLAUDE.md is outside this harness issue's writable list. No compliant diff can satisfy dw5's CLAUDE.md clause without violating that constraint; the plan never reconciled dw5's text with the later, more specific constraint (no dissent_log/open_risks entry addresses it). The builder's own rework_response marks spec1 'disputed' rather than fixed — a deliberate non-fix, and a PR-body instruction to the human merger is not a done_when-satisfying diff (done_when is measured against the merged tree). The correct resolution is a plan correction (drop the CLAUDE.md clause from dw5 or route it to a human-merged follow-up), not another builder attempt on this PR. Independently corroborated by qa's own evidence manifest (.factory/out/qa/15/manifest.json, claim dw5) and by qa3 in the other reviewers' round-1 output, filed under a different id for the same fact.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The issue's own 'Spec revision 2 (2026-09-27, after review round 2)' says, verbatim: 'Do NOT run Playwright inside the unit gate or any vitest file.' test/integration/e2e_suite.test.js is a vitest file, and it runs runShell(harness.commands.e2e, ...) — i.e. 'npx playwright test' as a child process — in beforeAll plus four more tests (lines 107, 265, 290, 309, 335), plus a 'playwright test --list' call (line 162). vitest.config.js excludes only '**/node_modules/**' and 'e2e/**' — it does not exclude test/integration/** — so this file is collected by [commands].unit, which sits in both [gates].required and [gates].fast. This is exactly the forbidden pattern, done six times, in every tier including docs-tier fast. This is a plan defect, not a rogue builder addition: the plan's own files_expected names this exact file, and dw3/dw6's check.kind:'test' with level:'integration' directed the builder to prove the e2e-pre-boot behavior through precisely this mechanism. The plan's open_risks acknowledges the runtime cost ('dw3의 playwright 기동이 docs tier PR과 doctor에도 붙는다') but never recognizes it as a violation of the issue's explicit prohibition, and no dissent_log entry reconciles the two. Per lens rule 3, a non_goal crossed by the diff is reject regardless of whether the change is otherwise reasonable; per rule 6, this is a plan-vs-issue gap that the plan carried into files_expected/done_when without flagging.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The same 'Spec revision 2' sentence also says: 'do NOT add tests that pin smol-toml or any .factory/** version.' This test mocks the literal internal path .factory/node_modules/smol-toml/dist/index.js — pinning to the factory's current internal package layout for that dependency, exactly the pattern the issue forbids (the file's own comment at lines 103-106 concedes the reason: factory setup installs smol-toml at that exact path and .factory/lib/config.js's import resolves through it). This is not the mechanism the plan anticipated for the npm-ci-only constraint: dissent_log d5's resolution says the anticipated fix was a devDependency pin added to package.json/package-lock.json (both listed in files_expected for exactly this reason), which the diff does not touch this round — the builder instead chose the forbidden internal-path mock. Per lens rule 3, a diff that crosses a non_goal is reject even when the underlying engineering motivation (running under npm ci alone) is sound; a different, allowed path (the anticipated devDependency pin) was already on the table and unused.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "These new tests read `.factory/harness.toml` straight off disk (`readFileSync`/`loadHarness(ROOT)`) and assert M2/e2e values. But the review/merge stage's own factory-config overlay (`.factory/bin/run-stage.js`: `OVERLAY_STAGES = new Set([\"implement\",\"review\",\"merge\"])`, and `harnessIssue = stage === \"implement\" && labels.includes(HARNESS_LABEL)` at line 336) resets `.factory/harness.toml` back to base for every stage except `implement` — including `review`, where the required/fast `unit` gate runs right after this review. I reproduced this directly: on this exact checkout the working-tree `.factory/harness.toml` is byte-identical to `origin/main`'s (confirmed with `diff`), and running the literal `[commands].unit` string (`npx vitest run --reporter=json --outputFile=.factory/out/unit.json`) fails 4 of the 5 new tests in this file (`harness.maturity` resolves to `\"M1\"`, `commands.e2e` is `undefined`, the lint command still only globs `src/*.js test/*.js`). Since `unit` is in both `[gates].required` and `[gates].fast`, this PR's own required gate will go RED the moment gates run for this commit — not because the proposed harness.toml is wrong, but because the tests assert against the live file instead of the PR's committed content (e.g. via `git show HEAD:.factory/harness.toml`), which is the one thing the review-stage overlay does not touch.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "Same root cause as qa1, distinct done_when items: these integration tests destructure `harness.commands.e2e` and `harness.test.env.app_start`/`app_ready` from the live `.factory/harness.toml` and throw immediately if `e2e` isn't a string. Because review overlays harness.toml back to base (no `commands.e2e`, no `app_start`), the whole suite errors out before any of the pre-boot/no-browser/fresh-report assertions run.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "dw5 explicitly names 'CLAUDE.md 명령표의 e2e 행' as text that must stop saying e2e is out-of-gate once this PR lands, with the rubric 'merge 후 처음 여는 사람이 어디서도 M1/게이트 밖을 읽지 않는가'. The diff does not touch CLAUDE.md at all (docs/PROJECT.md, docs/QA.md, docs/TECHNICAL.md were updated, CLAUDE.md was not), and CLAUDE.md still literally reads '(M2 승격 전까지 게이트 밖)' after this diff — dw5 is not satisfied. (Separately, the issue's own 2026-09-27 constraint forbids editing CLAUDE.md/.claude/**, which is itself in tension with dw5's wording — that conflict needs to be resolved by the plan/owner, but as delivered the stale line is still there for a first-time reader.)",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -962,8 +1050,8 @@
       },
       {
         "issue": 15,
-        "reason": "stage artifact missing or invalid: gates RED: failing=prove-test",
-        "at": "2026-09-26T18:25:38Z"
+        "reason": "review rounds exhausted (K=3): 11 must_fix remain",
+        "at": "2026-09-26T20:02:43Z"
       },
       {
         "issue": 39,
@@ -1011,17 +1099,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 2,
+    "needs_human": 3,
     "qa_approvals": 1,
     "qa_claims_total": 8,
     "qa_na_total": 1,
     "qa_na_ratio": 0.11,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 25.391677,
+      "cost_usd": 39.716779,
       "tokens": {
-        "input": 2547560,
-        "output": 62892
+        "input": 4227560,
+        "output": 94819
       }
     }
   },

@@ -6,8 +6,8 @@ import { isQuarantined, recordResult } from "./quarantine.js";
 import { changedFiles } from "./changed-files.js";
 import { matchesAny } from "./glob.js";
 import { classifyFailures } from "./classify-failure.js";
-import { mustNotContract, mustNotViolations, addedLines } from "./integrity.js";
-import { proveTest, repeatNewTests, proveModeFor, selfReferentialTests } from "./prove-test.js";
+import { mustNotContract, mustNotViolations, addedLines, fixesTests } from "./integrity.js";
+import { proveTest, repeatNewTests, proveModeFor, selfReferentialTests, proveFixedTests } from "./prove-test.js";
 import { runDiffCoverage } from "./diff-coverage.js";
 import { mutationGate } from "./mutation.js";
 import { scrubbedRunner } from "./exec.js";
@@ -363,7 +363,17 @@ export async function runGates({ run, cwd, harness, level, quarantine, touchedFi
     if (unhandled) gates[name].reason = unhandledReason(r.code);
     if (TEST_GATES.has(name)) { gates[name].parsed = reportParsed; gates[name].failing_ids = failing_ids || []; }
     // Task 1 — RED의 뿌리를 게이트 엔트리에 붙인다(판정 뒤, 판정과 무관하게: additive 필드다).
-    if (status === "RED") gates[name].detail = gateDetail({ gate: name, stdout: r.stdout, stderr: r.stderr });
+    if (status === "RED") {
+      gates[name].detail = gateDetail({ gate: name, stdout: r.stdout, stderr: r.stderr });
+      // 1.4.17 (KTB #40) — **파싱한 리포트가 stdout 파서보다 정확하다.** `vitest --reporter=json --outputFile=…`의 stdout은
+      // "JSON report written to …" 한 줄뿐이라 이름 파서는 빈 목록을 냈고, 실제 실패 2건이 있는 리포트 옆에서 `gates-detail`은
+      // `failing: []`을 남겼다(KTB #36 run 35555844401). 리포트를 읽었으면 그 id(`file::name`)가 이 게이트의 실패 이름이다;
+      // 격리로 제외된 것은 실패가 아니므로 남은 것만 싣는다. 리포트가 없을 때만 stdout 파서의 답을 쓴다.
+      // stdout 파서가 이름을 찾았으면 그대로 둔다(analyze·retro가 그 이름 모양에 기대 있다); 비었을 때만 리포트 id로 채운다.
+      if (TEST_GATES.has(name) && reportParsed && !gates[name].detail.failing?.length && Array.isArray(tests?.failing) && tests.failing.length) {
+        gates[name].detail.failing = tests.failing.map((f) => f.id);
+      }
+    }
   }
   const result = { schema: "factory.gates.v1", level, requested_level, downgraded_from: level === requested_level ? null : requested_level, status: null, gates, passed: 0, failed: 0, failing: [], skipped: [], misconfigured: [], tests, quarantine_applied: quarantineApplied, quarantine_refused: quarantineRefused, ran_at: now };
   return recomputeStatus(result, harness);
@@ -601,8 +611,15 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
     // 케이스도 base에서는 실패해야 한다. 면제는 **실효 tier**로 판단한다(자기 신고 docs로 빠져나갈 수 없게).
     // 1.4.8 (데모 #57 Dependabot 설정): source_glob·test_glob 어디에도 없는 파일만 바뀐 diff에는 테스트로 증명할 것이
     // 없다 — "새 테스트가 없다"는 RED가 아니라 "증명할 대상이 없다"는 SKIPPED다(required에 없으면 판정을 막지 않는다).
+    // 1.4.15 (KTB #53) — 이슈 본문 `fixes_tests:`: 기존 테스트를 고친 변경의 증명은 "그 테스트가 base에서 RED, head에서 GREEN"이다
+    // (§prove-test.js proveFixedTests). 목록이 있으면 새 테스트가 없어도 prove-test는 RED가 아니다; 새 테스트도 있으면 둘 다 성립해야 GREEN.
+    const fixed = fixesTests(issueBody);
     if (effectiveTier !== "docs" && !ch.sources.length && !ch.tests.length) {
       result.gates["prove-test"] = { status: "SKIPPED", code: null, duration_ms: 0, log: `no source or test files in the diff (${ch.all.length} file(s), none under [test].source_glob/test_glob) — nothing to prove by tests` };
+    } else if (effectiveTier !== "docs" && fixed.length && !ch.tests.length) {
+      const pf = await proveFixedTests({ run, cwd, harness, base, tests: fixed });
+      result.gates["prove-test"] = { status: pf.misconfigured ? "MISCONFIGURED" : pf.ok ? "GREEN" : "RED", code: null, duration_ms: 0, log: pf.detail };
+      if (pf.inconclusive?.length) result.prove_test = { inconclusive: [...pf.inconclusive] };
     } else if (effectiveTier !== "docs") {
       // 1.4.9 — 소스는 그대로고 테스트만 늘었으면 특성화 모드(§prove-test.js CHARACTERIZATION): base에서도 통과해야 GREEN.
       // 1.4.10 (데모 #15): 특성화는 **바뀐 파일이 전부 테스트일 때만**이다. harness.toml·설정 같은 비-소스 파일이 함께 바뀌면
@@ -615,6 +632,13 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
         ? { ok: false, detail: `self-referential test: ${selfRef.map((h) => `${h.file} mentions its own path (\`${h.hit}\`)`).join("; ")} — a test must assert about the product, not about its own file (existence, git tracking, mtime); such assertions fail on the base worktree by construction and prove nothing` }
         : await proveTest({ run, cwd, harness, base, addedTests: ch.tests, addedFiles: ch.added, mode });
       result.gates["prove-test"] = { status: pt.misconfigured ? "MISCONFIGURED" : pt.ok ? "GREEN" : "RED", code: null, duration_ms: 0, log: pt.detail };
+      // 새 테스트와 fixes_tests가 함께 있으면 둘 다 성립해야 한다 — 고친 테스트의 RED→GREEN도 같은 게이트에 합산된다.
+      if (fixed.length && !pt.misconfigured) {
+        const pf = await proveFixedTests({ run, cwd, harness, base, tests: fixed });
+        const g = result.gates["prove-test"];
+        result.gates["prove-test"] = { ...g, status: pf.misconfigured ? "MISCONFIGURED" : g.status === "GREEN" && pf.ok ? "GREEN" : "RED", log: `${g.log}; ${pf.detail}` };
+        if (pf.inconclusive?.length) result.prove_test = { inconclusive: [...(result.prove_test?.inconclusive || []), ...pf.inconclusive] };
+      }
       /*
        * 감사 M2 — **판정 불가는 판정 결과와 따로 기록된다.** base에서 테스트가 아예 돌지 못한 것은
        * GREEN(증명됨)도 RED(증명 실패)도 아니라 "이 게이트가 무엇을 말하는지 모른다"이고,

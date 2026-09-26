@@ -102,20 +102,30 @@ test("test_15_e2e_gate_blocks_full_not_fast", async () => {
 
 test("test_15_factory_runtime_deps_install_with_npm_ci", () => {
   // 이 파일이 import하는 factory 런타임의 외부 의존은 `.factory/package.json`에 선언돼 있고, 그것은
-  // `npm ci`(= [runtime].setup)가 설치하지 않는다. 저장소 매니페스트가 같은 핀으로 선언하고, 그 패키지가
-  // **프로젝트 루트의** node_modules에서 해석돼야 깨끗한 클론에서 `npm ci && npx vitest run`이 성립한다.
+  // `npm ci`(= [runtime].setup)가 설치하지 않는다. 깨끗한 클론에서 `npm ci && npx vitest run`이 성립하려면
+  // 저장소의 **락파일**이 같은 핀을 루트 설치 대상으로 담고 있어야 한다 — `npm ci`는 package-lock.json의
+  // `packages` 항목을 그대로(그리고 그것만) 설치하고, package.json과 락의 루트 선언이 어긋나면 설치를 거부한다.
+  // 이 머신의 node_modules 상태(캐시·이전 설치)는 관측하지 않는다: 그것은 `npm ci`가 무엇을 만들지에 대한
+  // 증거가 아니라 마지막으로 무엇이 설치됐는지에 대한 증거일 뿐이다.
   const runtimeDeps = readJson(".factory/package.json").dependencies || {};
   const pkg = readJson("package.json");
   const declared = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
   const lock = readJson("package-lock.json");
-  const requireFromRoot = createRequire(join(ROOT, "package.json"));
+  const lockRoot = lock.packages?.[""] || {};
+  const lockDeclared = { ...(lockRoot.dependencies || {}), ...(lockRoot.devDependencies || {}) };
   expect(Object.keys(runtimeDeps).length).toBeGreaterThan(0);
   for (const [name, pin] of Object.entries(runtimeDeps)) {
-    expect({ name, declared: declared[name] }).toEqual({ name, declared: pin });
-    expect({ name, locked: lock.packages?.[`node_modules/${name}`]?.version }).toEqual({ name, locked: pin });
-    const resolved = requireFromRoot.resolve(name);
-    expect(resolved.startsWith(join(ROOT, "node_modules") + sep)).toBe(true);
+    // package.json과 락의 루트 선언이 같은 핀(npm ci의 일관성 검사를 통과한다).
+    expect({ name, declared: declared[name], lockDeclared: lockDeclared[name] }).toEqual({ name, declared: pin, lockDeclared: pin });
+    // 루트 node_modules/<name>에 그 버전이 무결성 해시와 함께 잠겨 있다(npm ci가 설치할 항목).
+    const entry = lock.packages?.[`node_modules/${name}`] || {};
+    expect({ name, version: entry.version, hasIntegrity: /^sha512-/.test(entry.integrity || ""), hasResolved: typeof entry.resolved === "string" })
+      .toEqual({ name, version: pin, hasIntegrity: true, hasResolved: true });
   }
+  // 모듈 해석: `.factory/lib/**`에서 `.factory/node_modules`가 없으면 Node는 한 단계 위인 루트 node_modules를
+  // 찾는다 — 즉 위의 락 항목이 설치되는 자리가 바로 런타임이 찾는 자리다.
+  const lookup = createRequire(join(ROOT, ".factory/lib/config.js")).resolve.paths("smol-toml");
+  expect(lookup).toContain(join(ROOT, "node_modules"));
 });
 
 test("test_15_lint_checks_integration_tests", () => {

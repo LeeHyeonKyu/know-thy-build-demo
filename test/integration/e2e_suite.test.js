@@ -11,7 +11,7 @@
 import { afterAll, beforeAll, expect, test, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -112,4 +112,41 @@ test("test_15_e2e_report_fresh_and_healthz_passed", () => {
   expect(healthz[0].tests.flatMap((t) => t.results.map((r) => r.status))).toEqual(["passed"]);
   expect(report.stats.unexpected).toBe(0);
   expect(report.stats.expected).toBeGreaterThanOrEqual(1);
+}, STEP_TIMEOUT_MS);
+
+// 브라우저 케이스의 선택 해제는 "크로미움 실행 파일이 없을 때"에만 일어나야 한다. 무조건 빼는 설정
+// (영구 skip과 같은 효과)으로 퇴행하면, 브라우저가 있는 환경에서도 `browser loads`가 목록에서 사라져
+// 이 테스트가 RED가 된다. `--list`는 테스트를 실행하지 않고(브라우저를 띄우지 않고) 선택 결과만 보여 준다.
+test("test_15_browser_case_deselected_only_without_browser", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fq15-list-"));
+  try {
+    for (const p of ["e2e", "playwright.config.js", "package.json"]) cpSync(join(ROOT, p), join(dir, p), { recursive: true });
+    symlinkSync(join(ROOT, "node_modules"), join(dir, "node_modules"), "dir");
+    const browsersPath = join(dir, "browsers");
+    mkdirSync(browsersPath);
+    const env = { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsersPath };
+    // --reporter=list: 목록만 콘솔에 — json 리포트를 쓰지 않는다.
+    const list = () => runShell("npx playwright test --list --reporter=list", { cwd: dir, env });
+    const listed = (out) => [...out.matchAll(/smoke\.spec\.js:\d+:\d+ › (.+)$/gm)].map((m) => m[1].trim()).sort();
+
+    // 크로미움 없음: healthz만 선택되고, 빼는 사실이 출력에 드러난다.
+    const without = await list();
+    expect({ code: without.code, cases: listed(without.out) }).toEqual({ code: 0, cases: ["healthz"] });
+    expect(without.out).toContain("chromium not installed");
+
+    // 크로미움 있음(Playwright가 찾는 바로 그 경로에 실행 파일): 기존 케이스 전부가 선택된다.
+    const probe = await runShell(
+      `node --input-type=module -e 'import("@playwright/test").then((m) => console.log(m.chromium.executablePath()))'`,
+      { cwd: dir, env },
+    );
+    const exe = probe.out.trim().split("\n").pop();
+    expect(exe.startsWith(browsersPath)).toBe(true);
+    mkdirSync(join(exe, ".."), { recursive: true });
+    writeFileSync(exe, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const withBrowser = await list();
+    expect({ code: withBrowser.code, cases: listed(withBrowser.out) }).toEqual({ code: 0, cases: ["browser loads", "healthz"] });
+    expect(withBrowser.out).not.toContain("chromium not installed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }, STEP_TIMEOUT_MS);

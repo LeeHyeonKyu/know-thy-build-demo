@@ -115,9 +115,9 @@ date: 2026-09-12
 
 | # | Feature | Priority | Depends On | Status |
 |---|---------|----------|------------|--------|
-| 001 | [노트 생성](features/001-create-note.md) | P0 | — | complete |
-| 002 | [노트 목록](features/002-list-notes.md) | P0 | 001 | complete |
-| 003 | [노트 검색](features/003-search.md) | P0 | 001, 002 | complete |
+| 001 | [노트 생성](features/001-create-note.md) | P0 | — | not-started |
+| 002 | [노트 목록](features/002-list-notes.md) | P0 | 001 | backlog |
+| 003 | [노트 검색](features/003-search.md) | P0 | 001, 002 | backlog |
 
 **Technical Foundation:** [TECHNICAL.md](TECHNICAL.md)
 
@@ -130,7 +130,7 @@ date: 2026-09-12
 | **`.factory/harness.toml` maturity** | M1 |
 | **`factory doctor`** | PASS — 2026-09-12 |
 
-**Next:** `npx know-thy-build factory bootstrap` → 이슈 다크 처리. e2e(`e2e/smoke.spec.js`)는 이미 있으나 M2 승격은 `factory:harness` 이슈로 관찰한다.
+**Next:** MVP 기능 001–003은 아직 구현되지 않았다 — `src/`에는 `/healthz`·`/version`만 있다. 001은 재계획이 필요하고(#2 wont-do), 002·003은 백로그(#5, #6)에 있다. 그와 별개로 e2e(`e2e/smoke.spec.js`)는 이미 있으나 M2 승격은 `factory:harness` 이슈로 관찰한다.
 
 ---
 

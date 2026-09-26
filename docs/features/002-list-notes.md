@@ -1,7 +1,7 @@
 ---
 id: 002
 title: 노트 목록
-status: complete
+status: backlog
 priority: P0
 class: Bounded
 depends_on: [001]
@@ -14,6 +14,8 @@ generatedBy: know-thy-build-feature
 ---
 
 # 노트 목록
+
+> **Status: backlog.** 백로그 이슈 #5로 대기 중이다. `main`에는 이 기능의 코드가 없다.
 
 `GET /notes`로 최신순 노트를 페이지 단위로 훑는다.
 

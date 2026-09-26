@@ -150,3 +150,164 @@ test("test_15_browser_case_deselected_only_without_browser", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 }, STEP_TIMEOUT_MS);
+
+// ---------------------------------------------------------------------------------------------------------
+// #15 rework cf1/qa1 — 파이프라인에서 사전 기동한 앱이 **PR 코드가 아닐 수 있다**.
+//
+// review/merge에서는 setup이 base 체크아웃에서 `app_start`를 띄운 뒤(`.factory/actions/setup`), 트리가 PR head로
+// 바뀌고(`checkoutHead`), 게이트 직전 re-up의 두 번째 `app_start`는 :PORT를 못 잡고 EADDRINUSE로 죽는다 — 그래도
+// `app_ready`는 살아 있는 base 프로세스에게서 200을 받는다. 아래 테스트는 그 순서를 그대로 재현한다: 트리에서
+// 앱을 띄우고(= base), 그 **다음에** 트리의 `src/`를 바꾼다(= checkout). 그 뒤 `[commands].e2e`가 검사하는 것은
+// 지금 트리의 코드여야 한다 — 옛 프로세스의 응답이 아니라.
+// ---------------------------------------------------------------------------------------------------------
+
+import { utimesSync } from "node:fs";
+
+function stageTree(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  for (const p of ["src", "e2e", "playwright.config.js", "package.json"]) cpSync(join(ROOT, p), join(dir, p), { recursive: true });
+  symlinkSync(join(ROOT, "node_modules"), join(dir, "node_modules"), "dir");
+  mkdirSync(join(dir, "no-browsers"));
+  return dir;
+}
+
+function e2eEnv(dir, appPort) {
+  const env = { ...process.env, PORT: String(appPort), PLAYWRIGHT_BROWSERS_PATH: join(dir, "no-browsers") };
+  for (const k of ["PLAYWRIGHT_JSON_OUTPUT_NAME", "PLAYWRIGHT_JSON_OUTPUT_DIR", "PLAYWRIGHT_TEST_BASE_URL", "E2E_RESOLVED_PORT"]) delete env[k];
+  return env;
+}
+
+// factory의 사전 기동과 같은 모양: `[test.env].app_start`를 백그라운드로 띄우고 /healthz 200까지 조건 대기.
+async function preboot(cwd, env, cmd = harness.test.env.app_start) {
+  const child = spawn("bash", ["-c", `exec ${cmd}`], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+  let log = "";
+  child.stdout.on("data", (d) => { log += d; });
+  child.stderr.on("data", (d) => { log += d; });
+  await vi.waitFor(async () => {
+    if (child.exitCode !== null) throw new Error(`preboot exited ${child.exitCode}: ${log}`);
+    const s = await healthzStatus(env.PORT);
+    if (s !== 200) throw new Error(`preboot not yet 200 (got ${s})`);
+  }, { timeout: 30_000, interval: 50 });
+  return child;
+}
+
+async function stop(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const closed = once(child, "close");
+  child.kill("SIGTERM");
+  await closed;
+}
+
+function caseStatuses(dir) {
+  const report = JSON.parse(readFileSync(join(dir, REPORT), "utf8"));
+  const out = {};
+  const walk = (s) => {
+    for (const sp of s.specs || []) out[sp.title] = sp.tests.flatMap((t) => t.results.map((r) => r.status));
+    for (const c of s.suites || []) walk(c);
+  };
+  for (const s of report.suites || []) walk(s);
+  return out;
+}
+
+const statusOf = (p, path) => fetch(`http://${LOOPBACK}:${p}${path}`).then((r) => r.status, () => 0);
+
+// 방향 1: PR이 새 라우트와 그 e2e 케이스를 더한다. 옛 프로세스를 상대로 돌면 404로 RED가 된다(올바른 PR이 막힌다).
+test("test_15_e2e_checks_pr_tree_not_stale_preboot_new_route", async () => {
+  const dir = stageTree("fq15-stale-new-");
+  let base;
+  try {
+    const p = await reserveLoopbackPort();
+    const env = e2eEnv(dir, p);
+    base = await preboot(dir, env);
+    // checkout: 트리의 코드가 기동 **뒤에** 바뀐다.
+    const appJs = join(dir, "src/app.js");
+    const src = readFileSync(appJs, "utf8");
+    const anchor = 'app.get("/version"';
+    expect(src).toContain(anchor);
+    writeFileSync(appJs, src.replace(anchor, 'app.get("/fq15-probe", (_req, res) => res.status(200).json({ probe: true }));\n' + anchor));
+    writeFileSync(join(dir, "e2e/probe.spec.js"),
+      'import { test, expect } from "@playwright/test";\ntest("fq15 probe", async ({ request }) => {\n  expect((await request.get("/fq15-probe")).status()).toBe(200);\n});\n');
+    // 전제: 사전 기동한 프로세스는 옛 코드다(새 라우트를 모른다).
+    expect(await statusOf(p, "/fq15-probe")).toBe(404);
+
+    const r = await runShell(harness.commands.e2e, { cwd: dir, env });
+    expect({ code: r.code, cases: caseStatuses(dir) }).toMatchObject({ code: 0, cases: { "fq15 probe": ["passed"], healthz: ["passed"] } });
+    expect(r.out).not.toMatch(/EADDRINUSE|is already used/);
+  } finally {
+    await stop(base);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, STEP_TIMEOUT_MS);
+
+// 방향 2: PR이 /healthz 계약(200)을 깬다. 옛 프로세스를 상대로 돌면 여전히 200이라 GREEN이 된다(깨진 PR이 통과한다).
+test("test_15_e2e_checks_pr_tree_not_stale_preboot_broken_healthz", async () => {
+  const dir = stageTree("fq15-stale-broken-");
+  let base;
+  try {
+    const p = await reserveLoopbackPort();
+    const env = e2eEnv(dir, p);
+    base = await preboot(dir, env);
+    const appJs = join(dir, "src/app.js");
+    const src = readFileSync(appJs, "utf8");
+    const healthy = '.status(200).json({ ok: true })';
+    expect(src).toContain(healthy);
+    writeFileSync(appJs, src.replace(healthy, '.status(201).json({ ok: true })'));
+    // 전제: 사전 기동한 프로세스는 여전히 옛 200을 준다.
+    expect(await statusOf(p, "/healthz")).toBe(200);
+
+    const r = await runShell(harness.commands.e2e, { cwd: dir, env });
+    expect(r.code).not.toBe(0);
+    expect(caseStatuses(dir)).toMatchObject({ healthz: ["failed"] });
+  } finally {
+    await stop(base);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, STEP_TIMEOUT_MS);
+
+// 반대쪽 가드: 트리가 기동 뒤에 바뀌지 않았으면 사전 기동한 그 앱을 재사용한다(owner spec: reuseExistingServer,
+// "e2e runs against the pre-booted app"). src/의 mtime을 기동보다 한 시간 앞으로 고정해 시각 경계를 없앤다.
+test("test_15_e2e_reuses_preboot_when_tree_unchanged", async () => {
+  const dir = stageTree("fq15-fresh-");
+  let base;
+  try {
+    const past = new Date(Date.now() - 3_600_000);
+    for (const f of ["src/app.js", "src/version.js", "src"]) utimesSync(join(dir, f), past, past);
+    const p = await reserveLoopbackPort();
+    const env = e2eEnv(dir, p);
+    base = await preboot(dir, env);
+    const r = await runShell(harness.commands.e2e, { cwd: dir, env });
+    expect({ code: r.code, cases: caseStatuses(dir) }).toMatchObject({ code: 0, cases: { healthz: ["passed"] } });
+    expect(r.out).toContain(`reusing pre-booted app pid ${base.pid} on :${p}`);
+    expect(r.out).not.toMatch(/booting this tree's app/);
+    expect(base.exitCode).toBe(null);
+  } finally {
+    await stop(base);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, STEP_TIMEOUT_MS);
+
+// 낯선 서버(이 트리가 아닌 곳에서 뜬 프로세스)가 PORT의 /healthz에 200을 주어도 그것을 대상으로 삼지 않는다(plan d2).
+test("test_15_e2e_ignores_foreign_server_on_port", async () => {
+  const dir = stageTree("fq15-foreign-");
+  const elsewhere = mkdtempSync(join(tmpdir(), "fq15-elsewhere-"));
+  let foreign;
+  try {
+    // src/를 과거로 고정한다 — 그래야 "옛 코드" 판정이 아니라 "이 트리가 아니다" 판정만이 낯선 서버를 거를 수 있다.
+    const past = new Date(Date.now() - 3_600_000);
+    for (const f of ["src/app.js", "src/version.js", "src"]) utimesSync(join(dir, f), past, past);
+    writeFileSync(join(dir, "e2e/version.spec.js"),
+      'import { test, expect } from "@playwright/test";\ntest("fq15 version", async ({ request }) => {\n  expect((await request.get("/version")).status()).toBe(200);\n});\n');
+    writeFileSync(join(elsewhere, "server.cjs"),
+      'require("node:http").createServer((q, s) => { s.statusCode = q.url === "/healthz" ? 200 : 404; s.end("{}"); }).listen(Number(process.env.PORT));\n');
+    const p = await reserveLoopbackPort();
+    const env = e2eEnv(dir, p);
+    foreign = await preboot(elsewhere, env, "node server.cjs");
+    expect(await statusOf(p, "/version")).toBe(404);
+    const r = await runShell(harness.commands.e2e, { cwd: dir, env });
+    expect({ code: r.code, cases: caseStatuses(dir) }).toMatchObject({ code: 0, cases: { "fq15 version": ["passed"], healthz: ["passed"] } });
+  } finally {
+    await stop(foreign);
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+}, STEP_TIMEOUT_MS);

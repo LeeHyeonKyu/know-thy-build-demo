@@ -1,0 +1,184 @@
+// Issue #76 — POST /notes (spec docs/features/001-create-note.md), DB-free unit level.
+// The route and service under test are the production modules; only the repository is faked,
+// so these tests pin the HTTP contract and the service rules without a database.
+// Observation point: an in-process express app bound to an ephemeral 127.0.0.1 port (never a
+// fixed port — new-test-repeat runs this file alongside the full suite).
+import { afterEach, describe, expect, test } from "vitest";
+import express from "express";
+import { once } from "node:events";
+import { createNotesRouter } from "../src/routes/notes.js";
+import { createNotesService } from "../src/service/notes.js";
+import { makeNote } from "./fixtures/notes.js";
+
+// A repository fake whose behaviour is decided per case. It records every insert so a case can
+// assert that nothing reached storage.
+function fakeRepo(insert) {
+  const calls = [];
+  return {
+    calls,
+    async insertNote(note) {
+      calls.push(note);
+      return insert(note);
+    },
+  };
+}
+
+const servers = [];
+afterEach(async () => {
+  while (servers.length) {
+    const server = servers.pop();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+async function startWith(repo) {
+  const app = express();
+  app.use("/notes", createNotesRouter(createNotesService(repo)));
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  servers.push(server);
+  return "http://127.0.0.1:" + server.address().port;
+}
+
+async function postNote(base, payload) {
+  const res = await fetch(base + "/notes", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const text = await res.text();
+  let body = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = null;
+  }
+  return { res, text, body };
+}
+
+describe("issue #76 — storage failures are classified, not swallowed", () => {
+  // dw3: the regression that closed PR #17. A pg connection-loss error carries no `.code`;
+  // it must still be 503 db_unavailable. In the same test a coded connection failure is 503 and an
+  // unrelated error stays 500 — so a catch-all "every error is 503" fails here too.
+  test("test_76_codeless_pg_connection_error_maps_to_503", async () => {
+    const secretTitle = "title-must-not-echo-7c1f";
+    const secretBody = "body-must-not-echo-9a2e";
+
+    const codeless = new Error("Connection terminated unexpectedly");
+    expect(codeless.code).toBeUndefined();
+    const base = await startWith(fakeRepo(async () => { throw codeless; }));
+    const lost = await postNote(base, makeNote({ title: secretTitle, body: secretBody }));
+    expect(lost.res.status).toBe(503);
+    expect(lost.res.headers.get("content-type")).toMatch(/application\/json/);
+    expect(lost.body?.error?.code).toBe("db_unavailable");
+    expect(typeof lost.body?.error?.message).toBe("string");
+    // The 503 must not echo what the client submitted (spec 001 Key States).
+    expect(lost.text).not.toContain(secretTitle);
+    expect(lost.text).not.toContain(secretBody);
+
+    const refused = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), { code: "ECONNREFUSED" });
+    const base2 = await startWith(fakeRepo(async () => { throw refused; }));
+    const coded = await postNote(base2, makeNote());
+    expect(coded.res.status).toBe(503);
+    expect(coded.body?.error?.code).toBe("db_unavailable");
+
+    const base3 = await startWith(fakeRepo(async () => { throw new Error("boom"); }));
+    const other = await postNote(base3, makeNote({ title: secretTitle, body: secretBody }));
+    expect(other.res.status).toBe(500);
+    expect(other.body?.error?.code).toBe("internal_error");
+    expect(other.text).not.toContain(secretTitle);
+  });
+
+  // The real driver's shapes that are not a plain Error with a message: Node 22 reports a refused
+  // connect to "localhost" as an AggregateError with code ECONNREFUSED and an EMPTY message
+  // (dissent d9), and pg surfaces server-side shutdown as SQLSTATE 57P01. Both are outages.
+  test("test_76_driver_shaped_connection_errors_map_to_503", async () => {
+    const aggregate = new AggregateError(
+      [
+        Object.assign(new Error("connect ECONNREFUSED ::1:5432"), { code: "ECONNREFUSED" }),
+        Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), { code: "ECONNREFUSED" }),
+      ],
+      "",
+    );
+    aggregate.code = "ECONNREFUSED";
+    const shutdown = Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" });
+    const timeout = new Error("timeout exceeded when trying to connect");
+
+    for (const err of [aggregate, shutdown, timeout]) {
+      const base = await startWith(fakeRepo(async () => { throw err; }));
+      const { res, body } = await postNote(base, makeNote());
+      expect(res.status, "error " + JSON.stringify(err.message) + " code " + err.code).toBe(503);
+      expect(body?.error?.code).toBe("db_unavailable");
+    }
+
+    // A coded SQL error that is not about the connection (unique violation) is not an outage.
+    const unique = Object.assign(new Error("duplicate key value violates unique constraint"), { code: "23505" });
+    const base = await startWith(fakeRepo(async () => { throw unique; }));
+    const { res } = await postNote(base, makeNote());
+    expect(res.status).toBe(500);
+  });
+});
+
+describe("issue #76 — service validation without a database", () => {
+  // dw2 (unit half): the service rule is pinned without a DB. Both fields, both failure modes;
+  // the message names the offending field and nothing reaches the repository.
+  test("test_76_service_rejects_blank_or_missing_fields", async () => {
+    const cases = [
+      { input: { body: "b" }, field: "title" },
+      { input: { title: "   \t\n", body: "b" }, field: "title" },
+      { input: { title: "t" }, field: "body" },
+      { input: { title: "t", body: "  " }, field: "body" },
+      { input: { title: 42, body: "b" }, field: "title" },
+    ];
+    for (const { input, field } of cases) {
+      const repo = fakeRepo(async () => { throw new Error("repository must not be called"); });
+      const service = createNotesService(repo);
+      const err = await service.createNote(input).then(
+        () => null,
+        (e) => e,
+      );
+      expect(err, JSON.stringify(input)).not.toBeNull();
+      expect(err.code).toBe("invalid_request");
+      expect(err.message).toContain(field);
+      expect(repo.calls).toHaveLength(0);
+    }
+  });
+
+  // Spec: stored title/body are trimmed and unknown fields never reach storage or the response.
+  test("test_76_service_trims_and_drops_unknown_fields", async () => {
+    const createdAt = new Date("2026-01-01T00:00:00Z");
+    const repo = fakeRepo(async (note) => ({ id: 7, ...note, created_at: createdAt }));
+    const service = createNotesService(repo);
+
+    const note = await service.createNote(makeNote({ title: "  spaced title ", body: "\n body \t", owner: "mallory" }));
+
+    expect(repo.calls).toEqual([{ title: "spaced title", body: "body" }]);
+    expect(note.title).toBe("spaced title");
+    expect(note.body).toBe("body");
+    expect(note).not.toHaveProperty("owner");
+  });
+
+  // Over HTTP the same rule gives 400 invalid_request, including for a body that is not an object.
+  test("test_76_route_returns_400_invalid_request_for_bad_fields", async () => {
+    const repo = fakeRepo(async () => { throw new Error("repository must not be called"); });
+    const base = await startWith(repo);
+
+    const missing = await postNote(base, { body: "b" });
+    expect(missing.res.status).toBe(400);
+    expect(missing.body?.error?.code).toBe("invalid_request");
+    expect(missing.body?.error?.message).toContain("title");
+
+    const array = await postNote(base, [makeNote()]);
+    expect(array.res.status).toBe(400);
+    expect(array.body?.error?.code).toBe("invalid_request");
+
+    // U+0000 is valid JSON but Postgres rejects it in text columns (22021): refuse it as a
+    // client error with a reason instead of letting it become a 500 (dissent d13).
+    const nul = await postNote(base, makeNote({ body: "a\u0000b" }));
+    expect(nul.res.status).toBe(400);
+    expect(nul.body?.error?.code).toBe("invalid_request");
+    expect(nul.body?.error?.message).toContain("body");
+
+    expect(repo.calls).toHaveLength(0);
+  });
+});

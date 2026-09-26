@@ -165,7 +165,11 @@ describe("issue #76 — POST /notes against the compose Postgres", () => {
     const control = marker("dw2-control");
     const ok = await postJson(app.base, makeNote({ body: control }));
     expect(ok.res.status).toBe(201);
-    expect(await rowsWithMarker(control)).toHaveLength(1);
+    // The fixture's default title travels verbatim: the response and the stored row both carry it.
+    expect(ok.body?.title).toBe("pg pool leak");
+    const controlRows = await rowsWithMarker(control);
+    expect(controlRows).toHaveLength(1);
+    expect(controlRows[0].title).toBe("pg pool leak");
 
     const cases = [
       { field: "title", build: (m) => ({ body: m }) },
@@ -216,7 +220,11 @@ describe("issue #76 — POST /notes against the compose Postgres", () => {
     });
     expect(res.status).toBe(201);
     expect(body.title).toBe(m);
-    expect(await rowsWithMarker(m)).toHaveLength(1);
+    // The body text (with its `=` and digits, which a form decoder would mangle) is stored verbatim.
+    expect(body.body).toBe("max=10 then the pool starves");
+    const rows = await rowsWithMarker(m);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].body).toBe("max=10 then the pool starves");
   }, CASE_TIMEOUT_MS);
 });
 

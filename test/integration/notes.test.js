@@ -12,6 +12,8 @@ import { spawn } from "node:child_process";
 import { connect, createServer } from "node:net";
 import { once } from "node:events";
 import { readFileSync } from "node:fs";
+import { createGzip } from "node:zlib";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { makeNote, uniqueMarker } from "../fixtures/notes.js";
@@ -492,4 +494,130 @@ describe("issue #76 rework — no hidden request-size cap (cf4)", () => {
       expect(rows[0].h).toBe(expected[0].h);
     }
   }, CASE_TIMEOUT_MS);
+});
+
+// cf1/qa1 (rework 2): gzip of N bytes of one repeated byte, built as a stream so the test never
+// holds the inflated payload itself — only the (small) compressed result.
+async function gzipOfRepeatedByte(byte, totalBytes) {
+  const gz = createGzip({ level: 9 });
+  const chunks = [];
+  gz.on("data", (chunk) => chunks.push(chunk));
+  const ended = once(gz, "end");
+  const block = Buffer.alloc(1024 * 1024, byte);
+  for (let written = 0; written < totalBytes; written += block.length) {
+    if (!gz.write(block)) await once(gz, "drain");
+  }
+  gz.end();
+  await ended;
+  return Buffer.concat(chunks);
+}
+
+describe("issue #76 rework 2 — a compressed request cannot take the process down (cf1/qa1)", () => {
+  // One unauthenticated POST whose gzip body inflates to 600 MiB (past V8's maximum string length)
+  // but is well under 1 MB on the wire. Unbounded buffering throws a RangeError inside raw-body's
+  // stream handler and the whole process exits — /healthz and /version with it. The real
+  // entrypoint must instead answer 413 in the API's error format and keep serving.
+  test("test_76_gzip_bomb_gets_413_and_process_keeps_serving", async () => {
+    const app = await startApp(pgEnv(DB.host, DB.port));
+    try {
+      const bomb = await gzipOfRepeatedByte(0x61, 600 * 1024 * 1024);
+      expect(bomb.length).toBeLessThan(1024 * 1024);
+
+      let answer;
+      try {
+        answer = await send(app.base, "/notes", {
+          method: "POST",
+          headers: { "content-type": "application/json", "content-encoding": "gzip" },
+          body: bomb,
+          signal: AbortSignal.timeout(30000),
+        });
+      } catch (err) {
+        answer = { failure: String(err?.cause?.code || err?.cause?.message || err?.message || err) };
+      }
+      if (answer.failure) {
+        // The connection dropped: wait (condition, bounded) to see whether the process died with it.
+        await vi.waitFor(() => { if (!app.dead()) throw new Error("still running"); }, { timeout: 5000, interval: 20 }).catch(() => {});
+      }
+      expect(answer.failure, "request dropped instead of answered; app stderr: " + app.out.stderr.slice(-1500)).toBeUndefined();
+      expect(app.dead(), "process exited on a compressed request: " + app.out.stderr.slice(-1500)).toBe(false);
+      expect(answer.res.status).toBe(413);
+      expect(answer.res.headers.get("content-type")).toMatch(/application\/json/);
+      expect(typeof answer.body?.error?.code).toBe("string");
+      expect(typeof answer.body?.error?.message).toBe("string");
+
+      const health = await send(app.base, "/healthz");
+      expect(health.res.status).toBe(200);
+      expect(health.body?.ok).toBe(true);
+      const version = await send(app.base, "/version");
+      expect(version.res.status).toBe(200);
+      expect(app.dead()).toBe(false);
+    } finally {
+      await app.stop();
+    }
+  }, 120000);
+});
+
+// cf2/qa2 (rework 2): a 503 must mean "nothing was written". The INSERT is made to wait on a table
+// lock longer than the app's timers; afterwards the row must not exist, because the SERVER aborted
+// the statement — not merely the client giving up while the INSERT commits later.
+//
+// Isolation: the lock is taken in a throwaway database created for this case only, so no other
+// suite's INSERTs on the shared compose database are ever blocked by it. The app's backends carry a
+// per-case application_name (pg's standard PGAPPNAME) so the test can wait for exactly them.
+describe("issue #76 rework 2 — a timed-out write answers 503 and leaves no row (cf2/qa2)", () => {
+  test("test_76_timed_out_insert_answers_503_and_writes_no_row", async () => {
+    const dbName = "fq76_timeout_" + randomUUID().replace(/-/g, "");
+    const appName = "fq76-timeout-" + randomUUID();
+    await db.query("create database " + dbName);
+    const scoped = { ...DB, database: dbName };
+    const reader = new pg.Client(scoped);
+    const locker = new pg.Client(scoped);
+    let app;
+    try {
+      await reader.connect();
+      await locker.connect();
+      app = await startApp({ ...pgEnv(DB.host, DB.port), PGDATABASE: dbName, PGAPPNAME: appName });
+
+      // Warm-up: the app creates its table and holds a pooled connection.
+      const warm = await postWithin(app.base, makeNote({ title: "warm-up" }), STALL_BOUND_MS);
+      expect(warm.status).toBe(201);
+
+      await locker.query("begin");
+      await locker.query("lock table notes in access exclusive mode");
+      const m = uniqueMarker("timeout");
+      let blocked;
+      try {
+        blocked = await postWithin(app.base, makeNote({ title: m, body: "secret " + m }), STALL_BOUND_MS);
+      } finally {
+        await locker.query("rollback");
+      }
+      expect(blocked.status).toBe(503);
+      expect(blocked.body?.error?.code).toBe("db_unavailable");
+      expect(blocked.text).not.toContain(m);
+
+      // Condition wait: none of the app's backends is still running an INSERT after the lock is
+      // gone. An INSERT the server never aborted would run and commit right here.
+      await vi.waitFor(
+        async () => {
+          const { rows } = await reader.query(
+            "select count(*)::int as n from pg_stat_activity where application_name = $1 and state = 'active' and query ilike 'insert%'",
+            [appName],
+          );
+          if (rows[0].n !== 0) throw new Error("an app backend is still running an INSERT");
+        },
+        { timeout: 20000, interval: 50 },
+      );
+      const { rows } = await reader.query("select id from notes where title = $1", [m]);
+      expect(rows, "503 was answered but the row was written").toHaveLength(0);
+
+      // The same process writes again once the lock is gone.
+      const again = await postWithin(app.base, makeNote({ title: m + "-again" }), STALL_BOUND_MS);
+      expect(again.status).toBe(201);
+    } finally {
+      await app?.stop();
+      await reader.end().catch(() => {});
+      await locker.end().catch(() => {});
+      await db.query("drop database if exists " + dbName + " with (force)");
+    }
+  }, 120000);
 });

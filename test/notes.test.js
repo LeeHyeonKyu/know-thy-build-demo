@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, test } from "vitest";
 import express from "express";
 import { once } from "node:events";
+import { gzipSync } from "node:zlib";
 import { createNotesRouter } from "../src/routes/notes.js";
 import { createNotesService } from "../src/service/notes.js";
 import { makeNote } from "./fixtures/notes.js";
@@ -208,5 +209,50 @@ describe("issue #76 rework — stalls and large bodies (cf-s1, cf4)", () => {
     expect(body?.body).toBe(big);
     expect(repo.calls).toHaveLength(1);
     expect(repo.calls[0].body).toBe(big);
+  });
+});
+
+describe("issue #76 rework 2 — bounded body buffering and server-side statement timeout (cf1/qa1, cf2/qa2)", () => {
+  // cf1/qa1: body-parser inflates gzip/deflate by default, and its size limit is counted on the
+  // INFLATED bytes. With no finite limit a tiny compressed request can make the process buffer an
+  // unbounded amount. A request whose inflated JSON is far past any sane note (32 MiB of body text,
+  // a few tens of KB on the wire) must be refused with 413 in the API's error format before it
+  // reaches storage — while an ordinary gzip-encoded note is still accepted.
+  test("test_76_inflated_body_over_limit_gets_413_without_storage", async () => {
+    const repo = fakeRepo(async (note) => ({ id: 1, ...note, created_at: new Date("2026-01-01T00:00:00Z") }));
+    const base = await startWith(repo);
+    const post = (payload) =>
+      fetch(base + "/notes", {
+        method: "POST",
+        headers: { "content-type": "application/json", "content-encoding": "gzip" },
+        body: gzipSync(Buffer.from(JSON.stringify(payload))),
+      });
+
+    const small = await post(makeNote({ title: "gzipped note" }));
+    expect(small.status).toBe(201);
+    expect((await small.json()).title).toBe("gzipped note");
+    expect(repo.calls).toHaveLength(1);
+
+    const huge = await post(makeNote({ body: "a".repeat(32 * 1024 * 1024) }));
+    const text = await huge.text();
+    expect(huge.status).toBe(413);
+    expect(huge.headers.get("content-type")).toMatch(/application\/json/);
+    const body = JSON.parse(text);
+    expect(typeof body?.error?.code).toBe("string");
+    expect(typeof body?.error?.message).toBe("string");
+    expect(repo.calls).toHaveLength(1);
+  });
+
+  // cf2/qa2: the server-side statement_timeout aborts a stuck INSERT and reports SQLSTATE 57014
+  // (query_canceled). The statement was rolled back, so "unavailable, try again later" is true:
+  // 503 db_unavailable, not 500, and the submitted text is not echoed.
+  test("test_76_statement_timeout_maps_to_503", async () => {
+    const secretTitle = "timed-out-title-must-not-echo-5e21";
+    const canceled = Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
+    const base = await startWith(fakeRepo(async () => { throw canceled; }));
+    const { res, text, body } = await postNote(base, makeNote({ title: secretTitle }));
+    expect(res.status).toBe(503);
+    expect(body?.error?.code).toBe("db_unavailable");
+    expect(text).not.toContain(secretTitle);
   });
 });

@@ -1,0 +1,22 @@
+# Dependabot version updates (issue #57).
+# Note: PRs opened by Dependabot touch protected paths (package.json, package-lock.json,
+# .github/workflows/factory-*.yml) and therefore require a human merge.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    target-branch: main
+    groups:
+      npm-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

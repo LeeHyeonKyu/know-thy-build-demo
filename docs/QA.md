@@ -22,7 +22,7 @@ date: 2026-09-12
 
 **`.factory/harness.toml` test sections:** `[test]`/`[test.env]`가 채워져 있다 — 실제 값은 그 파일이 출처이고, 이 표는 *왜* 그렇게 설정했는지를 설명한다.
 
-**Smoke suite (maturity M1):** `test/smoke.test.js`(unit), `test/integration/db.test.js`(integration) — `npx know-thy-build factory doctor`가 GREEN으로 확인한다.
+**Smoke suite (maturity M2):** `test/smoke.test.js`(unit), `test/integration/db.test.js`(integration) — `npx know-thy-build factory doctor`가 GREEN으로 확인한다.
 
 ## Fixture Policy
 
@@ -37,7 +37,7 @@ date: 2026-09-12
 - 테스트 이름은 `test_{issue}_{slug}` — 예: `test_12_create_note_rejects_empty_title`.
 - `{issue}`는 GitHub 이슈 번호, `{slug}`는 done_when 항목을 소문자 snake로 줄인 것.
 - 회귀 가드도 같은 규칙을 따른다 — 나중에 이슈 번호로 "이 테스트가 왜 있는지"를 되짚을 수 있어야 한다.
-- 파일 위치: unit은 `test/*.test.js`, integration은 `test/integration/*.test.js`. e2e는 `e2e/*.spec.js`(M2 승격 전까지 게이트 밖).
+- 파일 위치: unit은 `test/*.test.js`, integration은 `test/integration/*.test.js`. e2e는 `e2e/*.spec.js` — `[commands].e2e`(`npx playwright test`)로 full·deep 게이트에서 돈다(#15). 포트는 `PORT`(기본 3000)로 앱과 `playwright.config.js`가 함께 읽는다. 크로미움이 없는 환경에서는 브라우저 케이스가 선택에서 빠지고 stderr에 그 사실이 찍힌다.
 
 ## Evidence
 

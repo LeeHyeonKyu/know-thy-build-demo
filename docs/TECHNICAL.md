@@ -25,7 +25,7 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 | Framework | Express 5 | 라우팅만 필요, 이미 설치됨 |
 | Storage | PostgreSQL 16 | 테스트 환경(`docker-compose.test.yml`)에 이미 존재, 검색을 나중에 full-text로 올릴 여지 |
 | Test runner | vitest 3 | unit + integration 동일 러너 |
-| E2E | Playwright | 이미 설치됨 — M2 승격 전까지 게이트에서 쓰지 않음 |
+| E2E | Playwright | full·deep 게이트(#15, M2) — 브라우저 없는 러너에서는 API 케이스만 돈다 |
 
 **Key Dependencies:** `express` — HTTP, `pg`(001에서 추가 예정) — DB 드라이버
 **Dev Tools:** `vitest`, `@playwright/test`, `docker compose`
@@ -70,7 +70,7 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 |-------|-------|------|-----------|
 | unit | service 규칙(검증·정규화·정렬 키), 순수 함수 | vitest | DB 없이 빠르게 규칙을 고정 |
 | integration | routes→service→repo, 실제 Postgres에 SQL 실행 | vitest + docker compose | SQL·스키마 오류는 unit이 못 잡는다 |
-| e2e | 앱 기동 후 HTTP 표면 | Playwright | 존재하지만 M1에서는 게이트가 아님(M2 승격 대상) |
+| e2e | 앱 기동 후 HTTP 표면 | Playwright | full·deep 게이트(M2, #15). factory가 `[test.env].app_start`로 앱을 먼저 띄우고 `playwright.config.js`의 `webServer`가 `reuseExistingServer`로 재사용한다. required·fast에는 없다 |
 
 **Coverage Principle:** 변경된 줄 기준 diff coverage 90% — 전체 % 는 쓰지 않는다.
 **What NOT to Test:** Express 내부, pg 드라이버, 라우팅 등록 같은 글루 — 프레임워크가 이미 보장하는 것.
@@ -92,7 +92,7 @@ Express 5 단일 프로세스 + PostgreSQL 단일 테이블. 테스트 환경은
 | PostgreSQL 16 | 테스트 컴포즈·integration 스모크가 이미 존재, full-text 이관 가능 | 컨테이너가 필요(테스트 시작 비용) |
 
 **Decision:** PostgreSQL 16.
-**Why:** repo에 이미 `docker-compose.test.yml`(postgres:16)과 `test/integration/db.test.js`가 살아 있다. 하네스 성숙도 M1의 근거가 그 파일들이므로, 저장소를 SQLite로 잡으면 선언(TECHNICAL)과 실제 하네스가 어긋난다.
+**Why:** repo에 이미 `docker-compose.test.yml`(postgres:16)과 `test/integration/db.test.js`가 살아 있다. 하네스 성숙도 M1(이후 #15에서 M2)의 근거가 그 파일들이므로, 저장소를 SQLite로 잡으면 선언(TECHNICAL)과 실제 하네스가 어긋난다.
 **Consequences:** integration 레벨이 컴포즈에 묶인다(그래서 `[test.env].compose`가 채워져 있다). 로컬에서 docker가 없으면 unit만 돈다.
 **Validation:** `factory doctor`의 integration 스모크가 GREEN이면 선언과 하네스가 일치한다.
 

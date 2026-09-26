@@ -20,7 +20,7 @@ jobs:
     # 만진다 — 넓은 API 장애, 곧 복구 팔이 가장 할 일이 많은 상황에서 잡이 SIGKILL됐다.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.FACTORY_BOT_TOKEN }}

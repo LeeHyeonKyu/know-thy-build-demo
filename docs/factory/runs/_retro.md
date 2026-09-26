@@ -28,8 +28,8 @@
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
 | qa na ratio | 0.11 (1/9 claims, na-heavy 0/1 approvals) | 0.03 (1/38 claims, na-heavy 0/3 approvals) |
-| cost (usd) | 43.25 | 675.31 |
-| tokens | input 4507579 / output 108255 | input 12029982 / output 1254954 |
+| cost (usd) | 50.86 | 675.31 |
+| tokens | input 5304132 / output 128962 | input 12029982 / output 1254954 |
 | retro cost (usd) | 0.00 | 5.79 |
 | retro tokens | input 0 / output 0 | input 10 / output 11866 |
 | full retros | — | 5 |
@@ -730,6 +730,22 @@
           15
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "I'm moving this from should_fix to must_fix. The spec's Key State 'DB 연결 실패 → 503' fails when the database stalls instead of refusing. The pool has no connectionTimeoutMillis, query_timeout or statement_timeout, so there is no timer anywhere in the request path. If the DB host accepts TCP and then goes silent (a hung postgres, a half-open NAT/LB, a proxy that accepts and never forwards), POST /notes waits forever and never answers 503. If SYNs are dropped, the request waits for the OS connect timeout (about 127s on Linux). Each hung request holds one of the 10 pool slots. After 10 of them, every later POST sits in pg-pool's wait queue, which has no timeout either, so the endpoint stops responding completely instead of returning 503. The service's `/timeout exceeded when trying to connect/` and `/connection timeout/` patterns (src/service/notes.js:66-67) are dead code because pg only raises those errors when connectionTimeoutMillis is set. In round 1 I rated this should_fix because I assumed the request would eventually become ETIMEDOUT. That is only true for dropped SYNs, not for an accepted connection that then stalls.",
+        "runs": [
+          76
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The change adds a hidden, unspecified 100kb request-size cap with a 413 status. The spec says there should be no length limit for now, and that any cap with a 413 belongs in a separate issue. A legitimate note over about 100kb, such as a pasted incident log (the persona's exact use case), is rejected with 413 `invalid_request` 'invalid request body'. The message does not say the body was too large, and no row is written. Nobody specified this boundary, it is not tested on either side, and it is not documented.",
+        "runs": [
+          76
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -1106,10 +1122,10 @@
     "qa_na_ratio": 0.11,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 43.251912,
+      "cost_usd": 50.859167,
       "tokens": {
-        "input": 4507579,
-        "output": 108255
+        "input": 5304132,
+        "output": 128962
       }
     }
   },

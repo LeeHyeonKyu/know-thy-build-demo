@@ -1,8 +1,8 @@
 # Retro State
 
-- last retro: 2026-09-26T16:08:25.967Z
+- last retro: 2026-09-26T16:11:19.038Z
 - merges since last retro: 0
-- current N: 1
+- current N: 2
 
 ## History (last 5)
 
@@ -12,32 +12,33 @@
 | 2026-09-20T11:32:45.992Z | 7 | 1 | 1 | 16 |
 | 2026-09-21T02:34:43.093Z | 3 | 1 | 1 | 2 |
 | 2026-09-26T16:08:25.967Z | 0 | 1 | 1 | 3 |
+| 2026-09-26T16:11:19.038Z | 0 | 1 | 2 | 0 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 1 | 4 |
+| merged | 1 | 5 |
 | review rounds avg | 1 | 1 |
-| rounds/issue (plan/impl/review) | 1 / 1 / 1 | 0.75 / 1 / 1 |
+| rounds/issue (plan/impl/review) | 1 / 1 / 1 | 0.8 / 1 / 1 |
 | escaped defects | 0 | 0 |
-| revert rate | 0.00 (0/1) | 0.00 (0/4) |
-| needs-human | 3 | 24 |
+| revert rate | 0.00 (0/1) | 0.00 (0/5) |
+| needs-human | 0 | 24 |
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
-| qa na ratio | 0.00 (0/12 claims, na-heavy 0/1 approvals) | 0.03 (1/38 claims, na-heavy 0/3 approvals) |
-| cost (usd) | 77.43 | 675.31 |
-| tokens | input 2280444 / output 182714 | input 12029982 / output 1254954 |
-| retro cost (usd) | 0.96 | 5.16 |
-| retro tokens | input 2 / output 1804 | input 8 / output 10384 |
-| full retros | — | 4 |
+| qa na ratio | 없음 | 0.03 (1/38 claims, na-heavy 0/3 approvals) |
+| cost (usd) | 0.00 | 675.31 |
+| tokens | input 0 / output 0 | input 12029982 / output 1254954 |
+| retro cost (usd) | 0.62 | 5.79 |
+| retro tokens | input 2 / output 1482 | input 10 / output 11866 |
+| full retros | — | 5 |
 
 ### Rounds per issue (this window)
 
 | issue | plan | implement | review | escaped |
 | --- | --- | --- | --- | --- |
-| #59 | 1 | 1 | 1 | 0 |
+| #56 | 1 | 1 | 1 | 0 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -51,11 +52,11 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-09-26T16:08:25.967Z",
+    "last_retro_at": "2026-09-26T16:11:19.038Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
-  "n": 1,
+  "n": 2,
   "history": [
     {
       "at": "2026-09-12T17:07:22.748Z",
@@ -338,6 +339,34 @@
       ],
       "n_before": 1,
       "n_after": 1
+    },
+    {
+      "at": "2026-09-26T16:11:19.038Z",
+      "yield": 0,
+      "needs_human_since": 0,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            56
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "reason": "factory identity is a personal account (LeeHyeonKyu) — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity"
+            }
+          ]
+        },
+        {
+          "step": "harness",
+          "title": "harness: promote to M2 — HTTP route surface present (express/fastify/hono/koa/next dependency, or routes-style files) but harness maturity is M1 or below",
+          "skipped": "duplicate"
+        }
+      ],
+      "n_before": 1,
+      "n_after": 2
     }
   ],
   "candidates": {
@@ -925,7 +954,7 @@
     "implement_rounds_avg": 1,
     "rounds_per_issue": [
       {
-        "issue": 59,
+        "issue": 56,
         "plan": 1,
         "implement": 1,
         "review": 1
@@ -942,38 +971,38 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 3,
-    "qa_approvals": 1,
-    "qa_claims_total": 12,
+    "needs_human": 0,
+    "qa_approvals": 0,
+    "qa_claims_total": 0,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 77.430308,
+      "cost_usd": 0,
       "tokens": {
-        "input": 2280444,
-        "output": 182714
+        "input": 0,
+        "output": 0
       }
     },
     "retro_usage": {
-      "cost_usd": 0.957897,
+      "cost_usd": 0.624922,
       "tokens": {
         "input": 2,
-        "output": 1804
+        "output": 1482
       }
     }
   },
   "stats_total": {
-    "merged": 4,
+    "merged": 5,
     "review_rounds_avg": 1,
-    "plan_rounds_avg": 0.75,
+    "plan_rounds_avg": 0.8,
     "implement_rounds_avg": 1,
     "escaped_defects": 0,
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {},
-    "review_runs": 3,
+    "review_runs": 4,
     "findings_total": 0,
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
@@ -992,13 +1021,13 @@
       }
     },
     "retro_usage": {
-      "cost_usd": 5.162021,
+      "cost_usd": 5.786943,
       "tokens": {
-        "input": 8,
-        "output": 10384
+        "input": 10,
+        "output": 11866
       }
     },
-    "retros": 4
+    "retros": 5
   },
   "deferred_proposals": [],
   "deletion_candidates": []

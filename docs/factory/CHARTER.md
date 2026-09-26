@@ -43,7 +43,7 @@ triage: { default: ready }     # dogfood repo: default-allow on purpose (audit M
 ## NEVER_AUTOMATE (triage가 wont-do로 보냄)
 - `notes` 테이블의 파괴적 스키마 변경(DROP/컬럼 삭제/타입 축소)과 기존 행을 잃는 마이그레이션 — 되돌릴 수 없는 데이터 손실은 사람의 결정이다
 - 인증·접근 제어 도입 — PROJECT.md Boundaries("권한 모델 아님")를 넘는 범위 확장이므로 factory가 스스로 결정하지 않는다
-- 공개 API(`src/routes/**`)의 breaking change
+- 공개 API의 breaking change(기존 엔드포인트의 응답 형태·상태코드·경로 변경) — 새 엔드포인트 추가는 허용한다. 백틱 글롭 없이 산문으로만 적었으므로 triage 에이전트의 판단이다(1.4.13 `charter.never-automate-qualified`)
 - `.env*`, 시크릿, 배포 스크립트(`scripts/deploy.sh`)
 
 ## Definition of Done (모든 tier 공통)

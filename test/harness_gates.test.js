@@ -3,7 +3,8 @@
 // 앞의 두 테스트는 `.factory/harness.toml`을 **텍스트로** 읽는다(factory 런타임 없이 `npm ci`만으로 돈다).
 // 뒤의 테스트들은 factory의 실제 판정 함수(doctor·감지기·게이트 러너·test-env)를 동적으로 불러 쓴다 —
 // 그 런타임의 `smol-toml`은 이 파일이 vi.mock으로 공급하므로 이것들도 `npm ci`만으로 돈다(아래 설명).
-// Playwright는 이 파일 어디에서도 실행하지 않는다(e2e는 `[commands].e2e` 게이트가 돌린다 — Spec revision 2).
+// Playwright는 이 파일에서 실행하지 않는다 — 실제 e2e 실행(사전 기동·브라우저 없음·리포트)은
+// test/integration/e2e_suite.test.js가 격리된 임시 트리에서 한다(plan dw3·dw6).
 import { test, expect, vi } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
@@ -62,16 +63,14 @@ test("test_15_harness_promoted_to_m2_with_e2e_gate", async () => {
   expect(gates.fast).not.toContain("e2e");
   expect(gates.full.filter((g) => !gates.deep.includes(g))).toEqual([]);
 
-  // e2e가 **PR의 코드**를 검사한다(#15 review cf1/qa1): factory는 base 체크아웃에서 앱을 미리 띄우지
-  // 않고(app_start/app_ready 없음), Playwright의 webServer가 현재 트리의 src/app.js를 띄우며
-  // 이미 떠 있는 프로세스를 재사용하지 않는다(재사용하면 base에서 뜬 옛 프로세스를 검사할 수 있다).
-  expect(env.app_start).toBeUndefined();
-  expect(env.app_ready).toBeUndefined();
+  // factory가 e2e 전에 앱을 먼저 띄운다(owner spec, plan dw3): app_start는 Playwright webServer가 띄우는 것과
+  // 같은 명령이고, app_ready는 설정의 기본 포트(3000)의 /healthz다. 그 사전 기동을 **언제** 재사용하는지(이 트리의
+  // 현재 코드일 때만 — review cf1/qa1)는 test/integration/e2e_suite.test.js가 Playwright를 실제로 돌려 지킨다.
+  expect(env.app_start).toBe("node src/app.js");
+  expect(env.app_ready).toBe("http://localhost:3000/healthz");
   const cfg = (await import(pathToFileURL(join(ROOT, "playwright.config.js")).href)).default;
-  expect(cfg.webServer.command).toBe("node src/app.js");
-  expect(cfg.webServer.reuseExistingServer ?? false).toBe(false);
-  // 브라우저 케이스는 선택에서 빠지지 않는다 — 크로미움은 setup이 설치한다.
-  expect(cfg.grepInvert).toBeUndefined();
+  expect(cfg.webServer.command).toBe(env.app_start);
+  // 브라우저 케이스용 크로미움은 setup이 설치한다(게이트에서 "browser loads"가 돈다).
   expect(runtime.setup).toMatch(/npx playwright install --with-deps chromium/);
 });
 
@@ -179,6 +178,15 @@ function parseTomlSubset(src) {
   }
 }
 vi.mock("smol-toml", () => ({
+  parse: parseTomlSubset,
+  stringify: () => { throw new Error("smol-toml.stringify is not provided in test/harness_gates.test.js"); },
+}));
+// factory setup이 `.factory/node_modules`를 깐 머신(factory CI)에서는 `.factory/lib/config.js`의 `import "smol-toml"`이
+// 위의 맨 이름이 아니라 그 설치본의 파일 경로로 풀린다 — 그러면 위 mock이 닿지 않고 진짜 패키지가 쓰인다(verifier
+// round 2가 의심한 그대로다: test_15_factory_runtime_reads_harness_through_supplied_parser가 그 경우 RED였다).
+// 그 경로도 같은 파서로 바꿔, 깨끗한 체크아웃과 factory CI가 **같은** 파서로 판정하게 한다. 설치본이 없으면
+// 이 mock은 아무것도 가리지 않는다. 설치본의 진입점이 바뀌면 아래 증명 테스트가 RED로 알린다.
+vi.mock("../.factory/node_modules/smol-toml/dist/index.js", () => ({
   parse: parseTomlSubset,
   stringify: () => { throw new Error("smol-toml.stringify is not provided in test/harness_gates.test.js"); },
 }));
@@ -294,83 +302,21 @@ test("test_15_e2e_gate_blocks_full_not_fast", async () => {
   }
 });
 
-// ── e2e는 PR의 코드를 검사한다 (review cf1/qa1, Spec revision 2) ──────────────────────────────────
-async function reserveLoopbackPort() {
-  const probe = createServer();
-  probe.listen(0, "127.0.0.1");
-  await once(probe, "listening");
-  const { port } = probe.address();
-  await new Promise((resolve, reject) => probe.close((err) => (err ? reject(err) : resolve())));
-  return port;
-}
-
-test("test_15_e2e_boots_this_tree_app_not_a_preboot", async () => {
+// 위 테스트들이 본 판정이 **이 파일이 공급한 파서**를 거쳤다는 것(verifier round 2): 진짜 smol-toml은 TOML 날짜를
+// 받아들이지만 부분집합 파서는 거절한다. factory의 `loadHarness`(`.factory/lib/config.js`)가 그런 하네스에서
+// `toml-subset` 오류로 던지면, config.js가 import한 `smol-toml`은 vi.mock이 준 것이다 — 머신에 남은 진짜
+// 패키지(`.factory/node_modules`)가 아니다. 그러니 깨끗한 체크아웃(`npm ci`만)에서도 같은 경로로 돈다.
+test("test_15_factory_runtime_reads_harness_through_supplied_parser", async () => {
   const { loadHarness } = await factoryLib("config.js");
-  const { envUp } = await factoryLib("test-env.js");
-  const harness = loadHarness(ROOT);
-
-  // (1) factory의 test-env up은 앱을 미리 띄우지 않는다: base 체크아웃에서 뜬 앱이 :3000을 쥐고 남아
-  // PR head의 e2e가 그것을 검사하는 경로(cf1/qa1)가 없다. compose·fetch는 가짜로 관측만 한다.
-  const up = async (h) => {
-    const spawned = [];
-    const savedProject = process.env.COMPOSE_PROJECT_NAME;
-    try {
-      const res = await envUp({
-        run: async () => ({ code: 0, stdout: "", stderr: "" }), cwd: ROOT, harness: h,
-        spawnBg: (cmd) => { spawned.push(cmd); return { pid: 0 }; },
-        fetch: async () => ({ status: 200 }), sleep: async () => {},
-      });
-      return { ok: res.ok, spawned };
-    } finally {
-      if (savedProject === undefined) delete process.env.COMPOSE_PROJECT_NAME; else process.env.COMPOSE_PROJECT_NAME = savedProject;
-    }
-  };
-  expect(await up(harness)).toEqual({ ok: true, spawned: [] });
-  // 대조군: app_start가 있으면 envUp은 그것을 띄운다 — 위의 빈 목록은 관측이 비어서가 아니다.
-  const withPreboot = { ...harness, test: { ...harness.test, env: { ...harness.test.env, app_start: "node src/app.js", app_ready: "http://localhost:3000/healthz" } } };
-  expect((await up(withPreboot)).spawned).toEqual(["node src/app.js"]);
-
-  // (2) Playwright의 webServer는 **자기 트리**의 src/app.js를 띄우고, 그 프로세스가 Playwright가 기다리는
-  // URL에 답한다. 임시 트리의 src/app.js를 표식을 돌려주는 앱으로 바꿔, 설정이 가리키는 명령·URL·포트가
-  // 그 트리의 코드로 이어지는지 본다. Playwright 자체는 실행하지 않는다(Spec revision 2).
-  const tmp = mkdtempSync(join(tmpdir(), "fq15-webserver-"));
-  let child;
+  const tmp = mkdtempSync(join(tmpdir(), "fq15-toml-"));
   try {
-    cpSync(join(ROOT, "package.json"), join(tmp, "package.json"));
-    cpSync(join(ROOT, "playwright.config.js"), join(tmp, "playwright.config.js"));
-    mkdirSync(join(tmp, "src"));
-    const marker = `THIS-TREE-${process.pid}-${Date.now()}`;
-    writeFileSync(join(tmp, "src/app.js"),
-      `import { createServer } from "node:http";\n` +
-      `createServer((q, s) => { s.statusCode = q.url === "/healthz" ? 200 : 404; s.end(${JSON.stringify(marker)}); })` +
-      `.listen(Number(process.env.PORT));\n`);
-    const port = await reserveLoopbackPort();
-    const env = { ...process.env, PORT: String(port) };
-    const cfgOut = spawnSync(process.execPath, ["--input-type=module", "-e",
-      "const m = await import(process.cwd() + '/playwright.config.js'); console.log(JSON.stringify(m.default.webServer));"],
-      { cwd: tmp, env, encoding: "utf8" });
-    expect({ code: cfgOut.status, stderr: cfgOut.stderr }).toEqual({ code: 0, stderr: "" });
-    const ws = JSON.parse(cfgOut.stdout);
-    // 이미 떠 있는 프로세스를 재사용하지 않는다 — 재사용하면 그 포트의 주인(옛 base 앱일 수 있다)을 검사한다.
-    expect(ws.reuseExistingServer ?? false).toBe(false);
-
-    child = spawn("bash", ["-c", `exec ${ws.command}`], { cwd: tmp, env: { ...env, ...(ws.env || {}) }, stdio: ["ignore", "pipe", "pipe"] });
-    let log = "";
-    child.stdout.on("data", (d) => { log += d; });
-    child.stderr.on("data", (d) => { log += d; });
-    const body = await vi.waitFor(async () => {
-      if (child.exitCode !== null) throw new Error(`webServer.command exited ${child.exitCode}: ${log}`);
-      const r = await fetch(ws.url);
-      if (r.status !== 200) throw new Error(`webServer.url not ready (status ${r.status})`);
-      return r.text();
-    }, { timeout: 20_000, interval: 50 });
-    expect(body).toBe(marker);
+    mkdirSync(join(tmp, ".factory"));
+    writeFileSync(join(tmp, ".factory/harness.toml"), "schema = 1\n[harness]\nmaturity = \"M2\"\nsince = 1979-05-27\n");
+    expect(() => loadHarness(tmp)).toThrow(/toml-subset: unsupported value/);
+    // 대조군: 날짜 줄만 빼면 같은 경로로 읽힌다 — 위의 throw는 파일을 못 찾아서가 아니다.
+    writeFileSync(join(tmp, ".factory/harness.toml"), "schema = 1\n[harness]\nmaturity = \"M2\"\n");
+    expect(loadHarness(tmp).harness.maturity).toBe("M2");
   } finally {
-    if (child && child.exitCode === null) {
-      const closed = once(child, "close");
-      child.kill("SIGTERM");
-      await closed;
-    }
     rmSync(tmp, { recursive: true, force: true });
   }
-}, 30_000);
+});

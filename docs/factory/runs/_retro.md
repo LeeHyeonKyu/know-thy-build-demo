@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 1 / 1 / 1 | 0.8 / 1 / 1 |
 | escaped defects | 0 | 0 |
 | revert rate | 0.00 (0/1) | 0.00 (0/5) |
-| needs-human | 0 | 24 |
+| needs-human | 1 | 24 |
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
 | qa na ratio | 0.11 (1/9 claims, na-heavy 0/1 approvals) | 0.03 (1/38 claims, na-heavy 0/3 approvals) |
-| cost (usd) | 2.77 | 675.31 |
-| tokens | input 178479 / output 10908 | input 12029982 / output 1254954 |
+| cost (usd) | 12.88 | 675.31 |
+| tokens | input 1452178 / output 39663 | input 12029982 / output 1254954 |
 | retro cost (usd) | 0.00 | 5.79 |
 | retro tokens | input 0 / output 0 | input 10 / output 11866 |
 | full retros | — | 5 |
@@ -602,6 +602,22 @@
           18
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw5 explicitly names four locations that must stop contradicting the fact that e2e is now a full/deep gate: docs/TECHNICAL.md:28,73, docs/QA.md:25,40, and 'CLAUDE.md 명령표의 e2e 행'. Three of the four are fixed in this diff; CLAUDE.md is not, and its e2e row still reads exactly the false claim the rubric forbids.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "After this diff merges, the very first file a new contributor is told to read (CLAUDE.md) still says the harness is at maturity M1 and that e2e is out of the gate set until M2 promotion. Both statements are now false: harness.maturity is M2 and e2e (`npx playwright test`) is a real gate in `full`/`deep`. This is exactly the failure mode done_when dw5 names by id ('docs/TECHNICAL.md:28,73, docs/QA.md:25,40, CLAUDE.md 명령표의 e2e 행') and its rubric ('머지 후 이 저장소를 처음 여는 사람이 문서 어디에서도 maturity M1이나 e2e는 게이트 밖을 읽지 않는가'). docs/PROJECT.md, docs/QA.md, and docs/TECHNICAL.md were all correctly updated by this diff; CLAUDE.md alone was not (commit 6080c31 explicitly reverts an earlier CLAUDE.md fix, citing the issue's own constraint that CLAUDE.md is a protected/factory-owned path and any agent edit there makes the round undecidable). That constraint is real (.factory/lib/protected-paths.js:116 matches `CLAUDE[a-zA-Z0-9._-]*\\.md`), so the builder likely could not have fixed this alone -- but the observable result is still a repo where the first-read file contradicts the harness the rest of the docs now describe. dw5 as written is not met for this one file.",
+        "runs": [
+          15
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -922,8 +938,8 @@
       },
       {
         "issue": 15,
-        "reason": "blocked (job timed out) — needs human",
-        "at": "2026-09-13T14:27:10Z"
+        "reason": "blocked (environment/credentials) — needs human",
+        "at": "2026-09-26T17:06:37Z"
       },
       {
         "issue": 39,
@@ -971,17 +987,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 0,
+    "needs_human": 1,
     "qa_approvals": 1,
     "qa_claims_total": 8,
     "qa_na_total": 1,
     "qa_na_ratio": 0.11,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 2.772344,
+      "cost_usd": 12.875139,
       "tokens": {
-        "input": 178479,
-        "output": 10908
+        "input": 1452178,
+        "output": 39663
       }
     }
   },

@@ -65,6 +65,7 @@ const CONNECTION_ERROR_MESSAGES = [
   /connection terminated/i,
   /timeout exceeded when trying to connect/i,
   /connection timeout/i,
+  /query read timeout/i, // pool query_timeout: the connection stopped answering mid-query (review cf-s1)
   /client has encountered a connection error/i,
   /cannot use a pool after calling end/i,
   /\b(ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH)\b/,

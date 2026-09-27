@@ -11,10 +11,10 @@ import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { connect, createServer } from "node:net";
 import { once } from "node:events";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { createGzip } from "node:zlib";
 import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import pg from "pg";
 import { makeNote, uniqueMarker } from "../fixtures/notes.js";
 
@@ -87,7 +87,7 @@ async function startApp(extraEnv) {
     await stop();
     throw err;
   }
-  return { base: "http://" + LOOPBACK + ":" + port, out, dead, stop };
+  return { base: "http://" + LOOPBACK + ":" + port, out, dead, stop, signal: (name) => child.kill(name) };
 }
 
 async function send(base, path, init) {
@@ -636,6 +636,37 @@ describe("issue #76 rework 2 — a timed-out write answers 503 and leaves no row
 //
 // Rows are inserted with an explicit created_at by SQL, not through POST: the repository stamps
 // now() and cannot be told a time, and dw2's rubric requires a REAL tie in the database (plan d1).
+//
+// Issue #7 ruling (2026-09-27): GET /notes is cached for 5000 ms and only a 201 POST clears it
+// (spec 004), so rows written by direct SQL are not seen by a repeat of a query the case already
+// asked. The scratch app therefore starts with a preload that imports the service module the app
+// itself uses and, on SIGUSR2, calls its test-only clearListCaches() and prints an ack. A case
+// that reads back its own direct-SQL rows calls clearAppListCache(app) right after the insert and
+// waits for that ack (condition wait, no sleep). The app has no switch and no HTTP surface for it.
+const CACHE_CLEARED_MARK = "list-cache-cleared";
+const SERVICE_MODULE_URL = pathToFileURL(
+  realpathSync(fileURLToPath(new URL("../../src/service/notes.js", import.meta.url))),
+).href;
+const CACHE_RESET_IMPORT =
+  "--import=data:text/javascript," +
+  encodeURIComponent(
+    "import { clearListCaches } from " + JSON.stringify(SERVICE_MODULE_URL) + ";" +
+      "process.on('SIGUSR2', () => { clearListCaches(); process.stderr.write(" + JSON.stringify(CACHE_CLEARED_MARK + "\n") + "); });",
+  );
+
+async function clearAppListCache(app) {
+  const acks = () => app.out.stderr.split(CACHE_CLEARED_MARK).length - 1;
+  const before = acks();
+  app.signal("SIGUSR2");
+  await vi.waitFor(
+    () => {
+      if (app.dead()) throw new Error("app stopped instead of clearing its cache: " + app.out.stderr);
+      if (acks() <= before) throw new Error("cache clear not acknowledged yet");
+    },
+    { timeout: BOOT_TIMEOUT_MS, interval: 10 },
+  );
+}
+
 async function withScratchApp(label, fn) {
   const dbName = "fq5_" + label + "_" + randomUUID().replace(/-/g, "");
   await db.query("create database " + dbName);
@@ -643,7 +674,8 @@ async function withScratchApp(label, fn) {
   let app;
   try {
     await client.connect();
-    app = await startApp({ ...pgEnv(DB.host, DB.port), PGDATABASE: dbName });
+    const nodeOptions = [process.env.NODE_OPTIONS, CACHE_RESET_IMPORT].filter(Boolean).join(" ");
+    app = await startApp({ ...pgEnv(DB.host, DB.port), PGDATABASE: dbName, NODE_OPTIONS: nodeOptions });
     return await fn({ app, client });
   } finally {
     await app?.stop();
@@ -692,6 +724,7 @@ describe("issue #5 — GET /notes against the compose Postgres", () => {
         { title: "newest", createdAt: "2026-03-01T12:00:00Z" },
         { title: "oldest", createdAt: "2026-03-01T08:00:00Z" },
       ]);
+      await clearAppListCache(app); // direct SQL does not clear the #7 cache (issue #7 ruling)
 
       const { res, body } = await getList(app.base);
       expect(res.status).toBe(200);
@@ -723,6 +756,7 @@ describe("issue #5 — GET /notes against the compose Postgres", () => {
         { title: "tie-c", createdAt: tie },
         { title: "tie-d", createdAt: tie },
       ]);
+      await clearAppListCache(app); // direct SQL does not clear the #7 cache (issue #7 ruling)
       const byTitle = Object.fromEntries(inserted.map((r) => [r.title, r.id]));
       const { rows } = await client.query("select count(distinct created_at)::int as n from notes where title like 'tie-%'");
       expect(rows[0].n, "the tie rows must share one created_at in the database").toBe(1);
@@ -750,6 +784,7 @@ describe("issue #5 — GET /notes against the compose Postgres", () => {
         return { title: "n" + String(minute).padStart(2, "0"), createdAt: new Date(base + minute * 60000).toISOString() };
       });
       const inserted = await insertAt(client, plan);
+      await clearAppListCache(app); // direct SQL does not clear the #7 cache (issue #7 ruling)
       const newestFirst = [...inserted].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).map((r) => r.id);
 
       const page1 = await getList(app.base);
@@ -896,6 +931,7 @@ describe("issue #6 — GET /notes?q= against the compose Postgres", () => {
       plan.push({ title: "pear late 1", body: "x", createdAt: new Date(base + 100 * 60000).toISOString() });
       plan.push({ title: "pear late 2", body: "y", createdAt: new Date(base + 101 * 60000).toISOString() });
       const inserted = await insertNotes(client, plan);
+      await clearAppListCache(app); // direct SQL does not clear the #7 cache (issue #7 ruling)
       const matching = inserted
         .filter((r) => r.title.startsWith("Apple"))
         .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))

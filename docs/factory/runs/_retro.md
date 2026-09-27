@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 1 / 1 / 1 | 0.88 / 1.38 / 1.25 |
 | escaped defects | 0 | 2 |
 | revert rate | 0.00 (0/1) | 0.00 (0/8) |
-| needs-human | 0 | 28 |
+| needs-human | 2 | 28 |
 | rejects by role | 없음 | correctness 3, qa 1 |
 | reviewer overlap | 없음 | 0.29 (2/7, runs 9) |
 | unique findings by role | 없음 | correctness 3, qa 2 |
 | qa na ratio | 0.00 (0/7 claims, na-heavy 0/1 approvals) | 0.04 (2/54 claims, na-heavy 0/5 approvals) |
-| cost (usd) | 5.86 | 747.84 |
-| tokens | input 299628 / output 14775 | input 18589493 / output 1441943 |
+| cost (usd) | 28.52 | 747.84 |
+| tokens | input 932853 / output 67999 | input 18589493 / output 1441943 |
 | retro cost (usd) | 0.00 | 8.07 |
 | retro tokens | input 0 / output 0 | input 14 / output 16296 |
 | full retros | — | 7 |
@@ -989,6 +989,22 @@
           76
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "A client can get around the in-flight budget by hanging up after its upload is complete. When the socket closes, res emits 'close' and release() returns the whole charge immediately. The parsed body is still in memory, though: the decoded text, the JSON.parse result, and the pg parameter all stay alive while service.createNote waits for a pool client or for Postgres. That wait can last up to CONNECT_TIMEOUT_MS or STATEMENT_TIMEOUT_MS (3 s each). So a client that repeatedly sends a full body and then aborts can hold many parsed near-16 MiB notes while the counter reads close to zero. This breaks the promise in the code comment at lines 14-19 ('keeps that charge until its RESPONSE is over … because a parsed 16 MiB note still sits in memory while it waits on Postgres') and the purpose of #87. With the same pinned heap dw6 uses, the process runs out of memory. dw3 only aborts clients mid-upload, before anything is parsed, and dw6 never aborts, so no test covers this.",
+        "runs": [
+          87
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "When several entirely legitimate (non-attack, uncompressed, valid-JSON) near-16MiB note submissions arrive concurrently with ordinary round-robin byte pacing -- not an attacker's crafted timing, just what many real TCP clients uploading around the same time look like -- the budget can refuse EVERY SINGLE ONE with 503 overloaded. Not 'graceful degradation to `fits` survivors' (fits = floor(MAX_INFLIGHT_BODY_BYTES/NEAR_CAP) = 4, which is what the process serves when N==4 or arrival is not interleaved), but total denial of service to legitimate concurrent users, while the process itself stays healthy (/healthz 200 throughout). This directly undermines the issue's own purpose: #87 exists so ordinary large-note traffic (the very case dw4 and the code's comments call 'a person pastes a large incident log') keeps working while an attacker's aggregate gzip-inflation burst is turned away. Instead, this implementation lets *ordinary* concurrent legitimate load turn away itself -- a self-inflicted DoS the issue explicitly did not ask for and that plan.dissent_log/done_when never rules out (dw6's own comment sizes its wave test to exactly `fits` requests at a time specifically to avoid oversubscribing the budget, so the test suite never exercises the N>fits interleaved case at all).",
+        "runs": [
+          87
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -1297,6 +1313,15 @@
           6
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "A correct 5 s cache breaks load-bearing tests. test/integration/notes.test.js does GET /notes (lines 689, 716, 745, 801), inserts rows by direct SQL through insertAt/insertNotes (no POST, so no invalidation), and then repeats the same GET within milliseconds (lines 696, 732, 755, 810), expecting the new rows. A cache that follows spec 004 serves the stale empty list. CLAUDE.md: existing tests are load-bearing; add, do not modify.",
+        "runs": [
+          7
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -1345,6 +1370,11 @@
         "issue": 76,
         "reason": "review rounds exhausted (K=3): 1 must_fix remain",
         "at": "2026-09-26T23:02:56Z"
+      },
+      {
+        "issue": 7,
+        "reason": "stage artifact missing or invalid: gates RED: failing=unit,new-test-repeat",
+        "at": "2026-09-27T07:36:47Z"
       }
     ]
   },
@@ -1372,17 +1402,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 0,
+    "needs_human": 2,
     "qa_approvals": 1,
     "qa_claims_total": 7,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 5.861881,
+      "cost_usd": 28.515754,
       "tokens": {
-        "input": 299628,
-        "output": 14775
+        "input": 932853,
+        "output": 67999
       }
     }
   },

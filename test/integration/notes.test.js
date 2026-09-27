@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { makeNote, uniqueMarker } from "../fixtures/notes.js";
+import { MAX_BODY_BYTES, MAX_INFLIGHT_BODY_BYTES } from "../../src/routes/notes.js";
 
 const APP_ENTRYPOINT = fileURLToPath(new URL("../../src/app.js", import.meta.url));
 const COMPOSE_FILE = fileURLToPath(new URL("../../docker-compose.test.yml", import.meta.url));
@@ -929,4 +930,361 @@ describe("issue #6 — GET /notes?q= against the compose Postgres", () => {
       }
     });
   }, CASE_TIMEOUT_MS);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Issue #87 — a process-wide budget on inflated POST /notes body bytes in flight. The per-request
+// cap (MAX_BODY_BYTES, 413) stops one gzip bomb; ~300 concurrent ~16 KB gzip bodies that each
+// inflate to just under that cap still exhausted the V8 heap and took /healthz and /version down.
+//
+// Every body here is a gzip built as a stream, so the test process only ever holds the small
+// compressed buffer. A burst reuses ONE compressed buffer for all its requests.
+const NEAR_CAP = MAX_BODY_BYTES - 64 * 1024; // inflates to just under the per-request cap
+const OVER_CAP = MAX_BODY_BYTES + 1024 * 1024; // inflates past it
+const BURST = 300; // the issue's reproduction
+// The burst cases pin the child's heap so the base commit (no budget) dies deterministically
+// instead of depending on how much memory the runner happens to have (plan dissent d2).
+const PINNED_HEAP = { NODE_OPTIONS: "--max-old-space-size=384" };
+const BURST_TIMEOUT_MS = 180000;
+const DW6_WAVES = 12;
+
+// gzip of `head` + `fill` bytes + `tail`, inflating to exactly `totalBytes`.
+async function gzipSized(totalBytes, { head = "", tail = "", fill = 0x61 } = {}) {
+  const gz = createGzip({ level: 9 });
+  const chunks = [];
+  gz.on("data", (chunk) => chunks.push(chunk));
+  const ended = once(gz, "end");
+  const h = Buffer.from(head);
+  const t = Buffer.from(tail);
+  const block = Buffer.alloc(1024 * 1024, fill);
+  if (!gz.write(h)) await once(gz, "drain");
+  for (let remaining = totalBytes - h.length - t.length; remaining > 0; remaining -= block.length) {
+    if (!gz.write(remaining >= block.length ? block : block.subarray(0, remaining))) await once(gz, "drain");
+  }
+  gz.write(t);
+  gz.end();
+  await ended;
+  return Buffer.concat(chunks);
+}
+// A valid note whose JSON is exactly `totalBytes` long once inflated.
+const gzipNote = (title, totalBytes) =>
+  gzipSized(totalBytes, { head: '{"title":' + JSON.stringify(title) + ',"body":"', tail: '"}', fill: 0x6e });
+// JSON that never closes: JSON.parse rejects it only after the whole body has been buffered.
+const gzipUnterminated = (totalBytes, head = '{"title":"t","body":"') => gzipSized(totalBytes, { head });
+
+// POST a gzip body; a dropped connection is recorded as `failure` instead of thrown, so the
+// assertion names what happened.
+async function postGzip(base, gz, bound = 90000) {
+  try {
+    const r = await send(base, "/notes", {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-encoding": "gzip" },
+      body: gz,
+      signal: AbortSignal.timeout(bound),
+    });
+    return { ...r, status: r.res.status };
+  } catch (err) {
+    return { failure: String(err?.cause?.code || err?.cause?.message || err?.message || err) };
+  }
+}
+
+async function getWithin(base, path, bound = 30000) {
+  try {
+    const r = await send(base, path, { signal: AbortSignal.timeout(bound) });
+    return { ...r, status: r.res.status };
+  } catch (err) {
+    return { failure: String(err?.cause?.code || err?.cause?.message || err?.message || err) };
+  }
+}
+
+// Like withScratchApp (a throwaway database per case, dropped afterwards) but with extra env for
+// the app process — here the pinned heap.
+async function withScratchAppEnv(label, extraEnv, fn) {
+  const dbName = "fq87_" + label + "_" + randomUUID().replace(/-/g, "");
+  await db.query("create database " + dbName);
+  const client = new pg.Client({ ...DB, database: dbName });
+  let app;
+  try {
+    await client.connect();
+    app = await startApp({ ...pgEnv(DB.host, DB.port), PGDATABASE: dbName, ...extraEnv });
+    return await fn({ app, client });
+  } finally {
+    await app?.stop();
+    await client.end().catch(() => {});
+    await db.query("drop database if exists " + dbName + " with (force)");
+  }
+}
+
+// Fires `count` copies of `gz` at once and, while they are in flight, asks /healthz and /version.
+async function burstWithHealth(app, gz, count) {
+  const pending = Promise.all(Array.from({ length: count }, () => postGzip(app.base, gz)));
+  const during = { health: await getWithin(app.base, "/healthz"), version: await getWithin(app.base, "/version") };
+  const results = await pending;
+  return { results, during };
+}
+
+function expectServing(app, snapshot, when) {
+  const tail = " (" + when + "); app stderr: " + app.out.stderr.slice(-1500);
+  expect(snapshot.health.failure, "/healthz dropped" + tail).toBeUndefined();
+  expect(snapshot.health.status, "/healthz" + tail).toBe(200);
+  expect(snapshot.health.body).toMatchObject({ ok: true });
+  expect(snapshot.version.failure, "/version dropped" + tail).toBeUndefined();
+  expect(snapshot.version.status, "/version" + tail).toBe(200);
+}
+
+const tally = (results) => {
+  const out = {};
+  for (const r of results) {
+    const key = r.failure ? "dropped:" + r.failure : r.status + ":" + (r.body?.error?.code ?? "-");
+    out[key] = (out[key] ?? 0) + 1;
+  }
+  return out;
+};
+
+describe("issue #87 — concurrent inflating bodies cannot take the process down", () => {
+  // dw1: 300 concurrent ~16 KB gzip bodies, each inflating to just under 16 MiB of invalid JSON.
+  // Every request is answered (400 after a full parse, or 503 overloaded), at least one is
+  // overloaded, and /healthz and /version answer during and after the burst.
+  test("test_87_concurrent_inflating_bodies_keep_healthz_serving", async () => {
+    const gz = await gzipUnterminated(NEAR_CAP);
+    expect(gz.length).toBeLessThan(64 * 1024);
+    const app = await startApp({ ...pgEnv(DB.host, DB.port), ...PINNED_HEAP });
+    try {
+      const { results, during } = await burstWithHealth(app, gz, BURST);
+      const counts = tally(results);
+      const summary = JSON.stringify(counts) + "; app stderr: " + app.out.stderr.slice(-1500);
+      expect(results.filter((r) => r.failure), "dropped requests: " + summary).toHaveLength(0);
+      expect(app.dead(), "process exited during the burst: " + summary).toBe(false);
+      for (const r of results) {
+        expect([400, 503], summary).toContain(r.status);
+        if (r.status === 503) expect(r.body?.error?.code, summary).toBe("overloaded");
+      }
+      expect(results.filter((r) => r.status === 503).length, summary).toBeGreaterThan(0);
+      expectServing(app, during, "during the burst");
+      expectServing(app, { health: await getWithin(app.base, "/healthz"), version: await getWithin(app.base, "/version") }, "after the burst");
+      expect(app.dead()).toBe(false);
+    } finally {
+      await app.stop();
+    }
+  }, BURST_TIMEOUT_MS);
+
+  // dw2: the refusal itself — 503, JSON, {error:{code:"overloaded",message}}, Retry-After as a
+  // positive integer of seconds, and no echo of the submitted text. The bodies never parse, so
+  // nothing is written to the shared database.
+  test("test_87_overloaded_answers_503_json_with_retry_after", async () => {
+    const secret = uniqueMarker("dw87-2-secret");
+    const gz = await gzipUnterminated(NEAR_CAP, '{"title":"' + secret + '","body":"');
+    const app = await startApp(pgEnv(DB.host, DB.port));
+    try {
+      const results = await Promise.all(Array.from({ length: 64 }, () => postGzip(app.base, gz)));
+      const summary = JSON.stringify(tally(results));
+      expect(results.filter((r) => r.failure), summary).toHaveLength(0);
+      const refused = results.filter((r) => r.status === 503);
+      expect(refused.length, summary).toBeGreaterThan(0);
+      for (const r of refused) {
+        expect(r.res.headers.get("content-type")).toMatch(/application\/json/);
+        expect(r.body?.error?.code).toBe("overloaded");
+        expect(r.body?.error?.code).not.toBe("db_unavailable");
+        expect(typeof r.body?.error?.message).toBe("string");
+        expect(r.body.error.message.length).toBeGreaterThan(0);
+        const retryAfter = r.res.headers.get("retry-after");
+        expect(retryAfter, "Retry-After header").toMatch(/^\d+$/);
+        expect(Number(retryAfter)).toBeGreaterThanOrEqual(1);
+        expect(r.text).not.toContain(secret);
+      }
+      expect(app.dead()).toBe(false);
+    } finally {
+      await app.stop();
+    }
+  }, BURST_TIMEOUT_MS);
+
+  // dw3: after every exit path — 201, 400, 413, 503 overloaded and a client that hangs up
+  // mid-upload — the budget is back to zero: a near-cap note is admitted (201 and a row), which
+  // needs the WHOLE budget minus one request free. Each sequential path runs enough times that a
+  // leak on that path alone would exhaust the budget.
+  test("test_87_budget_released_after_burst_and_client_aborts", async () => {
+    expect(MAX_INFLIGHT_BODY_BYTES, "the process-wide budget").toBeGreaterThanOrEqual(MAX_BODY_BYTES);
+    const fits = Math.floor(MAX_INFLIGHT_BODY_BYTES / NEAR_CAP); // near-cap requests the budget holds at once
+    const repeats = fits + 1;
+    await withScratchAppEnv("release", {}, async ({ app, client }) => {
+      const rowsTitled = async (title) => (await client.query("select count(*)::int as n from notes where title = $1", [title])).rows[0].n;
+
+      // 201 path
+      const okTitle = uniqueMarker("dw87-3-ok");
+      const okGz = await gzipNote(okTitle, NEAR_CAP);
+      for (let i = 0; i < repeats; i += 1) {
+        const r = await postGzip(app.base, okGz);
+        expect(r.status, "201 path #" + i + " " + JSON.stringify(r.body)).toBe(201);
+      }
+      expect(await rowsTitled(okTitle)).toBe(repeats);
+
+      // 400 path (fully buffered, then JSON.parse fails)
+      const badGz = await gzipUnterminated(NEAR_CAP);
+      for (let i = 0; i < repeats; i += 1) {
+        const r = await postGzip(app.base, badGz);
+        expect(r.status, "400 path #" + i + " " + JSON.stringify(r.body)).toBe(400);
+        expect(r.body?.error?.code).toBe("invalid_request");
+      }
+
+      // 413 path (charged up to the cap, then refused)
+      const bombGz = await gzipUnterminated(OVER_CAP);
+      for (let i = 0; i < repeats; i += 1) {
+        const r = await postGzip(app.base, bombGz);
+        expect(r.status, "413 path #" + i + " " + JSON.stringify(r.body)).toBe(413);
+        expect(r.body?.error?.code).toBe("payload_too_large");
+      }
+
+      // 503 overloaded path: a concurrent burst larger than the budget.
+      const burst = await Promise.all(Array.from({ length: 4 * repeats }, () => postGzip(app.base, badGz)));
+      const summary = JSON.stringify(tally(burst));
+      expect(burst.filter((r) => r.failure), summary).toHaveLength(0);
+      for (const r of burst) expect([400, 503], summary).toContain(r.status);
+      expect(burst.filter((r) => r.status === 503 && r.body?.error?.code === "overloaded").length, summary).toBeGreaterThan(0);
+
+      // Client aborts: `fits` uploads send all but the last bytes of a near-cap gzip and then hold
+      // the connection. Together they occupy the budget, which is observed from outside: a
+      // near-cap probe is refused as overloaded. Then every one hangs up mid-upload.
+      const url = new URL(app.base);
+      const heldGz = await gzipUnterminated(NEAR_CAP);
+      const held = [];
+      try {
+        for (let i = 0; i < fits; i += 1) {
+          const socket = connect(Number(url.port), url.hostname);
+          socket.on("error", () => {});
+          await once(socket, "connect");
+          socket.write(
+            "POST /notes HTTP/1.1\r\nHost: " + url.host + "\r\nContent-Type: application/json\r\n" +
+              "Content-Encoding: gzip\r\nContent-Length: " + heldGz.length + "\r\n\r\n",
+          );
+          socket.write(heldGz.subarray(0, heldGz.length - 16));
+          held.push(socket);
+        }
+        await vi.waitFor(
+          async () => {
+            const probe = await postGzip(app.base, badGz);
+            if (probe.status !== 503) throw new Error("budget not occupied yet: " + JSON.stringify(probe.status));
+            expect(probe.body?.error?.code).toBe("overloaded");
+          },
+          { timeout: 30000, interval: 50 },
+        );
+      } finally {
+        for (const socket of held) socket.destroy();
+      }
+
+      // Once the server has seen the hang-ups the budget is free again (condition wait, bounded:
+      // a leaked charge never comes back, so this times out instead of passing).
+      await vi.waitFor(
+        async () => {
+          const probe = await postGzip(app.base, badGz);
+          if (probe.status !== 400) throw new Error("budget still occupied after client aborts: " + probe.status + " " + probe.body?.error?.code);
+        },
+        { timeout: 20000, interval: 50 },
+      );
+
+      // A near-cap note and an ordinary note are both created.
+      const afterTitle = uniqueMarker("dw87-3-after");
+      const after = await postGzip(app.base, await gzipNote(afterTitle, NEAR_CAP));
+      expect(after.status, JSON.stringify(after.body)).toBe(201);
+      expect(await rowsTitled(afterTitle)).toBe(1);
+      const small = await postJson(app.base, makeNote({ title: "dw87-3-small" }));
+      expect(small.res.status).toBe(201);
+      expect(await rowsTitled("dw87-3-small")).toBe(1);
+      expect(app.dead()).toBe(false);
+    });
+  }, BURST_TIMEOUT_MS);
+
+  // dw4: the per-request cap is unchanged. An idle process admits a body of exactly
+  // MAX_BODY_BYTES (the budget holds at least one full request), and a body past the cap is
+  // still 413 payload_too_large, never 503.
+  test("test_87_idle_process_admits_near_cap_body_and_keeps_413", async () => {
+    expect(MAX_INFLIGHT_BODY_BYTES).toBeGreaterThanOrEqual(MAX_BODY_BYTES);
+    await withScratchAppEnv("idle", {}, async ({ app, client }) => {
+      const title = uniqueMarker("dw87-4-cap");
+      const atCap = await postGzip(app.base, await gzipNote(title, MAX_BODY_BYTES));
+      expect(atCap.status, JSON.stringify(atCap.body)).toBe(201);
+      const { rows } = await client.query("select length(body)::int as n from notes where title = $1", [title]);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].n).toBe(MAX_BODY_BYTES - Buffer.byteLength('{"title":' + JSON.stringify(title) + ',"body":""}'));
+
+      const over = await postGzip(app.base, await gzipNote(uniqueMarker("dw87-4-over"), OVER_CAP));
+      expect(over.status).toBe(413);
+      expect(over.body?.error?.code).toBe("payload_too_large");
+      expect(over.res.headers.get("retry-after")).toBeNull();
+      expect(app.dead()).toBe(false);
+    });
+  }, BURST_TIMEOUT_MS);
+
+  // dw6: the burst is VALID near-cap notes, so admitted requests are parsed and then wait on
+  // Postgres holding a 16 MiB string each. To make that wait real, the case holds a SHARE lock on
+  // the scratch database's notes table (INSERTs queue behind it; nothing else is touched) while
+  // the burst arrives in waves — released well inside the app's 3 s statement_timeout. Only an
+  // implementation that keeps a request charged until its response is sent survives this; one
+  // that releases when parsing ends admits every wave, piling 16 MiB notes up behind the database
+  // (the pool times them out as db_unavailable, or the heap runs out first). Every answer is 201
+  // or 503 overloaded, /healthz and /version answer while the notes are held, and no more rows
+  // exist than 201s were answered.
+  test("test_87_concurrent_valid_json_near_cap_notes_keep_healthz_serving", async () => {
+    const title = uniqueMarker("dw87-6");
+    const gz = await gzipNote(title, NEAR_CAP);
+    expect(gz.length).toBeLessThan(64 * 1024);
+    const appName = "fq87-valid-" + randomUUID();
+    await withScratchAppEnv("valid", { ...PINNED_HEAP, PGAPPNAME: appName }, async ({ app, client }) => {
+      expect((await getList(app.base)).res.status).toBe(200); // creates the table
+      const locker = new pg.Client({ ...DB, database: client.database });
+      await locker.connect();
+      let results;
+      let during;
+      try {
+        await locker.query("begin");
+        await locker.query("lock table notes in share mode");
+        // Waves of `fits` concurrent notes (the most the budget can hold at once). Each wave starts
+        // once the previous one is settled: every request answered or an INSERT queued on the lock
+        // (or the process gone, which the assertions below report). A single all-at-once burst
+        // would not do: every request inflates in parallel, the budget fills with partial charges,
+        // and almost nothing reaches the parser — so "released when parsing ends" is never tested.
+        const fits = Math.floor(MAX_INFLIGHT_BODY_BYTES / NEAR_CAP);
+        let answered = 0;
+        const sent = [];
+        for (let wave = 0; wave < DW6_WAVES && !app.dead(); wave += 1) {
+          for (let i = 0; i < fits; i += 1) {
+            sent.push(postGzip(app.base, gz).then((r) => { answered += 1; return r; }));
+          }
+          await vi.waitFor(
+            async () => {
+              if (app.dead()) return;
+              const { rows } = await client.query(
+                "select count(*)::int as n from pg_stat_activity where application_name = $1 and wait_event_type = 'Lock'",
+                [appName],
+              );
+              if (answered + rows[0].n < sent.length) {
+                throw new Error("wave " + wave + " in flight: " + answered + " answered, " + rows[0].n + " queued of " + sent.length);
+              }
+            },
+            { timeout: 60000, interval: 10 },
+          );
+        }
+        during = { health: await getWithin(app.base, "/healthz"), version: await getWithin(app.base, "/version") };
+        await locker.query("rollback");
+        results = await Promise.all(sent);
+      } finally {
+        await locker.query("rollback").catch(() => {});
+        await locker.end().catch(() => {});
+      }
+      const counts = tally(results);
+      const summary = JSON.stringify(counts) + "; app stderr: " + app.out.stderr.slice(-1500);
+      expect(results.filter((r) => r.failure), "dropped requests: " + summary).toHaveLength(0);
+      expect(app.dead(), "process exited during the burst: " + summary).toBe(false);
+      for (const r of results) {
+        expect([201, 503], summary).toContain(r.status);
+        if (r.status === 503) expect(r.body?.error?.code, summary).toBe("overloaded");
+      }
+      expect(results.filter((r) => r.status === 503).length, summary).toBeGreaterThan(0);
+      expectServing(app, during, "during the burst");
+      expectServing(app, { health: await getWithin(app.base, "/healthz"), version: await getWithin(app.base, "/version") }, "after the burst");
+      const created = results.filter((r) => r.status === 201).length;
+      const { rows } = await client.query("select count(*)::int as n from notes where title = $1", [title]);
+      expect(rows[0].n).toBeLessThanOrEqual(created);
+      expect(app.dead()).toBe(false);
+    });
+  }, BURST_TIMEOUT_MS);
 });

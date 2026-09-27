@@ -11,10 +11,10 @@ import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { connect, createServer } from "node:net";
 import { once } from "node:events";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createGzip } from "node:zlib";
 import { randomUUID } from "node:crypto";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { makeNote, uniqueMarker } from "../fixtures/notes.js";
 import { MAX_BODY_BYTES, MAX_INFLIGHT_BODY_BYTES } from "../../src/routes/notes.js";
@@ -88,7 +88,7 @@ async function startApp(extraEnv) {
     await stop();
     throw err;
   }
-  return { base: "http://" + LOOPBACK + ":" + port, out, dead, stop, signal: (name) => child.kill(name) };
+  return { base: "http://" + LOOPBACK + ":" + port, out, dead, stop };
 }
 
 async function send(base, path, init) {
@@ -637,37 +637,6 @@ describe("issue #76 rework 2 — a timed-out write answers 503 and leaves no row
 //
 // Rows are inserted with an explicit created_at by SQL, not through POST: the repository stamps
 // now() and cannot be told a time, and dw2's rubric requires a REAL tie in the database (plan d1).
-//
-// Issue #7 ruling (2026-09-27): GET /notes is cached for 5000 ms and only a 201 POST clears it
-// (spec 004), so rows written by direct SQL are not seen by a repeat of a query the case already
-// asked. The scratch app therefore starts with a preload that imports the service module the app
-// itself uses and, on SIGUSR2, calls its test-only clearListCaches() and prints an ack. A case
-// that reads back its own direct-SQL rows calls clearAppListCache(app) right after the insert and
-// waits for that ack (condition wait, no sleep). The app has no switch and no HTTP surface for it.
-const CACHE_CLEARED_MARK = "list-cache-cleared";
-const SERVICE_MODULE_URL = pathToFileURL(
-  realpathSync(fileURLToPath(new URL("../../src/service/notes.js", import.meta.url))),
-).href;
-const CACHE_RESET_IMPORT =
-  "--import=data:text/javascript," +
-  encodeURIComponent(
-    "import { clearListCaches } from " + JSON.stringify(SERVICE_MODULE_URL) + ";" +
-      "process.on('SIGUSR2', () => { clearListCaches(); process.stderr.write(" + JSON.stringify(CACHE_CLEARED_MARK + "\n") + "); });",
-  );
-
-async function clearAppListCache(app) {
-  const acks = () => app.out.stderr.split(CACHE_CLEARED_MARK).length - 1;
-  const before = acks();
-  app.signal("SIGUSR2");
-  await vi.waitFor(
-    () => {
-      if (app.dead()) throw new Error("app stopped instead of clearing its cache: " + app.out.stderr);
-      if (acks() <= before) throw new Error("cache clear not acknowledged yet");
-    },
-    { timeout: BOOT_TIMEOUT_MS, interval: 10 },
-  );
-}
-
 async function withScratchApp(label, fn) {
   const dbName = "fq5_" + label + "_" + randomUUID().replace(/-/g, "");
   await db.query("create database " + dbName);
@@ -675,8 +644,7 @@ async function withScratchApp(label, fn) {
   let app;
   try {
     await client.connect();
-    const nodeOptions = [process.env.NODE_OPTIONS, CACHE_RESET_IMPORT].filter(Boolean).join(" ");
-    app = await startApp({ ...pgEnv(DB.host, DB.port), PGDATABASE: dbName, NODE_OPTIONS: nodeOptions });
+    app = await startApp({ ...pgEnv(DB.host, DB.port), PGDATABASE: dbName });
     return await fn({ app, client });
   } finally {
     await app?.stop();
@@ -718,7 +686,7 @@ describe("issue #5 — GET /notes against the compose Postgres", () => {
   // dw1: three notes at different times, inserted in an order that is NOT their time order, so
   // neither "id DESC" nor "insertion order" nor "created_at ASC" produces the expected list.
   test("test_5_list_notes_newest_first_with_total", async () => {
-    await withScratchApp("order", async ({ app, client }) => {
+    await withCacheResetScratchApp("order", async ({ app, client }) => {
       expect((await getList(app.base)).res.status).toBe(200); // creates the table
       const [middle, newest, oldest] = await insertAt(client, [
         { title: "middle", createdAt: "2026-03-01T10:00:00Z" },
@@ -746,7 +714,7 @@ describe("issue #5 — GET /notes against the compose Postgres", () => {
   // only has millisecond precision). They come back id DESC, between a newer and an older row,
   // and three calls return the same order.
   test("test_5_same_created_at_orders_by_id_desc", async () => {
-    await withScratchApp("tie", async ({ app, client }) => {
+    await withCacheResetScratchApp("tie", async ({ app, client }) => {
       expect((await getList(app.base)).res.status).toBe(200); // creates the table
       const tie = "2026-04-01T09:30:00.123456Z";
       const inserted = await insertAt(client, [
@@ -776,7 +744,7 @@ describe("issue #5 — GET /notes against the compose Postgres", () => {
   // and no overlap; page 2 starts at the 21st newest. An offset past the end is 200, empty items,
   // and the real total.
   test("test_5_offset_pages_and_past_total_is_empty", async () => {
-    await withScratchApp("pages", async ({ app, client }) => {
+    await withCacheResetScratchApp("pages", async ({ app, client }) => {
       expect((await getList(app.base)).res.status).toBe(200); // creates the table
       const N = 25;
       const base = Date.parse("2026-05-01T00:00:00Z");
@@ -915,7 +883,7 @@ describe("issue #6 — GET /notes?q= against the compose Postgres", () => {
   // order. Paging by 3 yields the matching notes newest first with no gap and no overlap, and
   // `total` is 7 on every page, not 13. A blank q is exactly the unfiltered list.
   test("test_6_search_filters_before_paging_and_blank_q_lists_all", async () => {
-    await withScratchApp("s6page", async ({ app, client }) => {
+    await withCacheResetScratchApp("s6page", async ({ app, client }) => {
       expect((await getList(app.base)).res.status).toBe(200); // creates the table
       const base = Date.parse("2026-06-04T00:00:00Z");
       const N = 13;
@@ -1001,6 +969,68 @@ async function withFrozenClockScratchApp(label, fn) {
     await app?.stop();
     await client.end().catch(() => {});
     await db.query("drop database if exists " + dbName + " with (force)");
+  }
+}
+
+// Issue #7 ruling (2026-09-27): GET /notes is cached for 5000 ms and only a 201 POST clears it
+// (spec 004), so rows written by direct SQL are not seen by a repeat of a query the case already
+// asked. The four #5/#6 cases that read back their own direct-SQL rows (the ruling's four) call
+// clearAppListCache(app) right after the insert. They run on withCacheResetScratchApp, a parallel
+// helper that adds only a preload. The shared startApp/withScratchApp stay untouched (plan d7), so
+// every other case spawns exactly what it did before #7. The preload imports the service module
+// the app itself uses and opens a loopback control socket. Each connection calls the test-only
+// clearListCaches() and answers with an ack. The app has no switch and no HTTP surface for it.
+const CACHE_CLEARED_MARK = "list-cache-cleared";
+const CACHE_RESET_PORT_MARK = "list-cache-reset-port:";
+const CACHE_RESET_IMPORT =
+  "--import=data:text/javascript," +
+  encodeURIComponent(
+    "import { clearListCaches } from " + JSON.stringify(new URL("../../src/service/notes.js", import.meta.url).href) + ";" +
+      "import { createServer } from 'node:net';" +
+      "const control = createServer((sock) => { clearListCaches(); sock.end(" + JSON.stringify(CACHE_CLEARED_MARK + "\n") + "); });" +
+      "control.listen(0, " + JSON.stringify(LOOPBACK) + ", () => process.stderr.write(" +
+      JSON.stringify(CACHE_RESET_PORT_MARK) + " + control.address().port + '\\n'));" +
+      "control.unref();",
+  );
+
+async function withCacheResetScratchApp(label, fn) {
+  const dbName = "fq7_reset_" + label + "_" + randomUUID().replace(/-/g, "");
+  await db.query("create database " + dbName);
+  const client = new pg.Client({ ...DB, database: dbName });
+  let app;
+  try {
+    await client.connect();
+    const nodeOptions = [process.env.NODE_OPTIONS, CACHE_RESET_IMPORT].filter(Boolean).join(" ");
+    app = await startApp({ ...pgEnv(DB.host, DB.port), PGDATABASE: dbName, NODE_OPTIONS: nodeOptions });
+    return await fn({ app, client });
+  } finally {
+    await app?.stop();
+    await client.end().catch(() => {});
+    await db.query("drop database if exists " + dbName + " with (force)");
+  }
+}
+
+// Clears the app's list cache through the preload's control socket and resolves only after the
+// app acknowledged it (condition waits, no sleep).
+async function clearAppListCache(app) {
+  let port;
+  await vi.waitFor(
+    () => {
+      if (app.dead()) throw new Error("app stopped before its cache-reset socket opened: " + app.out.stderr);
+      const m = app.out.stderr.match(new RegExp(CACHE_RESET_PORT_MARK + "(\\d+)"));
+      if (!m) throw new Error("cache-reset socket not announced yet");
+      port = Number(m[1]);
+    },
+    { timeout: BOOT_TIMEOUT_MS, interval: 10 },
+  );
+  const sock = connect(port, LOOPBACK);
+  sock.setEncoding("utf8");
+  let reply = "";
+  sock.on("data", (chunk) => { reply += chunk; });
+  const [closedEarly] = await Promise.race([once(sock, "end").then(() => [false]), once(sock, "error").then(() => [true])]);
+  sock.destroy();
+  if (closedEarly || !reply.includes(CACHE_CLEARED_MARK)) {
+    throw new Error("cache clear not acknowledged: " + JSON.stringify(reply) + " " + app.out.stderr);
   }
 }
 

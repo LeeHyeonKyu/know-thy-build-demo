@@ -85,8 +85,58 @@ export function isDbUnavailable(err, depth = 0) {
   return isDbUnavailable(err.cause, depth + 1);
 }
 
+// Paging rules for GET /notes (spec 002). `limit`: default 20, a value above 100 is cut to 100,
+// anything that is not a positive integer is invalid_request. `offset`: default 0, must be a
+// non-negative integer small enough to reach SQL intact (plan d4). "Integer" means the WHOLE string
+// is decimal digits — parseInt would accept "10abc" and "1.5" (plan d9).
+export const DEFAULT_LIMIT = 20;
+export const MAX_LIMIT = 100;
+const DIGITS = /^\d+$/;
+
+export function parsePage(query = {}) {
+  const { limit: rawLimit, offset: rawOffset } = query;
+  let limit = DEFAULT_LIMIT;
+  if (rawLimit !== undefined) {
+    if (typeof rawLimit !== "string" || !DIGITS.test(rawLimit) || Number(rawLimit) < 1) {
+      throw new NotesError("invalid_request", "limit must be a positive integer");
+    }
+    limit = Math.min(Number(rawLimit), MAX_LIMIT);
+  }
+  let offset = 0;
+  if (rawOffset !== undefined) {
+    if (typeof rawOffset !== "string" || !DIGITS.test(rawOffset) || !Number.isSafeInteger(Number(rawOffset))) {
+      throw new NotesError("invalid_request", "offset must be a non-negative integer");
+    }
+    offset = Number(rawOffset);
+  }
+  return { limit, offset };
+}
+
+// Storage failures that mean "the database cannot be reached" become db_unavailable; anything else
+// is rethrown unchanged (the route answers it with 500).
+function classifyStorageError(err) {
+  if (isDbUnavailable(err)) {
+    return new NotesError("db_unavailable", "the database is unavailable, try again later", { cause: err });
+  }
+  return err;
+}
+
 export function createNotesService(repo) {
   return {
+    async listNotes(query) {
+      const page = parsePage(query);
+      let result;
+      try {
+        result = await repo.listNotes(page);
+      } catch (err) {
+        throw classifyStorageError(err);
+      }
+      return {
+        items: result.items.map((n) => ({ id: n.id, title: n.title, body: n.body, created_at: n.created_at })),
+        total: result.total,
+      };
+    },
+
     async createNote(input) {
       const note = validateNewNote(input);
       let created;

@@ -9,6 +9,7 @@ import { once } from "node:events";
 import { gzipSync } from "node:zlib";
 import { createNotesRouter } from "../src/routes/notes.js";
 import { createNotesService } from "../src/service/notes.js";
+import { NotesError, normalizeQuery } from "../src/service/notes.js";
 import { makeNote } from "./fixtures/notes.js";
 
 // A repository fake whose behaviour is decided per case. It records every insert so a case can
@@ -367,5 +368,72 @@ describe("issue #5 — GET /notes paging rules without a database", () => {
     const other = await getNotes(base2);
     expect(other.res.status).toBe(500);
     expect(other.body?.error?.code).toBe("internal_error");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Issue #6 — GET /notes?q= search (spec docs/features/003-search.md), DB-free unit level.
+// normalizeQuery is the pure service rule; the route cases observe what the repository was asked
+// for (the fake records it) instead of recomputing it.
+
+describe("issue #6 — search-term normalisation without a database", () => {
+  // dw3: trim; escape '\', '%' and '_' so each is literal inside ILIKE; blank means no filter.
+  // Expected values are written out as literal LIKE patterns, not derived from a replace chain.
+  test("test_6_normalize_query_trims_and_escapes", async () => {
+    // Blank / absent: no filter at all.
+    expect(normalizeQuery(undefined)).toBeNull();
+    expect(normalizeQuery("")).toBeNull();
+    expect(normalizeQuery("   ")).toBeNull();
+    expect(normalizeQuery("\t \n")).toBeNull();
+
+    // Trim only the ends; inner spaces are part of the term.
+    expect(normalizeQuery("  pool  ")).toBe("pool");
+    expect(normalizeQuery(" pg pool ")).toBe("pg pool");
+    expect(normalizeQuery("POOL")).toBe("POOL");
+
+    // Each LIKE metacharacter is preceded by one backslash.
+    expect(normalizeQuery("%")).toBe(String.raw`\%`);
+    expect(normalizeQuery("_")).toBe(String.raw`\_`);
+    expect(normalizeQuery("\\")).toBe(String.raw`\\`);
+    expect(normalizeQuery("100%")).toBe(String.raw`100\%`);
+    expect(normalizeQuery("snake_case")).toBe(String.raw`snake\_case`);
+    expect(normalizeQuery(String.raw`C:\tmp`)).toBe(String.raw`C:\\tmp`);
+    // Order trap (plan open_risks): a backslash already in the input is escaped exactly once, and
+    // the backslashes added for % and _ are not escaped again.
+    expect(normalizeQuery(String.raw`\%`)).toBe(String.raw`\\\%`);
+    expect(normalizeQuery(String.raw`a\_b%`)).toBe(String.raw`a\\\_b\%`);
+    // Trim happens before escaping, so surrounding spaces never survive.
+    expect(normalizeQuery("  %_  ")).toBe(String.raw`\%\_`);
+
+    // Through the route: the repository receives the normalised term, and no filter when blank.
+    for (const { search, expected } of [
+      { search: "?q=" + encodeURIComponent("  50%_off  "), expected: { limit: 20, offset: 0, q: String.raw`50\%\_off` } },
+      { search: "?q=%20%20&limit=5", expected: { limit: 5, offset: 0 } },
+      { search: "?q=", expected: { limit: 20, offset: 0 } },
+    ]) {
+      const repo = fakeListRepo();
+      const base = await startWith(repo);
+      const { res } = await getNotes(base, search);
+      expect(res.status, "GET /notes" + search).toBe(200);
+      expect(repo.calls, "GET /notes" + search).toHaveLength(1);
+      expect(repo.calls[0].q ?? null, "GET /notes" + search).toBe(expected.q ?? null);
+      expect(repo.calls[0]).toMatchObject({ limit: expected.limit, offset: expected.offset });
+    }
+  });
+
+  // dw6: Express turns ?q=a&q=b into an array; that is a 400 in the API's error format (spec
+  // Key States), never a TypeError 500, and storage is never asked.
+  test("test_6_repeated_q_returns_400_invalid_request", async () => {
+    for (const search of ["?q=a&q=b", "?q=a&q=a", "?q=&q=x", "?limit=5&q=pool&q=POOL"]) {
+      const repo = fakeListRepo();
+      const base = await startWith(repo);
+      const { res, body } = await getNotes(base, search);
+      expect(res.status, "GET /notes" + search).toBe(400);
+      expect(res.headers.get("content-type")).toMatch(/application\/json/);
+      expect(body?.error?.code, "GET /notes" + search).toBe("invalid_request");
+      expect(body?.error?.message).toBe("q must be a single value");
+      expect(repo.calls, "GET /notes" + search).toHaveLength(0);
+    }
+    expect(() => normalizeQuery(["a", "b"])).toThrow(NotesError);
   });
 });

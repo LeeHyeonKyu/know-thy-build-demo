@@ -14,8 +14,9 @@ export const MAX_BODY_BYTES = 16 * 1024 * 1024;
 // Process-wide bound on POST /notes body bytes in flight, counted AFTER decompression (#87). The
 // per-request cap stops one gzip bomb, but ~300 concurrent ~16 KB gzip bodies each inflating to
 // just under MAX_BODY_BYTES still exhausted the V8 heap. A request is charged for every inflated
-// byte it buffers and keeps that charge until its RESPONSE is over (finish or close) — not merely
-// until parsing ends, because a parsed 16 MiB note still sits in memory while it waits on Postgres.
+// byte it buffers and keeps that charge until its RESPONSE is over (finish or close) AND, if the
+// body was parsed, until the route handler is done with it — not merely until parsing ends or the
+// client hangs up, because a parsed 16 MiB note still sits in memory while it waits on Postgres.
 // A request whose next chunk would push the total past this bound is refused with 503 `overloaded`.
 // It must stay >= MAX_BODY_BYTES so an idle process still admits one full-size note.
 // What is NOT bounded here: the copies JSON.parse and the driver make on top of the raw bytes, so
@@ -71,16 +72,25 @@ function readJsonBody(req, res, next) {
   }
 
   // The charge is returned exactly once, when the response is over — whatever path got it there
-  // (201, 400, 413, 503, a handler exception, or a client that hung up mid-upload).
+  // (201, 400, 413, 503, a handler exception, or a client that hung up mid-upload). If the body
+  // was parsed and handed to the route handler, the response being over is not enough: a client
+  // that hangs up after a complete upload closes `res` while its parsed note still waits on
+  // Postgres (review cf1). Then the charge also waits for the handler to call
+  // res.locals.releaseBody (in its finally), i.e. until nothing references the body any more.
   let charged = 0;
   let open = true;
+  let bodyInUse = false;
   const release = () => {
-    open = false;
+    if (open || bodyInUse) return;
     inflightBodyBytes -= charged;
     charged = 0;
   };
-  res.once("finish", release);
-  res.once("close", release);
+  const responseOver = () => {
+    open = false;
+    release();
+  };
+  res.once("finish", responseOver);
+  res.once("close", responseOver);
 
   const chunks = [];
   let settled = false;
@@ -97,6 +107,11 @@ function readJsonBody(req, res, next) {
         return next(bodyError(400, "entity.parse.failed", "request body must be valid JSON"));
       }
       req.body = body;
+      bodyInUse = true;
+      res.locals.releaseBody = () => {
+        bodyInUse = false;
+        release();
+      };
       return next();
     }
     // Stop inflating, drop what was buffered, and read off the rest of the upload before
@@ -193,6 +208,10 @@ export function createNotesRouter(service) {
       }
       console.error("POST /notes failed: " + (err?.stack || err));
       return sendError(res, 500, "internal_error", "internal error");
+    } finally {
+      // The parsed body is no longer needed: its in-flight charge may go once the response is
+      // over too (readJsonBody). Without this a client that hung up would keep the charge forever.
+      res.locals.releaseBody?.();
     }
   });
 

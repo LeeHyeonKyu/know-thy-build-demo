@@ -1436,9 +1436,12 @@ describe("issue #87 rework 2 — interleaved legitimate uploads are not all refu
             during = { health: await getWithin(app.base, "/healthz"), version: await getWithin(app.base, "/version") };
           }
         }
-      } finally {
-        for (const { socket } of uploads) socket.end();
+      } catch (err) {
+        for (const { socket } of uploads) socket.destroy();
+        throw err;
       }
+      // No half-close: the server aborts a request whose client ends its side early. Every answer
+      // arrives on its own (`Connection: close`).
       const results = await Promise.all(uploads.map((u) => u.answer));
       const counts = tally(results);
       const summary = JSON.stringify(counts) + "; app stderr: " + app.out.stderr.slice(-1500);

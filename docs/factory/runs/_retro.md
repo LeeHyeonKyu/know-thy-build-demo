@@ -1,6 +1,6 @@
 # Retro State
 
-- last retro: 2026-09-27T09:54:24.491Z
+- last retro: 2026-09-27T11:24:11.090Z
 - merges since last retro: 0
 - current N: 1
 
@@ -8,38 +8,37 @@
 
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
-| 2026-09-26T16:08:25.967Z | 0 | 1 | 1 | 3 |
 | 2026-09-26T16:11:19.038Z | 0 | 1 | 2 | 0 |
 | 2026-09-27T00:26:49.022Z | 0 | 2 | 1 | 4 |
 | 2026-09-27T02:42:35.524Z | 0 | 1 | 2 | 0 |
 | 2026-09-27T09:54:24.491Z | 0 | 2 | 1 | 5 |
+| 2026-09-27T11:24:11.090Z | 0 | 1 | 1 | 2 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 2 | 10 |
-| review rounds avg | 2 | 1.4 |
-| rounds/issue (plan/impl/review) | 1.5 / 2.5 / 2 | 1 / 1.6 / 1.4 |
-| escaped defects | 2 (#87×2) | 4 |
-| revert rate | 0.00 (0/2) | 0.00 (0/10) |
-| needs-human | 5 | 33 |
-| rejects by role | correctness 1, qa 2 | correctness 4, qa 3 |
-| reviewer overlap | 0.00 (0/3, runs 5) | 0.20 (2/10, runs 14) |
-| unique findings by role | correctness 1, qa 2 | correctness 4, qa 4 |
-| qa na ratio | 0.00 (0/20 claims, na-heavy 0/2 approvals) | 0.03 (2/74 claims, na-heavy 0/7 approvals) |
-| cost (usd) | 58.29 | 806.13 |
-| tokens | input 2471724 / output 148462 | input 21061217 / output 1590405 |
-| retro cost (usd) | 1.26 | 9.33 |
-| retro tokens | input 2 / output 2714 | input 16 / output 19010 |
-| full retros | — | 8 |
+| merged | 1 | 11 |
+| review rounds avg | 3 | 1.55 |
+| rounds/issue (plan/impl/review) | 1 / 3 / 3 | 1 / 1.73 / 1.55 |
+| escaped defects | 2 (#7×2) | 6 |
+| revert rate | 0.00 (0/1) | 0.00 (0/11) |
+| needs-human | 2 | 35 |
+| rejects by role | spec-conformance 2, correctness 1, architecture 1 | correctness 5, qa 3, spec-conformance 2, architecture 1 |
+| reviewer overlap | 0.50 (2/4, runs 3) | 0.29 (4/14, runs 17) |
+| unique findings by role | spec-conformance 2 | correctness 4, qa 4, spec-conformance 2 |
+| qa na ratio | 없음 | 0.03 (2/74 claims, na-heavy 0/7 approvals) |
+| cost (usd) | 12.40 | 818.53 |
+| tokens | input 290864 / output 35539 | input 21352081 / output 1625944 |
+| retro cost (usd) | 1.18 | 10.50 |
+| retro tokens | input 2 / output 2045 | input 18 / output 21055 |
+| full retros | — | 9 |
 
 ### Rounds per issue (this window)
 
 | issue | plan | implement | review | escaped |
 | --- | --- | --- | --- | --- |
-| #87 | 2 | 4 | 3 | 2 |
-| #6 | 1 | 1 | 1 | 0 |
+| #7 | 1 | 3 | 3 | 2 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -53,7 +52,7 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-09-27T09:54:24.491Z",
+    "last_retro_at": "2026-09-27T11:24:11.090Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
@@ -669,6 +668,77 @@
       ],
       "n_before": 2,
       "n_after": 1
+    },
+    {
+      "at": "2026-09-27T11:24:11.090Z",
+      "yield": 0,
+      "needs_human_since": 2,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            7
+          ],
+          "actions": [
+            {
+              "kind": "upstream-created",
+              "step": "feedback-route",
+              "issue": 7,
+              "repo": "LeeHyeonKyu/know_thy_build",
+              "upstream_issue": 102,
+              "fingerprint": "59f30ad8ea51a8a6"
+            },
+            {
+              "kind": "upstream-created",
+              "step": "feedback-route",
+              "issue": 7,
+              "repo": "LeeHyeonKyu/know_thy_build",
+              "upstream_issue": 103,
+              "fingerprint": "d4398656e12a85f8"
+            },
+            {
+              "kind": "product",
+              "step": "feedback-route",
+              "issue": 7,
+              "count": 3
+            }
+          ]
+        },
+        {
+          "step": "lessons:factory-builder",
+          "added": [
+            "L-2026-09-27-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "lessons:qa",
+          "added": [],
+          "rejected": [],
+          "evicted": [],
+          "cited": [
+            {
+              "id": "L-2026-09-20-02",
+              "from": 1,
+              "to": 2
+            }
+          ]
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 99,
+          "merged": false,
+          "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know-thy-build-demo#99 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
+          "files": [
+            ".factory/lessons/factory-builder.md",
+            ".factory/lessons/reviewer-qa.md"
+          ]
+        }
+      ],
+      "n_before": 1,
+      "n_after": 1
     }
   ],
   "candidates": {
@@ -1120,6 +1190,30 @@
           7
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "plan.dissent_log[d7] set an explicit, un-gated reviewer bar for exactly this file and this shape of change, and the diff matches the warned scenario: it does not confine itself to appending new #7 describe/test blocks, it edits the shared helpers `startApp` and `withScratchApp` that back every existing integration case, not just the four the issue's Ruling named.",
+        "runs": [
+          7
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "Expired cache entries are never reclaimed. An entry is deleted only when `get` is called again with the same key after the TTL has passed, or when a 201 POST runs `clear()`. So every distinct {limit, offset, q} ever requested stays on the heap, holding its full copied page, for the life of the process whenever there is no successful POST. The spec leaves out a size limit or LRU for live entries within the 5 s window. That is not the same thing as keeping dead entries forever: the memory used grows with the number of distinct queries over time, not with the number of queries in the last 5 s.",
+        "runs": [
+          7
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The PR adds a third and a fourth copy of the throwaway-database app helper. withFrozenClockScratchApp and withCacheResetScratchApp are each the same 15-line create-db / connect / startApp / stop / end / drop-db body. The parameterized version they need already exists on main as withScratchAppEnv(label, extraEnv, fn) at line 1181. Only the database-name prefix and one extra env key (NODE_OPTIONS) differ between them. Under Lens 2, a third copy is an automatic must_fix.",
+        "runs": [
+          7
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -1488,8 +1582,8 @@
       },
       {
         "issue": 7,
-        "reason": "stage artifact missing or invalid: gates RED: failing=unit,new-test-repeat",
-        "at": "2026-09-27T08:56:37Z"
+        "reason": "review rounds exhausted (K=3): 2 must_fix remain",
+        "at": "2026-09-27T11:21:15Z"
       },
       {
         "issue": 87,
@@ -1499,28 +1593,22 @@
     ]
   },
   "stats": {
-    "merged": 2,
-    "review_rounds_avg": 2,
-    "plan_rounds_avg": 1.5,
-    "implement_rounds_avg": 2.5,
+    "merged": 1,
+    "review_rounds_avg": 3,
+    "plan_rounds_avg": 1,
+    "implement_rounds_avg": 3,
     "rounds_per_issue": [
       {
-        "issue": 87,
-        "plan": 2,
-        "implement": 4,
-        "review": 3
-      },
-      {
-        "issue": 6,
+        "issue": 7,
         "plan": 1,
-        "implement": 1,
-        "review": 1
+        "implement": 3,
+        "review": 3
       }
     ],
     "escaped_defects": 2,
     "escaped_defects_detail": [
       {
-        "issue": 87,
+        "issue": 7,
         "count": 2
       }
     ],
@@ -1528,80 +1616,83 @@
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {
+      "spec-conformance": 2,
       "correctness": 1,
-      "qa": 2
+      "architecture": 1
     },
-    "review_runs": 5,
-    "findings_total": 3,
-    "overlapping_findings": 0,
+    "review_runs": 3,
+    "findings_total": 4,
+    "overlapping_findings": 2,
     "unique_findings_by_role": {
-      "correctness": 1,
-      "qa": 2
+      "spec-conformance": 2
     },
-    "overlap_ratio": 0,
-    "needs_human": 5,
-    "qa_approvals": 2,
-    "qa_claims_total": 20,
+    "overlap_ratio": 0.5,
+    "needs_human": 2,
+    "qa_approvals": 0,
+    "qa_claims_total": 0,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 58.285158,
+      "cost_usd": 12.396249,
       "tokens": {
-        "input": 2471724,
-        "output": 148462
+        "input": 290864,
+        "output": 35539
       }
     },
     "retro_usage": {
-      "cost_usd": 1.259906,
+      "cost_usd": 1.175856,
       "tokens": {
         "input": 2,
-        "output": 2714
+        "output": 2045
       }
     }
   },
   "stats_total": {
-    "merged": 10,
-    "review_rounds_avg": 1.4,
+    "merged": 11,
+    "review_rounds_avg": 1.55,
     "plan_rounds_avg": 1,
-    "implement_rounds_avg": 1.6,
-    "escaped_defects": 4,
+    "implement_rounds_avg": 1.73,
+    "escaped_defects": 6,
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {
-      "correctness": 4,
-      "qa": 3
+      "correctness": 5,
+      "qa": 3,
+      "spec-conformance": 2,
+      "architecture": 1
     },
-    "review_runs": 14,
-    "findings_total": 10,
-    "overlapping_findings": 2,
+    "review_runs": 17,
+    "findings_total": 14,
+    "overlapping_findings": 4,
     "unique_findings_by_role": {
       "correctness": 4,
-      "qa": 4
+      "qa": 4,
+      "spec-conformance": 2
     },
-    "overlap_ratio": 0.2,
-    "needs_human": 33,
+    "overlap_ratio": 0.29,
+    "needs_human": 35,
     "qa_approvals": 7,
     "qa_claims_total": 72,
     "qa_na_total": 2,
     "qa_na_ratio": 0.03,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 806.12946,
+      "cost_usd": 818.525709,
       "tokens": {
-        "input": 21061217,
-        "output": 1590405
+        "input": 21352081,
+        "output": 1625944
       }
     },
     "retro_usage": {
-      "cost_usd": 9.32819,
+      "cost_usd": 10.504046,
       "tokens": {
-        "input": 16,
-        "output": 19010
+        "input": 18,
+        "output": 21055
       }
     },
-    "retros": 8
+    "retros": 9
   },
   "deferred_proposals": [],
   "deletion_candidates": []

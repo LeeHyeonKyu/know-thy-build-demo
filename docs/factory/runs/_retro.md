@@ -1,38 +1,44 @@
 # Retro State
 
-- last retro: 2026-09-27T00:26:49.022Z
+- last retro: 2026-09-27T02:42:35.524Z
 - merges since last retro: 0
-- current N: 1
+- current N: 2
 
 ## History (last 5)
 
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
-| 2026-09-20T11:32:45.992Z | 7 | 1 | 1 | 16 |
 | 2026-09-21T02:34:43.093Z | 3 | 1 | 1 | 2 |
 | 2026-09-26T16:08:25.967Z | 0 | 1 | 1 | 3 |
 | 2026-09-26T16:11:19.038Z | 0 | 1 | 2 | 0 |
 | 2026-09-27T00:26:49.022Z | 0 | 2 | 1 | 4 |
+| 2026-09-27T02:42:35.524Z | 0 | 1 | 2 | 0 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 7 |
-| review rounds avg | 0 | 1.29 |
-| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.86 / 1.43 / 1.29 |
+| merged | 1 | 8 |
+| review rounds avg | 1 | 1.25 |
+| rounds/issue (plan/impl/review) | 1 / 1 / 1 | 0.88 / 1.38 / 1.25 |
 | escaped defects | 0 | 2 |
-| revert rate | 없음 | 0.00 (0/7) |
+| revert rate | 0.00 (0/1) | 0.00 (0/8) |
 | needs-human | 0 | 28 |
 | rejects by role | 없음 | correctness 3, qa 1 |
-| reviewer overlap | 없음 | 0.29 (2/7, runs 8) |
+| reviewer overlap | 없음 | 0.29 (2/7, runs 9) |
 | unique findings by role | 없음 | correctness 3, qa 2 |
-| qa na ratio | 없음 | 0.04 (2/47 claims, na-heavy 0/4 approvals) |
-| cost (usd) | 2.04 | 742.95 |
-| tokens | input 151586 / output 9408 | input 18292976 / output 1423128 |
-| retro cost (usd) | 0.00 | 6.97 |
-| retro tokens | input 0 / output 0 | input 12 / output 13688 |
-| full retros | — | 6 |
+| qa na ratio | 0.00 (0/7 claims, na-heavy 0/1 approvals) | 0.04 (2/54 claims, na-heavy 0/5 approvals) |
+| cost (usd) | 4.90 | 747.84 |
+| tokens | input 296517 / output 18815 | input 18589493 / output 1441943 |
+| retro cost (usd) | 1.10 | 8.07 |
+| retro tokens | input 2 / output 2608 | input 14 / output 16296 |
+| full retros | — | 7 |
+
+### Rounds per issue (this window)
+
+| issue | plan | implement | review | escaped |
+| --- | --- | --- | --- | --- |
+| #5 | 1 | 1 | 1 | 0 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -46,11 +52,11 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-09-27T00:26:49.022Z",
+    "last_retro_at": "2026-09-27T02:42:35.524Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
-  "n": 1,
+  "n": 2,
   "history": [
     {
       "at": "2026-09-12T17:07:22.748Z",
@@ -470,6 +476,100 @@
       ],
       "n_before": 2,
       "n_after": 1
+    },
+    {
+      "at": "2026-09-27T02:42:35.524Z",
+      "yield": 0,
+      "needs_human_since": 0,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            5
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "current": "bot-hk",
+              "reason": "current factory identity: bot-hk (machine user/app, viewer); older runs in this window ran under a shared identity (LeeHyeonKyu) — their human decisions are unverifiable, nothing to register"
+            }
+          ]
+        },
+        {
+          "step": "lessons:reviewer-correctness",
+          "added": [
+            "L-2026-09-27-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "lessons:builder",
+          "added": [],
+          "rejected": [],
+          "evicted": [],
+          "cited": [
+            {
+              "id": "L-2026-09-21-01",
+              "from": 0,
+              "to": 1
+            }
+          ]
+        },
+        {
+          "step": "lessons:qa",
+          "added": [],
+          "rejected": [],
+          "evicted": [],
+          "cited": [
+            {
+              "id": "L-2026-09-20-02",
+              "from": 1,
+              "to": 2
+            }
+          ]
+        },
+        {
+          "step": "role:reviewer-correctness",
+          "added": [
+            {
+              "section": "### 좋은 발견",
+              "text": "위치: POST /notes의 DB 오류 분류기와 pg pool 설정(#2 연결 오류 분류 분기, #76 src/service/notes.js:66-67의 `/timeout exceeded when trying to connect/`·`/connection timeout/` 패턴). 주장: 스펙 Key State 'DB 연결 실패 → 503'이 장애 모드마다 따로 깨진다. #2에서는 28P01/3D000과 `code`가 없는 연결 상실이 500으로 나갔다. #76에서는 타이머가 없어 연결만 받고 멈춘 DB에 대해 요청이 끝나지 않…"
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "role:plan-operator",
+          "added": [
+            {
+              "section": "### 좋은 발견",
+              "text": "위치: #2 plan의 dw6 판별 기준 `code: \"ECONNREFUSED\"`. 주장: 연결 거부 한 코드로 'DB 연결 실패'와 '프로그래밍 오류'를 나누면 타임아웃, 풀 고갈, 인증·DNS 실패가 500으로 떨어진다. 판별자는 코드 하나가 아니라 연결류 오류의 집합이어야 하고, '요청이 제한된 시간 안에 끝난다'도 done_when에 들어가야 한다. 근거: 이 dissent는 #2 plan에서 done_when으로 옮겨지지 않았다. 같은 결함은 #2 review(28P01/3D000, code 없는 오류 → 500)에서 다…"
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 91,
+          "merged": false,
+          "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know-thy-build-demo#91 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
+          "files": [
+            ".factory/lessons/reviewer-correctness.md",
+            ".factory/lessons/factory-builder.md",
+            ".factory/lessons/reviewer-qa.md",
+            ".claude/agents/reviewer-correctness.md",
+            ".claude/agents/plan-operator.md"
+          ]
+        }
+      ],
+      "n_before": 1,
+      "n_after": 2
     }
   ],
   "candidates": {
@@ -1240,41 +1340,55 @@
     ]
   },
   "stats": {
-    "merged": 0,
-    "review_rounds_avg": 0,
-    "plan_rounds_avg": 0,
-    "implement_rounds_avg": 0,
-    "rounds_per_issue": [],
+    "merged": 1,
+    "review_rounds_avg": 1,
+    "plan_rounds_avg": 1,
+    "implement_rounds_avg": 1,
+    "rounds_per_issue": [
+      {
+        "issue": 5,
+        "plan": 1,
+        "implement": 1,
+        "review": 1
+      }
+    ],
     "escaped_defects": 0,
     "escaped_defects_detail": [],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": null,
+    "revert_rate": 0,
     "rejects_by_role": {},
-    "review_runs": 0,
+    "review_runs": 1,
     "findings_total": 0,
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
     "needs_human": 0,
-    "qa_approvals": 0,
-    "qa_claims_total": 0,
+    "qa_approvals": 1,
+    "qa_claims_total": 7,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 2.039798,
+      "cost_usd": 4.897644,
       "tokens": {
-        "input": 151586,
-        "output": 9408
+        "input": 296517,
+        "output": 18815
+      }
+    },
+    "retro_usage": {
+      "cost_usd": 1.096387,
+      "tokens": {
+        "input": 2,
+        "output": 2608
       }
     }
   },
   "stats_total": {
-    "merged": 7,
-    "review_rounds_avg": 1.29,
-    "plan_rounds_avg": 0.86,
-    "implement_rounds_avg": 1.43,
+    "merged": 8,
+    "review_rounds_avg": 1.25,
+    "plan_rounds_avg": 0.88,
+    "implement_rounds_avg": 1.38,
     "escaped_defects": 2,
     "reverts": 0,
     "reverted_issues": [],
@@ -1283,7 +1397,7 @@
       "correctness": 3,
       "qa": 1
     },
-    "review_runs": 8,
+    "review_runs": 9,
     "findings_total": 7,
     "overlapping_findings": 2,
     "unique_findings_by_role": {
@@ -1292,26 +1406,26 @@
     },
     "overlap_ratio": 0.29,
     "needs_human": 28,
-    "qa_approvals": 4,
-    "qa_claims_total": 45,
+    "qa_approvals": 5,
+    "qa_claims_total": 52,
     "qa_na_total": 2,
     "qa_na_ratio": 0.04,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 742.946658,
+      "cost_usd": 747.844302,
       "tokens": {
-        "input": 18292976,
-        "output": 1423128
+        "input": 18589493,
+        "output": 1441943
       }
     },
     "retro_usage": {
-      "cost_usd": 6.971897,
+      "cost_usd": 8.068284,
       "tokens": {
-        "input": 12,
-        "output": 13688
+        "input": 14,
+        "output": 16296
       }
     },
-    "retros": 6
+    "retros": 7
   },
   "deferred_proposals": [],
   "deletion_candidates": []

@@ -1,4 +1,5 @@
 import express from "express";
+import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import { NotesError } from "../service/notes.js";
 
 // Routes: request parsing, status codes, and the `{"error":{"code","message"}}` format
@@ -9,6 +10,227 @@ const STATUS_BY_CODE = { invalid_request: 400, db_unavailable: 503 };
 // Upper bound on a POST /notes body after decompression. Far above any note a person pastes
 // (the cf4 case is ~1.6 MB) and far below V8's ~512 MiB string maximum.
 export const MAX_BODY_BYTES = 16 * 1024 * 1024;
+
+// Process-wide bound on POST /notes body bytes in flight, counted AFTER decompression (#87). The
+// per-request cap stops one gzip bomb, but ~300 concurrent ~16 KB gzip bodies each inflating to
+// just under MAX_BODY_BYTES still exhausted the V8 heap. A request is charged for every inflated
+// byte it buffers. A request that is refused (413, 503, decode error, abort) drops its buffer and
+// returns its charge at once. Otherwise it keeps that charge until its RESPONSE is over (finish or
+// close) AND, if the body was parsed, until the route handler is done with it — not merely until
+// parsing ends or the client hangs up, because a parsed 16 MiB note still sits in memory while it
+// waits on Postgres.
+// When a chunk would push the total past this bound, room is made in this order until it fits:
+// 1. A STALLED reader goes first — one that holds a charge but has received no bytes (on the wire
+//    or out of the decompressor) for STALLED_READER_MS; the one idle longest is picked. Its charge
+//    is freed, it is answered 408 as a client error and its connection is closed. Without this, a
+//    few clients that upload most of a near-cap body and then go silent hold the budget forever and
+//    every newer request is the one refused (review round 3 qa1, #87 ruling item 1).
+// 2. Otherwise requests are refused with 503 `overloaded` youngest first: the youngest request
+//    still reading its body is refused (and its charge freed) until the chunk fits or the youngest
+//    is the one that sent it. So the oldest active reader always makes progress. Refusing whoever
+//    happened to send the overflowing chunk instead starved everyone under interleaved uploads:
+//    each request held a partial, doomed slice (review qa1). Readers that are merely busy are
+//    never closed this way, so every request of an active burst still gets its 503 answer.
+// A reader that trickles bytes is never "stalled"; it is bounded by the server's requestTimeout
+// (src/app.js).
+// It must stay >= MAX_BODY_BYTES so an idle process still admits one full-size note.
+// What is NOT bounded here: the copies JSON.parse and the driver make on top of the raw bytes, so
+// the real peak is a small multiple of this number (plan open_risks).
+export const MAX_INFLIGHT_BODY_BYTES = 4 * MAX_BODY_BYTES;
+export const OVERLOADED_RETRY_AFTER_SECONDS = 1;
+// How long a charged reader may receive nothing before it counts as stalled (see above). Long
+// enough that a reader that is only waiting its turn in a busy burst is not mistaken for one.
+export const STALLED_READER_MS = 5000;
+
+let inflightBodyBytes = 0;
+// Requests still reading their body, in arrival order (a Set iterates in insertion order). Each
+// entry is {refuse, evict, charged(), lastActivity}: refuse answers 503 overloaded, evict closes a
+// stalled reader.
+const readers = new Set();
+const youngestReader = () => {
+  let last;
+  for (const reader of readers) last = reader;
+  return last;
+};
+// The charged reader other than `self` that has been idle longest, if it has been idle for at
+// least STALLED_READER_MS.
+function stalledReader(self, now) {
+  let found;
+  for (const reader of readers) {
+    if (reader === self || reader.charged() === 0) continue;
+    if (now - reader.lastActivity < STALLED_READER_MS) continue;
+    if (!found || reader.lastActivity < found.lastActivity) found = reader;
+  }
+  return found;
+}
+
+const bodyError = (status, type, message) => Object.assign(new Error(message), { status, type });
+
+const DECOMPRESSORS = { gzip: createGunzip, deflate: createInflate, br: createBrotliDecompress };
+
+// The same "is there a body?" test body-parser (type-is) used.
+const hasBody = (req) => req.headers["transfer-encoding"] !== undefined || !isNaN(req.headers["content-length"]);
+
+function charsetOf(req) {
+  const match = /;\s*charset\s*=\s*(?:"([^"]*)"|([^;\s]*))/i.exec(req.headers["content-type"] ?? "");
+  return match ? (match[1] ?? match[2]).toLowerCase() : "utf-8";
+}
+
+// body-parser's strict JSON rule: an empty body is {}, otherwise the first non-whitespace
+// character must open an object or an array.
+function parseStrictJson(text) {
+  if (text.length === 0) return {};
+  const first = /^[\x20\x09\x0a\x0d]*([^\x20\x09\x0a\x0d])/.exec(text)?.[1];
+  if (first !== "{" && first !== "[") throw new SyntaxError("request body must be a JSON object or array");
+  return JSON.parse(text);
+}
+
+// Reads a POST /notes body into req.body — what express.json({type: () => true, limit:
+// MAX_BODY_BYTES}) did, plus the in-flight budget above. It reads the (possibly decompressed)
+// stream itself because body-parser buffers the whole body before any hook runs, which is exactly
+// the memory this budget has to see. Failures reach the error handler below with the same
+// `type`/`status` body-parser gave them (entity.too.large → 413, entity.parse.failed → 400, …).
+function readJsonBody(req, res, next) {
+  if (!hasBody(req)) return next();
+  const charset = charsetOf(req);
+  let decoder;
+  try {
+    if (!charset.startsWith("utf-")) throw new RangeError(charset);
+    decoder = new TextDecoder(charset);
+  } catch {
+    return next(bodyError(415, "charset.unsupported", "unsupported charset"));
+  }
+  const encoding = String(req.headers["content-encoding"] || "identity").toLowerCase();
+  let source = req;
+  if (encoding !== "identity") {
+    const decompress = DECOMPRESSORS[encoding];
+    if (!decompress) return next(bodyError(415, "encoding.unsupported", "unsupported content encoding"));
+    source = decompress();
+    req.pipe(source);
+  }
+
+  // The charge is returned exactly once: at once if the body is refused while being read (413,
+  // 503, a decode error, a client that hung up mid-upload), otherwise when the response is over
+  // (201, a parse-error 400, a db_unavailable 503, a handler exception). If the body
+  // was parsed and handed to the route handler, the response being over is not enough: a client
+  // that hangs up after a complete upload closes `res` while its parsed note still waits on
+  // Postgres (review cf1). Then the charge also waits for the handler to call
+  // res.locals.releaseBody (in its finally), i.e. until nothing references the body any more.
+  let charged = 0;
+  let open = true;
+  let bodyInUse = false;
+  const release = () => {
+    if (open || bodyInUse) return;
+    inflightBodyBytes -= charged;
+    charged = 0;
+  };
+  const responseOver = () => {
+    open = false;
+    release();
+  };
+  res.once("finish", responseOver);
+  res.once("close", responseOver);
+
+  const chunks = [];
+  let settled = false;
+  // `closeNow`: answer at once and close the connection instead of draining the upload first —
+  // for a stalled reader, whose upload may never end.
+  const settle = (err, closeNow = false) => {
+    if (settled) return;
+    settled = true;
+    readers.delete(reader);
+    if (!err) {
+      let body;
+      try {
+        const text = decoder.decode(Buffer.concat(chunks, charged));
+        chunks.length = 0;
+        body = parseStrictJson(text);
+      } catch {
+        return next(bodyError(400, "entity.parse.failed", "request body must be valid JSON"));
+      }
+      req.body = body;
+      bodyInUse = true;
+      res.locals.releaseBody = () => {
+        bodyInUse = false;
+        release();
+      };
+      return next();
+    }
+    // Stop inflating, drop what was buffered, and read off the rest of the upload before
+    // answering so the client actually receives the error (as body-parser did).
+    // The dropped bytes are no longer held, so their charge goes back NOW, not when the response
+    // is over: that waits for the rest of the upload to drain, and under interleaved uploads every
+    // refused request would keep its dead slice until the end, starving the live ones until all
+    // of them were refused too (review qa1). The drained remainder is discarded, never charged.
+    chunks.length = 0;
+    inflightBodyBytes -= charged;
+    charged = 0;
+    if (source !== req) {
+      req.unpipe(source);
+      source.destroy();
+    }
+    if (req.readableEnded || req.destroyed) return next(err);
+    if (closeNow) {
+      // Node ends and destroys the connection once this response is sent (Connection: close).
+      // Whatever the client still sends until then is read off and discarded.
+      res.set("Connection", "close");
+      req.resume();
+      return next(err);
+    }
+    let answered = false;
+    const answer = () => {
+      if (answered) return;
+      answered = true;
+      next(err);
+    };
+    req.once("end", answer);
+    req.once("close", answer);
+    req.resume();
+  };
+  const reader = {
+    refuse: () => settle(bodyError(503, "entity.overloaded", "too many request body bytes in flight")),
+    evict: () => settle(bodyError(408, "request.stalled", "request body stalled"), true),
+    charged: () => charged,
+    lastActivity: performance.now(),
+  };
+  readers.add(reader);
+  const touch = () => {
+    reader.lastActivity = performance.now();
+  };
+  // Bytes arriving on the wire count as activity even before the decompressor emits anything.
+  if (source !== req) req.on("data", touch);
+
+  source.on("data", (chunk) => {
+    if (settled) return;
+    touch();
+    if (!open) return settle(bodyError(400, "request.aborted", "request aborted"));
+    if (charged + chunk.length > MAX_BODY_BYTES) {
+      return settle(bodyError(413, "entity.too.large", "request entity too large"));
+    }
+    // Over budget: close stalled readers (idle longest first), then refuse the youngest reader,
+    // freeing charges until this chunk fits. If this request is itself the youngest, it is the
+    // one refused.
+    while (inflightBodyBytes + chunk.length > MAX_INFLIGHT_BODY_BYTES) {
+      const stalled = stalledReader(reader, performance.now());
+      if (stalled) {
+        stalled.evict();
+        continue;
+      }
+      const youngest = youngestReader();
+      if (youngest === reader || youngest === undefined) return reader.refuse();
+      youngest.refuse();
+    }
+    inflightBodyBytes += chunk.length;
+    charged += chunk.length;
+    chunks.push(chunk);
+  });
+  source.once("end", () => settle());
+  source.on("error", () => settle(bodyError(400, "entity.decode.failed", "invalid request body")));
+  if (source !== req) req.on("error", () => settle(bodyError(400, "request.aborted", "request aborted")));
+  req.once("close", () => {
+    if (!req.complete) settle(bodyError(400, "request.aborted", "request aborted"));
+  });
+}
 
 const sendError = (res, status, code, message) => res.status(status).json({ error: { code, message } });
 
@@ -46,8 +268,9 @@ export function createNotesRouter(service) {
   // counted on INFLATED bytes. With no finite limit a ~600 KB gzip request inflates past V8's
   // maximum string length, raw-body throws a RangeError inside a stream handler, and the whole
   // process exits — /healthz and /version with it (review cf1/qa1). A request past this bound is
-  // answered 413 below; the process keeps serving.
-  router.post("/", express.json({ type: () => true, limit: MAX_BODY_BYTES }), async (req, res) => {
+  // answered 413 below; the process keeps serving. Across requests, inflated bytes in flight are
+  // bounded by MAX_INFLIGHT_BODY_BYTES (#87): past it the request is answered 503 overloaded.
+  router.post("/", readJsonBody, async (req, res) => {
     try {
       const note = await service.createNote(req.body ?? {});
       res.status(201).json({
@@ -63,12 +286,22 @@ export function createNotesRouter(service) {
       }
       console.error("POST /notes failed: " + (err?.stack || err));
       return sendError(res, 500, "internal_error", "internal error");
+    } finally {
+      // The parsed body is no longer needed: its in-flight charge may go once the response is
+      // over too (readJsonBody). Without this a client that hung up would keep the charge forever.
+      res.locals.releaseBody?.();
     }
   });
 
   // Body-parser failures (malformed JSON, bad charset/encoding) reach here with a 4xx
   // status. Answer in the API's format instead of Express's HTML error page.
   router.use((err, _req, res, next) => {
+    if (err?.type === "entity.overloaded") {
+      // Like db_unavailable a "try again later" 503, but a distinct code: the database is fine,
+      // this process is holding too many request bodies. The message never echoes the request.
+      res.set("Retry-After", String(OVERLOADED_RETRY_AFTER_SECONDS));
+      return sendError(res, 503, "overloaded", "the server is busy, try again later");
+    }
     if (err?.type === "entity.too.large") {
       return sendError(res, 413, "payload_too_large", "request body exceeds " + MAX_BODY_BYTES + " bytes");
     }

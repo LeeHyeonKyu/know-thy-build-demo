@@ -1288,3 +1288,86 @@ describe("issue #87 — concurrent inflating bodies cannot take the process down
     });
   }, BURST_TIMEOUT_MS);
 });
+
+describe("issue #87 rework — a client that hangs up after its upload does not free the budget (cf1)", () => {
+  // cf1: `fits` raw-socket clients each send a COMPLETE valid near-cap note. The server parses each
+  // one and its INSERT queues behind a SHARE lock, so each request now holds a parsed ~16 MiB note
+  // while it waits on Postgres. Then every client destroys its socket. The notes are still in the
+  // server's memory, so their charges must stay: a near-cap probe sent after the hang-ups is still
+  // refused 503 overloaded. An implementation that releases on the socket 'close' admits the probe
+  // (it parses, fails JSON.parse, and answers 400). Once the lock is gone and the handlers settle,
+  // the budget is free again: the probe gets 400 and a near-cap note gets 201 (no leak).
+  test("test_87_budget_held_after_client_hangs_up_while_note_waits_on_db", async () => {
+    const fits = Math.floor(MAX_INFLIGHT_BODY_BYTES / NEAR_CAP);
+    expect(fits, "near-cap requests the budget holds at once").toBeGreaterThanOrEqual(1);
+    const title = uniqueMarker("dw87-cf1");
+    const noteGz = await gzipNote(title, NEAR_CAP);
+    const probeGz = await gzipUnterminated(NEAR_CAP);
+    const appName = "fq87-hangup-" + randomUUID();
+    await withScratchAppEnv("hangup", { PGAPPNAME: appName }, async ({ app, client }) => {
+      expect((await getList(app.base)).res.status).toBe(200); // creates the table
+      const queuedOnLock = async () =>
+        (await client.query(
+          "select count(*)::int as n from pg_stat_activity where application_name = $1 and wait_event_type = 'Lock'",
+          [appName],
+        )).rows[0].n;
+      const url = new URL(app.base);
+      const locker = new pg.Client({ ...DB, database: client.database });
+      await locker.connect();
+      const sockets = [];
+      const probes = [];
+      try {
+        await locker.query("begin");
+        await locker.query("lock table notes in share mode");
+        for (let i = 0; i < fits; i += 1) {
+          const socket = connect(Number(url.port), url.hostname);
+          socket.on("error", () => {});
+          sockets.push(socket);
+          await once(socket, "connect");
+          socket.write(
+            "POST /notes HTTP/1.1\r\nHost: " + url.host + "\r\nContent-Type: application/json\r\n" +
+              "Content-Encoding: gzip\r\nContent-Length: " + noteGz.length + "\r\n\r\n",
+          );
+          socket.write(noteGz);
+        }
+        // Every upload is complete and parsed: its INSERT is waiting on the lock.
+        await vi.waitFor(
+          async () => {
+            const n = await queuedOnLock();
+            if (n < fits) throw new Error(n + " of " + fits + " inserts queued on the lock");
+          },
+          { timeout: 20000, interval: 10 },
+        );
+        for (const socket of sockets) socket.destroy();
+        // A round trip on a fresh connection after the hang-ups: the server has seen the FINs.
+        expect((await getWithin(app.base, "/healthz")).status).toBe(200);
+        for (let i = 0; i < 3; i += 1) probes.push(await postGzip(app.base, probeGz));
+        expect(await queuedOnLock(), "the parsed notes were still waiting on Postgres while probing").toBe(fits);
+      } finally {
+        for (const socket of sockets) socket.destroy();
+        await locker.query("rollback").catch(() => {});
+        await locker.end().catch(() => {});
+      }
+      const summary = JSON.stringify(tally(probes)) + "; app stderr: " + app.out.stderr.slice(-1500);
+      for (const probe of probes) {
+        expect(probe.status, "probe while hung-up clients' notes wait on Postgres: " + summary).toBe(503);
+        expect(probe.body?.error?.code, summary).toBe("overloaded");
+      }
+
+      // The handlers settle once the lock is gone; then the whole budget is free again.
+      await vi.waitFor(
+        async () => {
+          const probe = await postGzip(app.base, probeGz);
+          if (probe.status !== 400) throw new Error("budget still occupied after the handlers settled: " + probe.status + " " + probe.body?.error?.code);
+        },
+        { timeout: 20000, interval: 50 },
+      );
+      const afterTitle = uniqueMarker("dw87-cf1-after");
+      const after = await postGzip(app.base, await gzipNote(afterTitle, NEAR_CAP));
+      expect(after.status, JSON.stringify(after.body)).toBe(201);
+      const { rows } = await client.query("select count(*)::int as n from notes where title = $1", [afterTitle]);
+      expect(rows[0].n).toBe(1);
+      expect(app.dead()).toBe(false);
+    });
+  }, BURST_TIMEOUT_MS);
+});

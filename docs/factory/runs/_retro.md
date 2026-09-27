@@ -1,43 +1,44 @@
 # Retro State
 
-- last retro: 2026-09-26T16:11:19.038Z
-- merges since last retro: 1
-- current N: 2
+- last retro: 2026-09-27T00:26:49.022Z
+- merges since last retro: 0
+- current N: 1
 
 ## History (last 5)
 
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
-| 2026-09-12T17:07:22.748Z | 1 | 1 | 1 | 3 |
 | 2026-09-20T11:32:45.992Z | 7 | 1 | 1 | 16 |
 | 2026-09-21T02:34:43.093Z | 3 | 1 | 1 | 2 |
 | 2026-09-26T16:08:25.967Z | 0 | 1 | 1 | 3 |
 | 2026-09-26T16:11:19.038Z | 0 | 1 | 2 | 0 |
+| 2026-09-27T00:26:49.022Z | 0 | 2 | 1 | 4 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 1 | 5 |
-| review rounds avg | 1 | 1 |
-| rounds/issue (plan/impl/review) | 1 / 1 / 1 | 0.8 / 1 / 1 |
-| escaped defects | 0 | 0 |
-| revert rate | 0.00 (0/1) | 0.00 (0/5) |
-| needs-human | 3 | 24 |
-| rejects by role | 없음 | 없음 |
-| reviewer overlap | 없음 | 없음 |
-| unique findings by role | 없음 | 없음 |
-| qa na ratio | 0.11 (1/9 claims, na-heavy 0/1 approvals) | 0.03 (1/38 claims, na-heavy 0/3 approvals) |
-| cost (usd) | 52.09 | 675.31 |
-| tokens | input 5346613 / output 131299 | input 12029982 / output 1254954 |
-| retro cost (usd) | 0.00 | 5.79 |
-| retro tokens | input 0 / output 0 | input 10 / output 11866 |
-| full retros | — | 5 |
+| merged | 2 | 7 |
+| review rounds avg | 2 | 1.29 |
+| rounds/issue (plan/impl/review) | 1 / 2.5 / 2 | 0.86 / 1.43 / 1.29 |
+| escaped defects | 2 (#76×2) | 2 |
+| revert rate | 0.00 (0/2) | 0.00 (0/7) |
+| needs-human | 4 | 28 |
+| rejects by role | correctness 3, qa 1 | correctness 3, qa 1 |
+| reviewer overlap | 0.29 (2/7, runs 4) | 0.29 (2/7, runs 8) |
+| unique findings by role | correctness 3, qa 2 | correctness 3, qa 2 |
+| qa na ratio | 0.11 (1/9 claims, na-heavy 0/1 approvals) | 0.04 (2/47 claims, na-heavy 0/4 approvals) |
+| cost (usd) | 67.64 | 742.95 |
+| tokens | input 6262994 / output 168174 | input 18292976 / output 1423128 |
+| retro cost (usd) | 1.18 | 6.97 |
+| retro tokens | input 2 / output 1822 | input 12 / output 13688 |
+| full retros | — | 6 |
 
 ### Rounds per issue (this window)
 
 | issue | plan | implement | review | escaped |
 | --- | --- | --- | --- | --- |
+| #76 | 1 | 4 | 3 | 2 |
 | #58 | 1 | 1 | 1 | 0 |
 
 ### Phase-2 gate baseline (this session)
@@ -52,11 +53,11 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-09-26T16:11:19.038Z",
+    "last_retro_at": "2026-09-27T00:26:49.022Z",
     "last_record_offsets": {}
   },
-  "merges_since": 1,
-  "n": 2,
+  "merges_since": 0,
+  "n": 1,
   "history": [
     {
       "at": "2026-09-12T17:07:22.748Z",
@@ -367,6 +368,115 @@
       ],
       "n_before": 1,
       "n_after": 2
+    },
+    {
+      "at": "2026-09-27T00:26:49.022Z",
+      "yield": 0,
+      "needs_human_since": 4,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            76,
+            58
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "current": "bot-hk",
+              "reason": "current factory identity: bot-hk (machine user/app, viewer); older runs in this window ran under a shared identity (LeeHyeonKyu) — their human decisions are unverifiable, nothing to register"
+            },
+            {
+              "kind": "unverifiable-decision",
+              "step": "feedback-route",
+              "issue": 76,
+              "author": "LeeHyeonKyu",
+              "reason": "shared identity — author equals a factory login; cannot distinguish a person from an agent",
+              "detail": "human-decision:v1 (skill=unstick) by @LeeHyeonKyu declares `cause: factory-defect` (ktb_fix: 1.4.13) — REFUSED as evidence: @LeeHyeonKyu is also a factory login"
+            },
+            {
+              "kind": "product",
+              "step": "feedback-route",
+              "issue": 76,
+              "count": 4
+            },
+            {
+              "kind": "unverifiable-decision",
+              "step": "feedback-route",
+              "issue": 58,
+              "author": "LeeHyeonKyu",
+              "reason": "shared identity — author equals a factory login; cannot distinguish a person from an agent",
+              "detail": "human-decision:v1 (skill=unstick) by @LeeHyeonKyu declares `cause: factory-defect` (ktb_fix: 1.4.7) — REFUSED as evidence: @LeeHyeonKyu is also a factory login"
+            }
+          ]
+        },
+        {
+          "step": "lessons:factory-builder",
+          "added": [
+            "L-2026-09-27-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "lessons:builder",
+          "added": [],
+          "rejected": [],
+          "evicted": [],
+          "cited": [
+            {
+              "id": "L-2026-09-21-01",
+              "from": 0,
+              "to": 1
+            }
+          ]
+        },
+        {
+          "step": "lessons:qa",
+          "added": [],
+          "rejected": [],
+          "evicted": [],
+          "cited": [
+            {
+              "id": "L-2026-09-20-02",
+              "from": 1,
+              "to": 3
+            },
+            {
+              "id": "L-2026-09-20-01",
+              "from": 0,
+              "to": 2
+            }
+          ]
+        },
+        {
+          "step": "role:factory-builder",
+          "added": [
+            {
+              "section": "## Perspectives",
+              "text": "**새벽 3시의 DB**: 연결 거부, 틀린 비밀번호, 없는 DB 이름, 말없이 끊긴 연결, 받고 대답하지 않는 연결. 이 다섯 경우 각각에서 내 요청은 몇 초 뒤 어떤 상태 코드로 끝나고, 그때 행은 쓰였는가"
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 88,
+          "merged": false,
+          "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know-thy-build-demo#88 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
+          "files": [
+            ".factory/lessons/factory-builder.md",
+            ".factory/lessons/reviewer-qa.md",
+            ".claude/agents/factory-builder.md"
+          ]
+        }
+      ],
+      "n_before": 2,
+      "n_after": 1
     }
   ],
   "candidates": {
@@ -746,6 +856,46 @@
           76
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "`limit: Infinity` removes the only bound on how many bytes body-parser buffers. Because gzip/deflate inflation is on by default, a single ~600 KB unauthenticated request crashes the whole process, which also takes down /healthz and /version. That breaks the dw5/dw6 requirement that the process stays alive and keeps serving /healthz.",
+        "runs": [
+          76
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "`query_timeout` is a client-side timer only. When it fires, the app answers 503 `db_unavailable` ('try again later'), but the INSERT is still running on the server and commits afterwards. The client is told the write failed when it actually succeeded, and the suggested retry creates a duplicate note. A slow query (e.g. waiting on a lock) is not a connection failure, yet /query read timeout/ sends it down the 'unavailable' path.",
+        "runs": [
+          76
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "A single unauthenticated POST /notes with a gzip-compressed body crashes the whole Node process (not just that request), taking /healthz and /version down with it until someone restarts it. I reproduced this myself end-to-end against the production router+service (fake repo, no DB needed since the crash happens during body parsing, before the repo is ever called) — this independently confirms correctness's cf1 with my own run, not a re-read of their claim.",
+        "runs": [
+          76
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "When the INSERT is merely slow/blocked on the server (e.g. waiting on a lock) rather than actually failed, the client-side query_timeout fires and the app answers 503 db_unavailable ('try again later'), but the INSERT is not aborted server-side and commits anyway. The user is told the write failed and is invited to retry, and a retry creates a duplicate note. This directly contradicts spec 001's Key State ('DB 연결 실패 → 503, 요청 본문은 에코하지 않는다') read as 'a 503 means nothing was written' — the row exists. I reproduced this independently end-to-end against the real app process and the real compose Postgres, confirming correctness's cf2 with my own run rather than trusting their write-up.",
+        "runs": [
+          76
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The cf1 fix only closed the single-request crash. The cap applies per request, not per process, and gzip is still accepted. About 300 concurrent requests, each a ~15.5 KB gzip body that inflates to just under 16 MiB, run the V8 heap out of memory and the process exits. /healthz and /version go down with it, the same outcome cf1/qa1 was filed for. The whole attack uploads only ~4.7 MB. The spec-conformance and qa rounds verified the gzip bomb with one request only (test_76_gzip_bomb_gets_413_and_process_keeps_serving sends a single request), so that verification does not cover this case.",
+        "runs": [
+          76
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -1088,15 +1238,26 @@
         "issue": 57,
         "reason": "stage artifact missing or invalid: gates RED: failing=prove-test",
         "at": "2026-09-26T16:00:17Z"
+      },
+      {
+        "issue": 76,
+        "reason": "review rounds exhausted (K=3): 1 must_fix remain",
+        "at": "2026-09-26T23:02:56Z"
       }
     ]
   },
   "stats": {
-    "merged": 1,
-    "review_rounds_avg": 1,
+    "merged": 2,
+    "review_rounds_avg": 2,
     "plan_rounds_avg": 1,
-    "implement_rounds_avg": 1,
+    "implement_rounds_avg": 2.5,
     "rounds_per_issue": [
+      {
+        "issue": 76,
+        "plan": 1,
+        "implement": 4,
+        "review": 3
+      },
       {
         "issue": 58,
         "plan": 1,
@@ -1104,67 +1265,91 @@
         "review": 1
       }
     ],
-    "escaped_defects": 0,
-    "escaped_defects_detail": [],
+    "escaped_defects": 2,
+    "escaped_defects_detail": [
+      {
+        "issue": 76,
+        "count": 2
+      }
+    ],
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
-    "rejects_by_role": {},
-    "review_runs": 1,
-    "findings_total": 0,
-    "overlapping_findings": 0,
-    "unique_findings_by_role": {},
-    "overlap_ratio": 0,
-    "needs_human": 3,
+    "rejects_by_role": {
+      "correctness": 3,
+      "qa": 1
+    },
+    "review_runs": 4,
+    "findings_total": 7,
+    "overlapping_findings": 2,
+    "unique_findings_by_role": {
+      "correctness": 3,
+      "qa": 2
+    },
+    "overlap_ratio": 0.29,
+    "needs_human": 4,
     "qa_approvals": 1,
     "qa_claims_total": 8,
     "qa_na_total": 1,
     "qa_na_ratio": 0.11,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 52.091303,
+      "cost_usd": 67.639509,
       "tokens": {
-        "input": 5346613,
-        "output": 131299
+        "input": 6262994,
+        "output": 168174
+      }
+    },
+    "retro_usage": {
+      "cost_usd": 1.184954,
+      "tokens": {
+        "input": 2,
+        "output": 1822
       }
     }
   },
   "stats_total": {
-    "merged": 5,
-    "review_rounds_avg": 1,
-    "plan_rounds_avg": 0.8,
-    "implement_rounds_avg": 1,
-    "escaped_defects": 0,
+    "merged": 7,
+    "review_rounds_avg": 1.29,
+    "plan_rounds_avg": 0.86,
+    "implement_rounds_avg": 1.43,
+    "escaped_defects": 2,
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
-    "rejects_by_role": {},
-    "review_runs": 4,
-    "findings_total": 0,
-    "overlapping_findings": 0,
-    "unique_findings_by_role": {},
-    "overlap_ratio": 0,
-    "needs_human": 24,
-    "qa_approvals": 3,
-    "qa_claims_total": 37,
-    "qa_na_total": 1,
-    "qa_na_ratio": 0.03,
+    "rejects_by_role": {
+      "correctness": 3,
+      "qa": 1
+    },
+    "review_runs": 8,
+    "findings_total": 7,
+    "overlapping_findings": 2,
+    "unique_findings_by_role": {
+      "correctness": 3,
+      "qa": 2
+    },
+    "overlap_ratio": 0.29,
+    "needs_human": 28,
+    "qa_approvals": 4,
+    "qa_claims_total": 45,
+    "qa_na_total": 2,
+    "qa_na_ratio": 0.04,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 675.307149,
+      "cost_usd": 742.946658,
       "tokens": {
-        "input": 12029982,
-        "output": 1254954
+        "input": 18292976,
+        "output": 1423128
       }
     },
     "retro_usage": {
-      "cost_usd": 5.786943,
+      "cost_usd": 6.971897,
       "tokens": {
-        "input": 10,
-        "output": 11866
+        "input": 12,
+        "output": 13688
       }
     },
-    "retros": 5
+    "retros": 6
   },
   "deferred_proposals": [],
   "deletion_candidates": []

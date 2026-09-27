@@ -58,18 +58,32 @@ export function createNotesRepo({ pool = createPool() } = {}) {
     // two separate queries cannot make `total` disagree with the page (plan d8). The left join keeps
     // one row even when the page is empty (empty table, or offset past the end), so `total` is
     // always read from the database rather than inferred.
-    async listNotes({ limit, offset }) {
+    //
+    // Search (spec 003): `q`, when present, is an already-escaped LIKE term from the service
+    // (normalizeQuery). The SAME filter applies to the page and to the count, so `total` is the
+    // number of matching rows, not the table size (plan d2), and rows are filtered before they are
+    // sorted and paged. ESCAPE '\' is spelled out rather than relying on the default.
+    async listNotes({ limit, offset, q }) {
       await ensureSchema();
+      const params = [limit, offset];
+      let where = "";
+      if (typeof q === "string") {
+        params.push(q);
+        where = `where title ilike '%' || $3 || '%' escape '\\' or body ilike '%' || $3 || '%' escape '\\'`;
+      }
       const { rows } = await pool.query(
-        `with page as (
+        `with matching as (
            select id, title, body, created_at from notes
+           ${where}
+         ), page as (
+           select id, title, body, created_at from matching
            order by created_at desc, id desc
            limit $1 offset $2
          )
-         select (select count(*) from notes) as total, page.id, page.title, page.body, page.created_at
+         select (select count(*) from matching) as total, page.id, page.title, page.body, page.created_at
          from (select 1) as one left join page on true
          order by page.created_at desc, page.id desc`,
-        [limit, offset],
+        params,
       );
       // count(*) is a bigint, which pg returns as a string; the API contract is a number (plan d7).
       const total = Number(rows[0].total);

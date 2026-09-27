@@ -1036,4 +1036,47 @@ describe("issue #7 — GET /notes cache invalidation against the compose Postgre
       expect(after.body.items.find((n) => n.id === created.body.id)).toMatchObject({ title: "fresh after post" });
     });
   }, CASE_TIMEOUT_MS);
+
+  // dw5 at the spec's level (docs/features/004-cache-expiry.md acceptance table: integration): a
+  // POST /notes the real entrypoint rejects with 400 does NOT clear its cache. A row written by
+  // direct SQL after the warm-up GET is the witness: a cleared cache would show it (and total 1) on
+  // the next GET; a kept cache still answers with the warm-up body. Each 400 variant (validation
+  // failure and malformed JSON) is checked, and a final 201 POST shows the witness row was really
+  // in the database the whole time, so the unchanged answers were the cache and nothing else.
+  test("test_7_rejected_post_keeps_list_cache_integration", async () => {
+    await withFrozenClockScratchApp("c7keep", async ({ app, client }) => {
+      expect(app.out.stderr, "the frozen-clock preload ran in the app process").toContain(FROZEN_CLOCK_MARK);
+
+      const warm = await getList(app.base);
+      expect(warm.res.status).toBe(200);
+      expect(warm.body.total).toBe(0);
+
+      const [direct] = await insertNotes(client, [
+        { title: "direct sql witness", body: "not through POST", createdAt: "2026-07-01T08:00:00Z" },
+      ]);
+
+      const invalid = await postJson(app.base, { title: "   ", body: "blank title" });
+      expect(invalid.res.status).toBe(400);
+      expect(invalid.body?.error?.code).toBe("invalid_request");
+      const afterInvalid = await getList(app.base);
+      expect(afterInvalid.res.status).toBe(200);
+      expect(afterInvalid.text, "a 400 validation failure must not clear the cache").toBe(warm.text);
+
+      const malformed = await send(app.base, "/notes", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: '{"title": "broken", "body": ',
+      });
+      expect(malformed.res.status).toBe(400);
+      const afterMalformed = await getList(app.base);
+      expect(afterMalformed.res.status).toBe(200);
+      expect(afterMalformed.text, "a 400 malformed-JSON POST must not clear the cache").toBe(warm.text);
+
+      const created = await postJson(app.base, makeNote({ title: "control create" }));
+      expect(created.res.status).toBe(201);
+      const after = await getList(app.base);
+      expect(after.body.total).toBe(2);
+      expect(after.body.items.map((n) => n.id)).toContain(direct.id);
+    });
+  }, CASE_TIMEOUT_MS);
 });

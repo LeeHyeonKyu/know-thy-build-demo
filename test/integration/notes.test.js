@@ -930,3 +930,45 @@ describe("issue #6 — GET /notes?q= against the compose Postgres", () => {
     });
   }, CASE_TIMEOUT_MS);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Issue #7 — GET /notes response cache (spec docs/features/004-cache-expiry.md) against the real
+// entrypoint and the compose Postgres. TTL timing is pinned in-process (test/notes.test.js, plan
+// d2); this case covers the part that does not depend on time: a 201 POST /notes clears the cache
+// the production process builds by default. A throwaway database per case (withScratchApp, the #5
+// technique) keeps `total` a statement about this case's rows only.
+describe("issue #7 — GET /notes cache invalidation against the compose Postgres", () => {
+  // dw4: GET, then a 201 POST, then the same GET right away: the new note and a total one higher.
+  // Before the POST, a row written by direct SQL (which does not go through POST /notes) is not
+  // yet visible to the repeated GET — the entrypoint really serves it from its cache, so the fresh
+  // answer after the POST is the invalidation at work, not an uncached read. That observation is
+  // only made while the two GETs are inside the 5000 ms TTL (measured, never waited for).
+  test("test_7_post_created_invalidates_list_cache", async () => {
+    await withScratchApp("c7inval", async ({ app, client }) => {
+      const started = Date.now();
+      const warm = await getList(app.base);
+      expect(warm.res.status).toBe(200);
+      expect(warm.body.total).toBe(0);
+
+      const [direct] = await insertNotes(client, [
+        { title: "direct sql", body: "not through POST", createdAt: "2026-07-01T08:00:00Z" },
+      ]);
+      const repeated = await getList(app.base);
+      expect(repeated.res.status).toBe(200);
+      if (Date.now() - started < 4000) {
+        expect(repeated.text, "same query inside the TTL is served from the cache").toBe(warm.text);
+      }
+
+      const created = await postJson(app.base, makeNote({ title: "fresh after post" }));
+      expect(created.res.status).toBe(201);
+
+      const after = await getList(app.base);
+      expect(after.res.status).toBe(200);
+      expect(after.body.total).toBe(2);
+      const ids = after.body.items.map((n) => n.id);
+      expect(ids).toContain(created.body.id);
+      expect(ids).toContain(direct.id);
+      expect(after.body.items.find((n) => n.id === created.body.id)).toMatchObject({ title: "fresh after post" });
+    });
+  }, CASE_TIMEOUT_MS);
+});

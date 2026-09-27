@@ -1,3 +1,4 @@
+import http from "node:http";
 import express from "express";
 import { readVersion } from "./version.js";
 import { createNotesRouter } from "./routes/notes.js";
@@ -36,4 +37,17 @@ function resolvePort(raw) {
   process.exit(1);
 }
 const port = resolvePort(process.env.PORT);
-app.listen(port, () => console.log(`listening on ${port}`));
+// Silent clients are closed by Node itself (#87 ruling): a request must be fully received within
+// REQUEST_TIMEOUT_MS and its headers within HEADERS_TIMEOUT_MS, checked every CHECK_INTERVAL_MS
+// (Node's defaults are 300 s / 60 s, checked every 30 s — long enough for a few silent uploads to
+// hold POST /notes' body budget for minutes, renewable by reconnecting; review qa1). Node answers
+// such a request 408 and closes the connection. Trade-off: an upload slower than
+// MAX_BODY_BYTES / 30 s (~550 KB/s) for a full-size note is cut off (plan d11).
+const REQUEST_TIMEOUT_MS = 30000;
+const HEADERS_TIMEOUT_MS = 10000;
+const CHECK_INTERVAL_MS = 1000;
+const server = http.createServer(
+  { requestTimeout: REQUEST_TIMEOUT_MS, headersTimeout: HEADERS_TIMEOUT_MS, connectionsCheckingInterval: CHECK_INTERVAL_MS },
+  app,
+);
+server.listen(port, () => console.log(`listening on ${port}`));

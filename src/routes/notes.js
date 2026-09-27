@@ -19,26 +19,50 @@ export const MAX_BODY_BYTES = 16 * 1024 * 1024;
 // close) AND, if the body was parsed, until the route handler is done with it — not merely until
 // parsing ends or the client hangs up, because a parsed 16 MiB note still sits in memory while it
 // waits on Postgres.
-// When a chunk would push the total past this bound, requests are refused with 503 `overloaded`
-// in arrival order, youngest first: the youngest request still reading its body is refused (and
-// its charge freed) until the chunk fits or the youngest is the one that sent it. So the oldest
-// reader always makes progress. Refusing whoever happened to send the overflowing chunk instead
-// starved everyone under interleaved uploads: each request held a partial, doomed slice (review qa1).
+// When a chunk would push the total past this bound, room is made in this order until it fits:
+// 1. A STALLED reader goes first — one that holds a charge but has received no bytes (on the wire
+//    or out of the decompressor) for STALLED_READER_MS; the one idle longest is picked. Its charge
+//    is freed, it is answered 408 as a client error and its connection is closed. Without this, a
+//    few clients that upload most of a near-cap body and then go silent hold the budget forever and
+//    every newer request is the one refused (review round 3 qa1, #87 ruling item 1).
+// 2. Otherwise requests are refused with 503 `overloaded` youngest first: the youngest request
+//    still reading its body is refused (and its charge freed) until the chunk fits or the youngest
+//    is the one that sent it. So the oldest active reader always makes progress. Refusing whoever
+//    happened to send the overflowing chunk instead starved everyone under interleaved uploads:
+//    each request held a partial, doomed slice (review qa1). Readers that are merely busy are
+//    never closed this way, so every request of an active burst still gets its 503 answer.
+// A reader that trickles bytes is never "stalled"; it is bounded by the server's requestTimeout
+// (src/app.js).
 // It must stay >= MAX_BODY_BYTES so an idle process still admits one full-size note.
 // What is NOT bounded here: the copies JSON.parse and the driver make on top of the raw bytes, so
 // the real peak is a small multiple of this number (plan open_risks).
 export const MAX_INFLIGHT_BODY_BYTES = 4 * MAX_BODY_BYTES;
 export const OVERLOADED_RETRY_AFTER_SECONDS = 1;
+// How long a charged reader may receive nothing before it counts as stalled (see above). Long
+// enough that a reader that is only waiting its turn in a busy burst is not mistaken for one.
+export const STALLED_READER_MS = 5000;
 
 let inflightBodyBytes = 0;
 // Requests still reading their body, in arrival order (a Set iterates in insertion order). Each
-// entry is the function that refuses that request as overloaded.
+// entry is {refuse, evict, charged(), lastActivity}: refuse answers 503 overloaded, evict closes a
+// stalled reader.
 const readers = new Set();
 const youngestReader = () => {
   let last;
-  for (const refuse of readers) last = refuse;
+  for (const reader of readers) last = reader;
   return last;
 };
+// The charged reader other than `self` that has been idle longest, if it has been idle for at
+// least STALLED_READER_MS.
+function stalledReader(self, now) {
+  let found;
+  for (const reader of readers) {
+    if (reader === self || reader.charged() === 0) continue;
+    if (now - reader.lastActivity < STALLED_READER_MS) continue;
+    if (!found || reader.lastActivity < found.lastActivity) found = reader;
+  }
+  return found;
+}
 
 const bodyError = (status, type, message) => Object.assign(new Error(message), { status, type });
 
@@ -109,10 +133,12 @@ function readJsonBody(req, res, next) {
 
   const chunks = [];
   let settled = false;
-  const settle = (err) => {
+  // `closeNow`: answer at once and close the connection instead of draining the upload first —
+  // for a stalled reader, whose upload may never end.
+  const settle = (err, closeNow = false) => {
     if (settled) return;
     settled = true;
-    readers.delete(refuse);
+    readers.delete(reader);
     if (!err) {
       let body;
       try {
@@ -144,6 +170,13 @@ function readJsonBody(req, res, next) {
       source.destroy();
     }
     if (req.readableEnded || req.destroyed) return next(err);
+    if (closeNow) {
+      // Node ends and destroys the connection once this response is sent (Connection: close).
+      // Whatever the client still sends until then is read off and discarded.
+      res.set("Connection", "close");
+      req.resume();
+      return next(err);
+    }
     let answered = false;
     const answer = () => {
       if (answered) return;
@@ -154,21 +187,38 @@ function readJsonBody(req, res, next) {
     req.once("close", answer);
     req.resume();
   };
-  const refuse = () => settle(bodyError(503, "entity.overloaded", "too many request body bytes in flight"));
-  readers.add(refuse);
+  const reader = {
+    refuse: () => settle(bodyError(503, "entity.overloaded", "too many request body bytes in flight")),
+    evict: () => settle(bodyError(408, "request.stalled", "request body stalled"), true),
+    charged: () => charged,
+    lastActivity: performance.now(),
+  };
+  readers.add(reader);
+  const touch = () => {
+    reader.lastActivity = performance.now();
+  };
+  // Bytes arriving on the wire count as activity even before the decompressor emits anything.
+  if (source !== req) req.on("data", touch);
 
   source.on("data", (chunk) => {
     if (settled) return;
+    touch();
     if (!open) return settle(bodyError(400, "request.aborted", "request aborted"));
     if (charged + chunk.length > MAX_BODY_BYTES) {
       return settle(bodyError(413, "entity.too.large", "request entity too large"));
     }
-    // Over budget: refuse the youngest reader (freeing its charge) until this chunk fits. If this
-    // request is itself the youngest, it is the one refused.
+    // Over budget: close stalled readers (idle longest first), then refuse the youngest reader,
+    // freeing charges until this chunk fits. If this request is itself the youngest, it is the
+    // one refused.
     while (inflightBodyBytes + chunk.length > MAX_INFLIGHT_BODY_BYTES) {
+      const stalled = stalledReader(reader, performance.now());
+      if (stalled) {
+        stalled.evict();
+        continue;
+      }
       const youngest = youngestReader();
-      if (youngest === refuse || youngest === undefined) return refuse();
-      youngest();
+      if (youngest === reader || youngest === undefined) return reader.refuse();
+      youngest.refuse();
     }
     inflightBodyBytes += chunk.length;
     charged += chunk.length;

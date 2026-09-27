@@ -933,19 +933,50 @@ describe("issue #6 — GET /notes?q= against the compose Postgres", () => {
 
 // ---------------------------------------------------------------------------------------------
 // Issue #7 — GET /notes response cache (spec docs/features/004-cache-expiry.md) against the real
-// entrypoint and the compose Postgres. TTL timing is pinned in-process (test/notes.test.js, plan
+// entrypoint and the compose Postgres. TTL expiry is pinned in-process (test/notes.test.js, plan
 // d2); this case covers the part that does not depend on time: a 201 POST /notes clears the cache
-// the production process builds by default. A throwaway database per case (withScratchApp, the #5
-// technique) keeps `total` a statement about this case's rows only.
+// the production process builds by default. A throwaway database per case (the #5 technique) keeps
+// `total` a statement about this case's rows only.
+//
+// Determinism (docs/QA.md): the child process's clock is FROZEN, not measured. A preload passed
+// through NODE_OPTIONS replaces Date.now with a constant before src/app.js runs, so inside that
+// process no cache entry can ever reach its 5000 ms TTL however slow the runner is. The app itself
+// has no test switch; this is the same `node src/app.js` with the same default wiring.
+const FROZEN_NOW_MS = Date.parse("2026-07-01T12:00:00Z");
+const FROZEN_CLOCK_MARK = "frozen-clock:" + FROZEN_NOW_MS;
+const FROZEN_CLOCK_IMPORT =
+  "--import=data:text/javascript," +
+  encodeURIComponent(
+    "Date.now = () => " + FROZEN_NOW_MS + "; process.stderr.write(" + JSON.stringify(FROZEN_CLOCK_MARK + "\n") + ");",
+  );
+
+async function withFrozenClockScratchApp(label, fn) {
+  const dbName = "fq7_" + label + "_" + randomUUID().replace(/-/g, "");
+  await db.query("create database " + dbName);
+  const client = new pg.Client({ ...DB, database: dbName });
+  let app;
+  try {
+    await client.connect();
+    const nodeOptions = [process.env.NODE_OPTIONS, FROZEN_CLOCK_IMPORT].filter(Boolean).join(" ");
+    app = await startApp({ ...pgEnv(DB.host, DB.port), PGDATABASE: dbName, NODE_OPTIONS: nodeOptions });
+    return await fn({ app, client });
+  } finally {
+    await app?.stop();
+    await client.end().catch(() => {});
+    await db.query("drop database if exists " + dbName + " with (force)");
+  }
+}
+
 describe("issue #7 — GET /notes cache invalidation against the compose Postgres", () => {
   // dw4: GET, then a 201 POST, then the same GET right away: the new note and a total one higher.
-  // Before the POST, a row written by direct SQL (which does not go through POST /notes) is not
-  // yet visible to the repeated GET — the entrypoint really serves it from its cache, so the fresh
-  // answer after the POST is the invalidation at work, not an uncached read. That observation is
-  // only made while the two GETs are inside the 5000 ms TTL (measured, never waited for).
+  // Before the POST, a row written by direct SQL (which does not go through POST /notes) is NOT
+  // visible to the repeated GET: the entrypoint really serves it from its cache (the clock is
+  // frozen, so this is unconditional). The fresh answer after the POST is therefore the
+  // invalidation at work, not an uncached read.
   test("test_7_post_created_invalidates_list_cache", async () => {
-    await withScratchApp("c7inval", async ({ app, client }) => {
-      const started = Date.now();
+    await withFrozenClockScratchApp("c7inval", async ({ app, client }) => {
+      expect(app.out.stderr, "the frozen-clock preload ran in the app process").toContain(FROZEN_CLOCK_MARK);
+
       const warm = await getList(app.base);
       expect(warm.res.status).toBe(200);
       expect(warm.body.total).toBe(0);
@@ -955,16 +986,14 @@ describe("issue #7 — GET /notes cache invalidation against the compose Postgre
       ]);
       const repeated = await getList(app.base);
       expect(repeated.res.status).toBe(200);
-      if (Date.now() - started < 4000) {
-        expect(repeated.text, "same query inside the TTL is served from the cache").toBe(warm.text);
-      }
+      expect(repeated.text, "same query inside the TTL is served from the entrypoint's cache").toBe(warm.text);
 
       const created = await postJson(app.base, makeNote({ title: "fresh after post" }));
       expect(created.res.status).toBe(201);
 
       const after = await getList(app.base);
       expect(after.res.status).toBe(200);
-      expect(after.body.total).toBe(2);
+      expect(after.body.total).toBe(warm.body.total + 2);
       const ids = after.body.items.map((n) => n.id);
       expect(ids).toContain(created.body.id);
       expect(ids).toContain(direct.id);

@@ -1,43 +1,44 @@
 # Retro State
 
-- last retro: 2026-09-27T02:42:35.524Z
-- merges since last retro: 1
-- current N: 2
+- last retro: 2026-09-27T09:54:24.491Z
+- merges since last retro: 0
+- current N: 1
 
 ## History (last 5)
 
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
-| 2026-09-21T02:34:43.093Z | 3 | 1 | 1 | 2 |
 | 2026-09-26T16:08:25.967Z | 0 | 1 | 1 | 3 |
 | 2026-09-26T16:11:19.038Z | 0 | 1 | 2 | 0 |
 | 2026-09-27T00:26:49.022Z | 0 | 2 | 1 | 4 |
 | 2026-09-27T02:42:35.524Z | 0 | 1 | 2 | 0 |
+| 2026-09-27T09:54:24.491Z | 0 | 2 | 1 | 5 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 1 | 8 |
-| review rounds avg | 1 | 1.25 |
-| rounds/issue (plan/impl/review) | 1 / 1 / 1 | 0.88 / 1.38 / 1.25 |
-| escaped defects | 0 | 2 |
-| revert rate | 0.00 (0/1) | 0.00 (0/8) |
-| needs-human | 2 | 28 |
-| rejects by role | 없음 | correctness 3, qa 1 |
-| reviewer overlap | 없음 | 0.29 (2/7, runs 9) |
-| unique findings by role | 없음 | correctness 3, qa 2 |
-| qa na ratio | 0.00 (0/7 claims, na-heavy 0/1 approvals) | 0.04 (2/54 claims, na-heavy 0/5 approvals) |
-| cost (usd) | 28.52 | 747.84 |
-| tokens | input 932853 / output 67999 | input 18589493 / output 1441943 |
-| retro cost (usd) | 0.00 | 8.07 |
-| retro tokens | input 0 / output 0 | input 14 / output 16296 |
-| full retros | — | 7 |
+| merged | 2 | 10 |
+| review rounds avg | 2 | 1.4 |
+| rounds/issue (plan/impl/review) | 1.5 / 2.5 / 2 | 1 / 1.6 / 1.4 |
+| escaped defects | 2 (#87×2) | 4 |
+| revert rate | 0.00 (0/2) | 0.00 (0/10) |
+| needs-human | 5 | 33 |
+| rejects by role | correctness 1, qa 2 | correctness 4, qa 3 |
+| reviewer overlap | 0.00 (0/3, runs 5) | 0.20 (2/10, runs 14) |
+| unique findings by role | correctness 1, qa 2 | correctness 4, qa 4 |
+| qa na ratio | 0.00 (0/20 claims, na-heavy 0/2 approvals) | 0.03 (2/74 claims, na-heavy 0/7 approvals) |
+| cost (usd) | 58.29 | 806.13 |
+| tokens | input 2471724 / output 148462 | input 21061217 / output 1590405 |
+| retro cost (usd) | 1.26 | 9.33 |
+| retro tokens | input 2 / output 2714 | input 16 / output 19010 |
+| full retros | — | 8 |
 
 ### Rounds per issue (this window)
 
 | issue | plan | implement | review | escaped |
 | --- | --- | --- | --- | --- |
+| #87 | 2 | 4 | 3 | 2 |
 | #6 | 1 | 1 | 1 | 0 |
 
 ### Phase-2 gate baseline (this session)
@@ -52,11 +53,11 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-09-27T02:42:35.524Z",
+    "last_retro_at": "2026-09-27T09:54:24.491Z",
     "last_record_offsets": {}
   },
-  "merges_since": 1,
-  "n": 2,
+  "merges_since": 0,
+  "n": 1,
   "history": [
     {
       "at": "2026-09-12T17:07:22.748Z",
@@ -570,6 +571,104 @@
       ],
       "n_before": 1,
       "n_after": 2
+    },
+    {
+      "at": "2026-09-27T09:54:24.491Z",
+      "yield": 0,
+      "needs_human_since": 5,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            87,
+            6
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "current": "bot-hk",
+              "reason": "current factory identity: bot-hk (machine user/app, viewer); older runs in this window ran under a shared identity (LeeHyeonKyu) — their human decisions are unverifiable, nothing to register"
+            }
+          ]
+        },
+        {
+          "step": "lessons:reviewer-qa",
+          "added": [
+            "L-2026-09-27-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "lessons:plan-synthesizer",
+          "added": [
+            "L-2026-09-27-01",
+            "L-2026-09-27-02"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "lessons:qa",
+          "added": [],
+          "rejected": [],
+          "evicted": [],
+          "cited": [
+            {
+              "id": "L-2026-09-20-02",
+              "from": 1,
+              "to": 7
+            },
+            {
+              "id": "L-2026-09-20-01",
+              "from": 0,
+              "to": 1
+            }
+          ]
+        },
+        {
+          "step": "lessons:builder",
+          "added": [],
+          "rejected": [],
+          "evicted": [],
+          "cited": [
+            {
+              "id": "L-2026-09-21-01",
+              "from": 0,
+              "to": 1
+            }
+          ]
+        },
+        {
+          "step": "role:plan-skeptic",
+          "added": [
+            {
+              "section": "### 좋은 발견",
+              "text": "위치: 새 동작 때문에 깨지는 기존 테스트 줄이다. #45는 `test/smoke.test.js:228,240,260,272,308`의 `expect(body).toEqual({ version: expect.any(String) })`, #7은 `test/integration/notes.test.js`가 직접 SQL로 행을 넣은 뒤 같은 GET을 반복하는 689/696·745/755 등이다. 주장: 이 계획대로 만들면 load-bearing 테스트가 RED가 된다. #45에서는 `node` 필드가 키 집합을 깨고, #7에서는 5초…"
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 97,
+          "merged": false,
+          "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know-thy-build-demo#97 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
+          "files": [
+            ".factory/lessons/reviewer-qa.md",
+            ".factory/lessons/plan-synthesizer.md",
+            ".factory/lessons/factory-builder.md",
+            ".claude/agents/plan-skeptic.md"
+          ]
+        }
+      ],
+      "n_before": 2,
+      "n_after": 1
     }
   ],
   "candidates": {
@@ -1005,6 +1104,22 @@
           87
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "A handful of clients (as few as 4, the same 'fits' count the shipped tests derive) can lock out every legitimate POST /notes uploader indefinitely by uploading part of a near-cap body and then going completely silent — never finishing, never erroring, never closing the socket. Because the eviction policy only ever refuses the *youngest* still-reading request, and any later arrival is by definition younger than an earlier stalled one, the stalled connections can never be the ones evicted; new legitimate requests get refused instead. The only backstop is Node's unconfigured default requestTimeout (5 minutes), which src/app.js never sets and which an attacker can renew indefinitely just by reconnecting before it fires. This defeats dw3's promise that the budget is 'fully released rather than leaking into permanent 503s,' and replaces the ~300-connection heap-exhaustion DoS #87 set out to close with a cheaper, more sustainable 4-connection DoS.",
+        "runs": [
+          87
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The spec's own acceptance-criteria table pins the 400-rejection edge case at `verify: integration, fake timers (level: full)` — the same level as the 201-invalidation criterion (dw4). The plan silently delivered dw5 at `level: unit`, backed only by `test_7_rejected_post_keeps_cache`, which runs against a bare in-process Express app wired to a hand-written fake repo (`startCached()` at test/notes.test.js:486-493 — `express()` + `createNotesRouter(createNotesService(repo, {now: clock.now}))`, no child process, no compose Postgres, no real entrypoint). No test anywhere in the diff exercises a real 400 response from `node src/app.js` against the real database leaving the real cache alone. Unlike dw1/dw2, whose downgrade from the spec's integration/full to unit is explicitly argued in plan dissent d2 (vi.useFakeTimers cannot reach a spawned child process's clock), no dissent entry (d1-d7) discusses or justifies downgrading this specific criterion, and d2's own justification does not transfer here: a 400-POST-then-immediate-GET needs no time travel (it can run in real time in milliseconds, the same way dw4 already runs a real GET/POST/GET sequence against the compose Postgres at test/integration/notes.test.js:1010-1038). This criterion could have been added to that same integration block with no fake-timer obstacle, and was not.",
+        "runs": [
+          7
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -1374,16 +1489,27 @@
       {
         "issue": 7,
         "reason": "stage artifact missing or invalid: gates RED: failing=unit,new-test-repeat",
-        "at": "2026-09-27T07:36:47Z"
+        "at": "2026-09-27T08:56:37Z"
+      },
+      {
+        "issue": 87,
+        "reason": "review rounds exhausted (K=3): 1 must_fix remain",
+        "at": "2026-09-27T08:34:01Z"
       }
     ]
   },
   "stats": {
-    "merged": 1,
-    "review_rounds_avg": 1,
-    "plan_rounds_avg": 1,
-    "implement_rounds_avg": 1,
+    "merged": 2,
+    "review_rounds_avg": 2,
+    "plan_rounds_avg": 1.5,
+    "implement_rounds_avg": 2.5,
     "rounds_per_issue": [
+      {
+        "issue": 87,
+        "plan": 2,
+        "implement": 4,
+        "review": 3
+      },
       {
         "issue": 6,
         "plan": 1,
@@ -1391,73 +1517,91 @@
         "review": 1
       }
     ],
-    "escaped_defects": 0,
-    "escaped_defects_detail": [],
-    "reverts": 0,
-    "reverted_issues": [],
-    "revert_rate": 0,
-    "rejects_by_role": {},
-    "review_runs": 1,
-    "findings_total": 0,
-    "overlapping_findings": 0,
-    "unique_findings_by_role": {},
-    "overlap_ratio": 0,
-    "needs_human": 2,
-    "qa_approvals": 1,
-    "qa_claims_total": 7,
-    "qa_na_total": 0,
-    "qa_na_ratio": 0,
-    "qa_na_heavy_approvals": 0,
-    "usage": {
-      "cost_usd": 28.515754,
-      "tokens": {
-        "input": 932853,
-        "output": 67999
-      }
-    }
-  },
-  "stats_total": {
-    "merged": 8,
-    "review_rounds_avg": 1.25,
-    "plan_rounds_avg": 0.88,
-    "implement_rounds_avg": 1.38,
     "escaped_defects": 2,
+    "escaped_defects_detail": [
+      {
+        "issue": 87,
+        "count": 2
+      }
+    ],
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {
-      "correctness": 3,
-      "qa": 1
-    },
-    "review_runs": 9,
-    "findings_total": 7,
-    "overlapping_findings": 2,
-    "unique_findings_by_role": {
-      "correctness": 3,
+      "correctness": 1,
       "qa": 2
     },
-    "overlap_ratio": 0.29,
-    "needs_human": 28,
-    "qa_approvals": 5,
-    "qa_claims_total": 52,
-    "qa_na_total": 2,
-    "qa_na_ratio": 0.04,
+    "review_runs": 5,
+    "findings_total": 3,
+    "overlapping_findings": 0,
+    "unique_findings_by_role": {
+      "correctness": 1,
+      "qa": 2
+    },
+    "overlap_ratio": 0,
+    "needs_human": 5,
+    "qa_approvals": 2,
+    "qa_claims_total": 20,
+    "qa_na_total": 0,
+    "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 747.844302,
+      "cost_usd": 58.285158,
       "tokens": {
-        "input": 18589493,
-        "output": 1441943
+        "input": 2471724,
+        "output": 148462
       }
     },
     "retro_usage": {
-      "cost_usd": 8.068284,
+      "cost_usd": 1.259906,
       "tokens": {
-        "input": 14,
-        "output": 16296
+        "input": 2,
+        "output": 2714
+      }
+    }
+  },
+  "stats_total": {
+    "merged": 10,
+    "review_rounds_avg": 1.4,
+    "plan_rounds_avg": 1,
+    "implement_rounds_avg": 1.6,
+    "escaped_defects": 4,
+    "reverts": 0,
+    "reverted_issues": [],
+    "revert_rate": 0,
+    "rejects_by_role": {
+      "correctness": 4,
+      "qa": 3
+    },
+    "review_runs": 14,
+    "findings_total": 10,
+    "overlapping_findings": 2,
+    "unique_findings_by_role": {
+      "correctness": 4,
+      "qa": 4
+    },
+    "overlap_ratio": 0.2,
+    "needs_human": 33,
+    "qa_approvals": 7,
+    "qa_claims_total": 72,
+    "qa_na_total": 2,
+    "qa_na_ratio": 0.03,
+    "qa_na_heavy_approvals": 0,
+    "usage": {
+      "cost_usd": 806.12946,
+      "tokens": {
+        "input": 21061217,
+        "output": 1590405
       }
     },
-    "retros": 7
+    "retro_usage": {
+      "cost_usd": 9.32819,
+      "tokens": {
+        "input": 16,
+        "output": 19010
+      }
+    },
+    "retros": 8
   },
   "deferred_proposals": [],
   "deletion_candidates": []

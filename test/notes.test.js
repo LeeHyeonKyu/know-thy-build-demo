@@ -437,3 +437,246 @@ describe("issue #6 — search-term normalisation without a database", () => {
     expect(() => normalizeQuery(["a", "b"])).toThrow(NotesError);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// Issue #7 — GET /notes response cache (spec docs/features/004-cache-expiry.md), DB-free unit level.
+// The route and service are the production modules. Time is an injected clock the test moves by
+// hand (never a real wait, docs/QA.md No sleep), and the repository is a counting fake whose data
+// can change between calls, so "served from cache" is observed as "the repo was not asked again
+// AND the body is the old data", not recomputed from the implementation.
+
+import { vi } from "vitest";
+
+const T0 = Date.parse("2026-01-01T00:00:00Z");
+
+function manualClock(start = T0) {
+  let now = start;
+  return {
+    now: () => now,
+    advance(ms) {
+      now += ms;
+    },
+  };
+}
+
+// A repo whose listNotes answers with a body derived from the page AND a version the test can
+// bump, so a stale cached answer and a fresh read are distinguishable.
+function versionedRepo() {
+  const repo = {
+    version: 1,
+    listCalls: [],
+    inserts: [],
+    async listNotes(page) {
+      repo.listCalls.push(page);
+      const tag = "v" + repo.version + " l" + page.limit + " o" + page.offset + " q" + (page.q ?? "-");
+      return {
+        items: [{ id: repo.version, title: tag, body: "b", created_at: new Date(T0) }],
+        total: repo.version * 10,
+      };
+    },
+    async insertNote(note) {
+      repo.inserts.push(note);
+      repo.version += 1;
+      return { id: 1000 + repo.inserts.length, ...note, created_at: new Date(T0) };
+    },
+  };
+  return repo;
+}
+
+async function startCached(repo, clock) {
+  const app = express();
+  app.use("/notes", createNotesRouter(createNotesService(repo, { now: clock.now })));
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  servers.push(server);
+  return "http://127.0.0.1:" + server.address().port;
+}
+
+describe("issue #7 — GET /notes response cache without a database", () => {
+  // dw1: the same query inside 5000 ms is answered from the cache: byte-identical 200 body, one
+  // listNotes call, even though the repository's data changed in between.
+  test("test_7_same_query_within_ttl_served_from_cache", async () => {
+    const repo = versionedRepo();
+    const clock = manualClock();
+    const base = await startCached(repo, clock);
+
+    const first = await getNotes(base, "?limit=10");
+    expect(first.res.status).toBe(200);
+    expect(first.body.items[0].title).toBe("v1 l10 o0 q-");
+
+    repo.version = 2; // the data changed behind the cache's back (no POST)
+    clock.advance(2000);
+    const second = await getNotes(base, "?limit=10");
+    expect(second.res.status).toBe(200);
+    expect(second.text).toBe(first.text);
+
+    clock.advance(2999); // T0 + 4999 ms: still inside the TTL
+    const third = await getNotes(base, "?limit=10");
+    expect(third.res.status).toBe(200);
+    expect(third.text).toBe(first.text);
+    expect(repo.listCalls).toHaveLength(1);
+  });
+
+  // dw2: once the injected clock has passed 5000 ms, the same query reads the repository again and
+  // shows the data it holds now. The clock is moved by hand; nothing waits in real time.
+  test("test_7_request_after_ttl_requeries_repo", async () => {
+    const repo = versionedRepo();
+    const clock = manualClock();
+    const base = await startCached(repo, clock);
+
+    const first = await getNotes(base, "?limit=10");
+    expect(first.body.total).toBe(10);
+
+    repo.version = 2;
+    clock.advance(5001);
+    const after = await getNotes(base, "?limit=10");
+    expect(after.res.status).toBe(200);
+    expect(after.body.total).toBe(20);
+    expect(after.body.items[0].title).toBe("v2 l10 o0 q-");
+    expect(repo.listCalls).toHaveLength(2);
+
+    // The fresh answer is cached again from its own time: 4999 ms later it is still served.
+    repo.version = 3;
+    clock.advance(4999);
+    const cachedAgain = await getNotes(base, "?limit=10");
+    expect(cachedAgain.text).toBe(after.text);
+    expect(repo.listCalls).toHaveLength(2);
+  });
+
+  // dw3: requests that differ only in limit, offset or q each reach the repository and get their
+  // own answer inside the TTL; repeating either one afterwards returns its own body, never the
+  // other query's.
+  test("test_7_distinct_query_params_do_not_share_cache", async () => {
+    const pairs = [
+      ["?limit=5", "?limit=6"],
+      ["?limit=5&offset=0", "?limit=5&offset=5"],
+      ["?q=pool", "?q=lunch"],
+      ["", "?q=pool"],
+    ];
+    for (const [a, b] of pairs) {
+      const repo = versionedRepo();
+      const clock = manualClock();
+      const base = await startCached(repo, clock);
+
+      const ra = await getNotes(base, a);
+      clock.advance(1000);
+      const rb = await getNotes(base, b);
+      expect(ra.res.status, a).toBe(200);
+      expect(rb.res.status, b).toBe(200);
+      expect(rb.text, a + " vs " + b).not.toBe(ra.text);
+      expect(repo.listCalls, a + " vs " + b).toHaveLength(2);
+
+      clock.advance(1000);
+      expect((await getNotes(base, a)).text, a).toBe(ra.text);
+      expect((await getNotes(base, b)).text, b).toBe(rb.text);
+      expect(repo.listCalls, a + " vs " + b).toHaveLength(2);
+    }
+  });
+
+  // dw5: a POST rejected with 400 leaves the cache alone — the repeated GET is still one read.
+  // The trailing 201 is the control: the same POST route, when it succeeds, does clear it.
+  test("test_7_rejected_post_keeps_cache", async () => {
+    const repo = versionedRepo();
+    const clock = manualClock();
+    const base = await startCached(repo, clock);
+
+    const first = await getNotes(base, "?limit=10");
+    repo.version = 2;
+
+    const rejected = await postNote(base, { title: "   ", body: "x" });
+    expect(rejected.res.status).toBe(400);
+    const afterReject = await getNotes(base, "?limit=10");
+    expect(afterReject.text).toBe(first.text);
+    expect(repo.listCalls).toHaveLength(1);
+    expect(repo.inserts).toHaveLength(0);
+
+    const created = await postNote(base, makeNote());
+    expect(created.res.status).toBe(201);
+    const afterCreate = await getNotes(base, "?limit=10");
+    expect(afterCreate.body.total).toBe(30); // version 2 bumped to 3 by the insert
+    expect(repo.listCalls).toHaveLength(2);
+  });
+
+  // Plan d5: a GET whose read started before a successful POST must not put its (pre-POST) result
+  // into the cache after the POST cleared it. The read is held open by hand, so the interleaving
+  // is forced, not timed.
+  test("test_7_inflight_get_does_not_repopulate_after_post", async () => {
+    const repo = versionedRepo();
+    const clock = manualClock();
+    const realList = repo.listNotes;
+    let release;
+    let held = false;
+    repo.listNotes = async (page) => {
+      if (!held) {
+        held = true;
+        const answer = await realList(page); // reads version 1 now
+        await new Promise((resolve) => {
+          release = resolve;
+        });
+        return answer;
+      }
+      return realList(page);
+    };
+    const base = await startCached(repo, clock);
+
+    const slow = getNotes(base, "?limit=10");
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    const created = await postNote(base, makeNote());
+    expect(created.res.status).toBe(201);
+    release();
+    const stale = await slow;
+    expect(stale.body.total).toBe(10);
+
+    const next = await getNotes(base, "?limit=10");
+    expect(next.body.total).toBe(20);
+    expect(repo.listCalls).toHaveLength(2);
+  });
+});
+
+// Issue #7 ruling (2026-09-27): a test-only reset, exported from the service and with no HTTP
+// surface, that empties the list cache of every live service in this process. The integration
+// tests that write rows by direct SQL call it (through a preload in the app process) so their next
+// GET reads the database; the cache contract itself is unchanged.
+import { clearListCaches } from "../src/service/notes.js";
+
+describe("issue #7 — test-only list cache reset", () => {
+  test("test_7_clear_list_caches_resets_every_service_cache", async () => {
+    const clock = manualClock();
+    const repoA = versionedRepo();
+    const repoB = versionedRepo();
+    const baseA = await startCached(repoA, clock);
+    const baseB = await startCached(repoB, clock);
+
+    const firstA = await getNotes(baseA, "?limit=10");
+    const firstB = await getNotes(baseB, "?q=x");
+    expect(firstA.body.total).toBe(10);
+    expect(firstB.body.total).toBe(10);
+
+    // Data changes behind both caches (no POST); still inside the TTL, both are served stale.
+    repoA.version = 2;
+    repoB.version = 3;
+    clock.advance(1000);
+    expect((await getNotes(baseA, "?limit=10")).text).toBe(firstA.text);
+    expect((await getNotes(baseB, "?q=x")).text).toBe(firstB.text);
+    expect(repoA.listCalls).toHaveLength(1);
+    expect(repoB.listCalls).toHaveLength(1);
+
+    clearListCaches();
+
+    // Same clock, same queries: both services now read their repository again.
+    const afterA = await getNotes(baseA, "?limit=10");
+    const afterB = await getNotes(baseB, "?q=x");
+    expect(afterA.res.status).toBe(200);
+    expect(afterA.body.total).toBe(20);
+    expect(afterA.body.items[0].title).toBe("v2 l10 o0 q-");
+    expect(afterB.body.total).toBe(30);
+    expect(afterB.body.items[0].title).toBe("v3 l20 o0 qx");
+    expect(repoA.listCalls).toHaveLength(2);
+    expect(repoB.listCalls).toHaveLength(2);
+
+    // The reset empties the caches, it does not switch them off: the fresh answer is cached again.
+    repoA.version = 4;
+    expect((await getNotes(baseA, "?limit=10")).text).toBe(afterA.text);
+    expect(repoA.listCalls).toHaveLength(2);
+  });
+});

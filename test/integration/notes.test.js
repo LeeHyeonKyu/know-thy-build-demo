@@ -686,13 +686,14 @@ describe("issue #5 — GET /notes against the compose Postgres", () => {
   // dw1: three notes at different times, inserted in an order that is NOT their time order, so
   // neither "id DESC" nor "insertion order" nor "created_at ASC" produces the expected list.
   test("test_5_list_notes_newest_first_with_total", async () => {
-    await withScratchApp("order", async ({ app, client }) => {
+    await withCacheResetScratchApp("order", async ({ app, client }) => {
       expect((await getList(app.base)).res.status).toBe(200); // creates the table
       const [middle, newest, oldest] = await insertAt(client, [
         { title: "middle", createdAt: "2026-03-01T10:00:00Z" },
         { title: "newest", createdAt: "2026-03-01T12:00:00Z" },
         { title: "oldest", createdAt: "2026-03-01T08:00:00Z" },
       ]);
+      await clearAppListCache(app); // direct SQL does not clear the #7 cache (issue #7 ruling)
 
       const { res, body } = await getList(app.base);
       expect(res.status).toBe(200);
@@ -713,7 +714,7 @@ describe("issue #5 — GET /notes against the compose Postgres", () => {
   // only has millisecond precision). They come back id DESC, between a newer and an older row,
   // and three calls return the same order.
   test("test_5_same_created_at_orders_by_id_desc", async () => {
-    await withScratchApp("tie", async ({ app, client }) => {
+    await withCacheResetScratchApp("tie", async ({ app, client }) => {
       expect((await getList(app.base)).res.status).toBe(200); // creates the table
       const tie = "2026-04-01T09:30:00.123456Z";
       const inserted = await insertAt(client, [
@@ -724,6 +725,7 @@ describe("issue #5 — GET /notes against the compose Postgres", () => {
         { title: "tie-c", createdAt: tie },
         { title: "tie-d", createdAt: tie },
       ]);
+      await clearAppListCache(app); // direct SQL does not clear the #7 cache (issue #7 ruling)
       const byTitle = Object.fromEntries(inserted.map((r) => [r.title, r.id]));
       const { rows } = await client.query("select count(distinct created_at)::int as n from notes where title like 'tie-%'");
       expect(rows[0].n, "the tie rows must share one created_at in the database").toBe(1);
@@ -742,7 +744,7 @@ describe("issue #5 — GET /notes against the compose Postgres", () => {
   // and no overlap; page 2 starts at the 21st newest. An offset past the end is 200, empty items,
   // and the real total.
   test("test_5_offset_pages_and_past_total_is_empty", async () => {
-    await withScratchApp("pages", async ({ app, client }) => {
+    await withCacheResetScratchApp("pages", async ({ app, client }) => {
       expect((await getList(app.base)).res.status).toBe(200); // creates the table
       const N = 25;
       const base = Date.parse("2026-05-01T00:00:00Z");
@@ -751,6 +753,7 @@ describe("issue #5 — GET /notes against the compose Postgres", () => {
         return { title: "n" + String(minute).padStart(2, "0"), createdAt: new Date(base + minute * 60000).toISOString() };
       });
       const inserted = await insertAt(client, plan);
+      await clearAppListCache(app); // direct SQL does not clear the #7 cache (issue #7 ruling)
       const newestFirst = [...inserted].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).map((r) => r.id);
 
       const page1 = await getList(app.base);
@@ -880,7 +883,7 @@ describe("issue #6 — GET /notes?q= against the compose Postgres", () => {
   // order. Paging by 3 yields the matching notes newest first with no gap and no overlap, and
   // `total` is 7 on every page, not 13. A blank q is exactly the unfiltered list.
   test("test_6_search_filters_before_paging_and_blank_q_lists_all", async () => {
-    await withScratchApp("s6page", async ({ app, client }) => {
+    await withCacheResetScratchApp("s6page", async ({ app, client }) => {
       expect((await getList(app.base)).res.status).toBe(200); // creates the table
       const base = Date.parse("2026-06-04T00:00:00Z");
       const N = 13;
@@ -897,6 +900,7 @@ describe("issue #6 — GET /notes?q= against the compose Postgres", () => {
       plan.push({ title: "pear late 1", body: "x", createdAt: new Date(base + 100 * 60000).toISOString() });
       plan.push({ title: "pear late 2", body: "y", createdAt: new Date(base + 101 * 60000).toISOString() });
       const inserted = await insertNotes(client, plan);
+      await clearAppListCache(app); // direct SQL does not clear the #7 cache (issue #7 ruling)
       const matching = inserted
         .filter((r) => r.title.startsWith("Apple"))
         .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
@@ -933,6 +937,181 @@ describe("issue #6 — GET /notes?q= against the compose Postgres", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
+// Issue #7 — GET /notes response cache (spec docs/features/004-cache-expiry.md) against the real
+// entrypoint and the compose Postgres. TTL expiry is pinned in-process (test/notes.test.js, plan
+// d2); this case covers the part that does not depend on time: a 201 POST /notes clears the cache
+// the production process builds by default. A throwaway database per case (the #5 technique) keeps
+// `total` a statement about this case's rows only.
+//
+// Determinism (docs/QA.md): the child process's clock is FROZEN, not measured. A preload passed
+// through NODE_OPTIONS replaces Date.now with a constant before src/app.js runs, so inside that
+// process no cache entry can ever reach its 5000 ms TTL however slow the runner is. The app itself
+// has no test switch; this is the same `node src/app.js` with the same default wiring.
+const FROZEN_NOW_MS = Date.parse("2026-07-01T12:00:00Z");
+const FROZEN_CLOCK_MARK = "frozen-clock:" + FROZEN_NOW_MS;
+const FROZEN_CLOCK_IMPORT =
+  "--import=data:text/javascript," +
+  encodeURIComponent(
+    "Date.now = () => " + FROZEN_NOW_MS + "; process.stderr.write(" + JSON.stringify(FROZEN_CLOCK_MARK + "\n") + ");",
+  );
+
+async function withFrozenClockScratchApp(label, fn) {
+  const dbName = "fq7_" + label + "_" + randomUUID().replace(/-/g, "");
+  await db.query("create database " + dbName);
+  const client = new pg.Client({ ...DB, database: dbName });
+  let app;
+  try {
+    await client.connect();
+    const nodeOptions = [process.env.NODE_OPTIONS, FROZEN_CLOCK_IMPORT].filter(Boolean).join(" ");
+    app = await startApp({ ...pgEnv(DB.host, DB.port), PGDATABASE: dbName, NODE_OPTIONS: nodeOptions });
+    return await fn({ app, client });
+  } finally {
+    await app?.stop();
+    await client.end().catch(() => {});
+    await db.query("drop database if exists " + dbName + " with (force)");
+  }
+}
+
+// Issue #7 ruling (2026-09-27): GET /notes is cached for 5000 ms and only a 201 POST clears it
+// (spec 004), so rows written by direct SQL are not seen by a repeat of a query the case already
+// asked. The four #5/#6 cases that read back their own direct-SQL rows (the ruling's four) call
+// clearAppListCache(app) right after the insert. They run on withCacheResetScratchApp, a parallel
+// helper that adds only a preload. The shared startApp/withScratchApp stay untouched (plan d7), so
+// every other case spawns exactly what it did before #7. The preload imports the service module
+// the app itself uses and opens a loopback control socket. Each connection calls the test-only
+// clearListCaches() and answers with an ack. The app has no switch and no HTTP surface for it.
+const CACHE_CLEARED_MARK = "list-cache-cleared";
+const CACHE_RESET_PORT_MARK = "list-cache-reset-port:";
+const CACHE_RESET_IMPORT =
+  "--import=data:text/javascript," +
+  encodeURIComponent(
+    "import { clearListCaches } from " + JSON.stringify(new URL("../../src/service/notes.js", import.meta.url).href) + ";" +
+      "import { createServer } from 'node:net';" +
+      "const control = createServer((sock) => { clearListCaches(); sock.end(" + JSON.stringify(CACHE_CLEARED_MARK + "\n") + "); });" +
+      "control.listen(0, " + JSON.stringify(LOOPBACK) + ", () => process.stderr.write(" +
+      JSON.stringify(CACHE_RESET_PORT_MARK) + " + control.address().port + '\\n'));" +
+      "control.unref();",
+  );
+
+async function withCacheResetScratchApp(label, fn) {
+  const dbName = "fq7_reset_" + label + "_" + randomUUID().replace(/-/g, "");
+  await db.query("create database " + dbName);
+  const client = new pg.Client({ ...DB, database: dbName });
+  let app;
+  try {
+    await client.connect();
+    const nodeOptions = [process.env.NODE_OPTIONS, CACHE_RESET_IMPORT].filter(Boolean).join(" ");
+    app = await startApp({ ...pgEnv(DB.host, DB.port), PGDATABASE: dbName, NODE_OPTIONS: nodeOptions });
+    return await fn({ app, client });
+  } finally {
+    await app?.stop();
+    await client.end().catch(() => {});
+    await db.query("drop database if exists " + dbName + " with (force)");
+  }
+}
+
+// Clears the app's list cache through the preload's control socket and resolves only after the
+// app acknowledged it (condition waits, no sleep).
+async function clearAppListCache(app) {
+  let port;
+  await vi.waitFor(
+    () => {
+      if (app.dead()) throw new Error("app stopped before its cache-reset socket opened: " + app.out.stderr);
+      const m = app.out.stderr.match(new RegExp(CACHE_RESET_PORT_MARK + "(\\d+)"));
+      if (!m) throw new Error("cache-reset socket not announced yet");
+      port = Number(m[1]);
+    },
+    { timeout: BOOT_TIMEOUT_MS, interval: 10 },
+  );
+  const sock = connect(port, LOOPBACK);
+  sock.setEncoding("utf8");
+  let reply = "";
+  sock.on("data", (chunk) => { reply += chunk; });
+  const [closedEarly] = await Promise.race([once(sock, "end").then(() => [false]), once(sock, "error").then(() => [true])]);
+  sock.destroy();
+  if (closedEarly || !reply.includes(CACHE_CLEARED_MARK)) {
+    throw new Error("cache clear not acknowledged: " + JSON.stringify(reply) + " " + app.out.stderr);
+  }
+}
+
+describe("issue #7 — GET /notes cache invalidation against the compose Postgres", () => {
+  // dw4: GET, then a 201 POST, then the same GET right away: the new note and a total one higher.
+  // Before the POST, a row written by direct SQL (which does not go through POST /notes) is NOT
+  // visible to the repeated GET: the entrypoint really serves it from its cache (the clock is
+  // frozen, so this is unconditional). The fresh answer after the POST is therefore the
+  // invalidation at work, not an uncached read.
+  test("test_7_post_created_invalidates_list_cache", async () => {
+    await withFrozenClockScratchApp("c7inval", async ({ app, client }) => {
+      expect(app.out.stderr, "the frozen-clock preload ran in the app process").toContain(FROZEN_CLOCK_MARK);
+
+      const warm = await getList(app.base);
+      expect(warm.res.status).toBe(200);
+      expect(warm.body.total).toBe(0);
+
+      const [direct] = await insertNotes(client, [
+        { title: "direct sql", body: "not through POST", createdAt: "2026-07-01T08:00:00Z" },
+      ]);
+      const repeated = await getList(app.base);
+      expect(repeated.res.status).toBe(200);
+      expect(repeated.text, "same query inside the TTL is served from the entrypoint's cache").toBe(warm.text);
+
+      const created = await postJson(app.base, makeNote({ title: "fresh after post" }));
+      expect(created.res.status).toBe(201);
+
+      const after = await getList(app.base);
+      expect(after.res.status).toBe(200);
+      expect(after.body.total).toBe(warm.body.total + 2);
+      const ids = after.body.items.map((n) => n.id);
+      expect(ids).toContain(created.body.id);
+      expect(ids).toContain(direct.id);
+      expect(after.body.items.find((n) => n.id === created.body.id)).toMatchObject({ title: "fresh after post" });
+    });
+  }, CASE_TIMEOUT_MS);
+
+  // dw5 at the spec's level (docs/features/004-cache-expiry.md acceptance table: integration): a
+  // POST /notes the real entrypoint rejects with 400 does NOT clear its cache. A row written by
+  // direct SQL after the warm-up GET is the witness: a cleared cache would show it (and total 1) on
+  // the next GET; a kept cache still answers with the warm-up body. Each 400 variant (validation
+  // failure and malformed JSON) is checked, and a final 201 POST shows the witness row was really
+  // in the database the whole time, so the unchanged answers were the cache and nothing else.
+  test("test_7_rejected_post_keeps_list_cache_integration", async () => {
+    await withFrozenClockScratchApp("c7keep", async ({ app, client }) => {
+      expect(app.out.stderr, "the frozen-clock preload ran in the app process").toContain(FROZEN_CLOCK_MARK);
+
+      const warm = await getList(app.base);
+      expect(warm.res.status).toBe(200);
+      expect(warm.body.total).toBe(0);
+
+      const [direct] = await insertNotes(client, [
+        { title: "direct sql witness", body: "not through POST", createdAt: "2026-07-01T08:00:00Z" },
+      ]);
+
+      const invalid = await postJson(app.base, { title: "   ", body: "blank title" });
+      expect(invalid.res.status).toBe(400);
+      expect(invalid.body?.error?.code).toBe("invalid_request");
+      const afterInvalid = await getList(app.base);
+      expect(afterInvalid.res.status).toBe(200);
+      expect(afterInvalid.text, "a 400 validation failure must not clear the cache").toBe(warm.text);
+
+      const malformed = await send(app.base, "/notes", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: '{"title": "broken", "body": ',
+      });
+      expect(malformed.res.status).toBe(400);
+      const afterMalformed = await getList(app.base);
+      expect(afterMalformed.res.status).toBe(200);
+      expect(afterMalformed.text, "a 400 malformed-JSON POST must not clear the cache").toBe(warm.text);
+
+      const created = await postJson(app.base, makeNote({ title: "control create" }));
+      expect(created.res.status).toBe(201);
+      const after = await getList(app.base);
+      expect(after.body.total).toBe(2);
+      expect(after.body.items.map((n) => n.id)).toContain(direct.id);
+    });
+  }, CASE_TIMEOUT_MS);
+});
+
 // Issue #87 — a process-wide budget on inflated POST /notes body bytes in flight. The per-request
 // cap (MAX_BODY_BYTES, 413) stops one gzip bomb; ~300 concurrent ~16 KB gzip bodies that each
 // inflate to just under that cap still exhausted the V8 heap and took /healthz and /version down.

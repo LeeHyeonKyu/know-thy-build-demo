@@ -112,6 +112,23 @@ export function parsePage(query = {}) {
   return { limit, offset };
 }
 
+// Search term for GET /notes?q= (spec 003). Returns null for "no filter" (absent, empty or
+// whitespace-only q — the 002 list), otherwise the trimmed term with the LIKE metacharacters made
+// literal: each '\' (the escape character itself), '%' and '_' gets one '\' in front. It is one
+// pass over the input, so a backslash added for '%' or '_' is never escaped again (the order trap
+// of a chained replace). The repository wraps the
+// result in '%…%' and matches it with ILIKE … ESCAPE '\'.
+// Express parses ?q=a&q=b into an array; that is a client error, not a TypeError 500 (plan d3).
+export function normalizeQuery(rawQ) {
+  if (rawQ === undefined) return null;
+  if (typeof rawQ !== "string") {
+    throw new NotesError("invalid_request", "q must be a single value");
+  }
+  const trimmed = rawQ.trim();
+  if (trimmed === "") return null;
+  return trimmed.replace(/[\\%_]/g, (ch) => "\\" + ch);
+}
+
 // Storage failures that mean "the database cannot be reached" become db_unavailable; anything else
 // is rethrown unchanged (the route answers it with 500).
 function classifyStorageError(err) {
@@ -125,9 +142,11 @@ export function createNotesService(repo) {
   return {
     async listNotes(query) {
       const page = parsePage(query);
+      const q = normalizeQuery(query?.q);
       let result;
       try {
-        result = await repo.listNotes(page);
+        // `q` is only passed when there is a filter, so a blank search asks for exactly the 002 page.
+        result = await repo.listNotes(q === null ? page : { ...page, q });
       } catch (err) {
         throw classifyStorageError(err);
       }

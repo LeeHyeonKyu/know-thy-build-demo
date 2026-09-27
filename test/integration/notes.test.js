@@ -771,3 +771,162 @@ describe("issue #5 — GET /notes against the compose Postgres", () => {
     });
   }, CASE_TIMEOUT_MS);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Issue #6 — GET /notes?q= (spec docs/features/003-search.md) against the real entrypoint and the
+// compose Postgres. `total` is a statement about every matching row in the table, so each case
+// runs in its own throwaway database (withScratchApp, the #5 technique): rows from other tests or
+// a concurrent new-test-repeat run cannot move it (plan open_risks: shared compose database).
+// Rows are inserted by SQL with explicit title, body and created_at so each case controls exactly
+// which text sits in which column.
+async function insertNotes(client, rows) {
+  const out = [];
+  for (const { title, body, createdAt } of rows) {
+    const { rows: r } = await client.query(
+      "insert into notes (title, body, created_at) values ($1, $2, $3) returning id",
+      [title, body, createdAt],
+    );
+    out.push({ id: Number(r[0].id), title, body, createdAt });
+  }
+  return out;
+}
+
+const searchFor = (base, q, extra = "") => getList(base, "?q=" + encodeURIComponent(q) + extra);
+
+describe("issue #6 — GET /notes?q= against the compose Postgres", () => {
+  // dw1: a title-only match and a body-only match are both found, case is ignored in both
+  // directions, and a note without the word is in neither `items` nor `total`.
+  test("test_6_q_matches_title_or_body_case_insensitive", async () => {
+    await withScratchApp("s6match", async ({ app, client }) => {
+      expect((await getList(app.base)).res.status).toBe(200); // creates the table
+      const [inTitle, inBody, without, spaced] = await insertNotes(client, [
+        { title: "pool tuning", body: "raise max connections", createdAt: "2026-06-01T08:00:00Z" },
+        { title: "incident 42", body: "the connection Pool starved at noon", createdAt: "2026-06-01T09:00:00Z" },
+        { title: "lunch", body: "sandwiches", createdAt: "2026-06-01T10:00:00Z" },
+        { title: "po ol", body: "p-o-o-l", createdAt: "2026-06-01T11:00:00Z" },
+      ]);
+
+      for (const q of ["pool", "POOL", "PoOl"]) {
+        const { res, body } = await searchFor(app.base, q);
+        expect(res.status, "q=" + q).toBe(200);
+        expect(body.total, "q=" + q).toBe(2);
+        // Newest first, the 002 order: the body match (09:00) before the title match (08:00).
+        expect(body.items.map((n) => n.id), "q=" + q).toEqual([inBody.id, inTitle.id]);
+        const ids = body.items.map((n) => n.id);
+        expect(ids).not.toContain(without.id);
+        expect(ids).not.toContain(spaced.id);
+      }
+      // Items keep the 002 note shape.
+      const { body } = await searchFor(app.base, "LUNCH");
+      expect(body.total).toBe(1);
+      expect(body.items[0]).toMatchObject({ id: without.id, title: "lunch", body: "sandwiches", created_at: "2026-06-01T10:00:00.000Z" });
+    });
+  }, CASE_TIMEOUT_MS);
+
+  // dw2: '%', '_' and '\' are literal. Each has a note that literally contains it and decoys that
+  // an unescaped pattern would also match (everything for '%'/'_'; 'eXc' for 'e_c'; plain 'p' for
+  // '\p'). A trailing backslash would be a Postgres error (500) if left unescaped.
+  test("test_6_wildcard_characters_match_literally", async () => {
+    await withScratchApp("s6wild", async ({ app, client }) => {
+      expect((await getList(app.base)).res.status).toBe(200); // creates the table
+      const [percent, underscore, backslash] = await insertNotes(client, [
+        { title: "rollout", body: "100% done", createdAt: "2026-06-02T08:00:00Z" },
+        { title: "naming", body: "use snake_case", createdAt: "2026-06-02T09:00:00Z" },
+        { title: "windows", body: String.raw`C:\path\to`, createdAt: "2026-06-02T10:00:00Z" },
+        { title: "decoy 1000", body: "snakeXcase path done", createdAt: "2026-06-02T11:00:00Z" },
+        { title: "decoy plain", body: "nothing special", createdAt: "2026-06-02T12:00:00Z" },
+      ]);
+
+      const cases = [
+        { q: "%", id: percent.id },
+        { q: "0%", id: percent.id },
+        { q: "_", id: underscore.id },
+        { q: "e_c", id: underscore.id },
+        { q: "\\", id: backslash.id },
+        { q: String.raw`\p`, id: backslash.id },
+        { q: String.raw`C:\ `, id: backslash.id }, // trimmed to a trailing backslash
+      ];
+      for (const { q, id } of cases) {
+        const { res, body } = await searchFor(app.base, q);
+        expect(res.status, "q=" + JSON.stringify(q)).toBe(200);
+        expect(body.total, "q=" + JSON.stringify(q)).toBe(1);
+        expect(body.items.map((n) => n.id), "q=" + JSON.stringify(q)).toEqual([id]);
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  // dw4: a search that matches nothing — on a table that has notes — is 200 and exactly
+  // {"items":[],"total":0}; the closed shape is the done_when text itself (lesson L-2026-09-21-01:
+  // the one test where closing the key set is the requirement).
+  test("test_6_no_match_returns_200_empty", async () => {
+    await withScratchApp("s6none", async ({ app, client }) => {
+      expect((await getList(app.base)).res.status).toBe(200); // creates the table
+      await insertNotes(client, [
+        { title: "pool tuning", body: "raise max connections", createdAt: "2026-06-03T08:00:00Z" },
+        { title: "lunch", body: "sandwiches", createdAt: "2026-06-03T09:00:00Z" },
+      ]);
+      for (const q of ["zebra", "%%", "pool tuning!"]) {
+        const { res, body } = await searchFor(app.base, q);
+        expect(res.status, "q=" + q).toBe(200);
+        expect(res.headers.get("content-type")).toMatch(/application\/json/);
+        expect(body, "q=" + q).toStrictEqual({ items: [], total: 0 });
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  // dw5: filter, then sort newest first, then page. Seven matching notes and six non-matching
+  // ones interleaved in time (including the newest rows overall), inserted in a fixed shuffled
+  // order. Paging by 3 yields the matching notes newest first with no gap and no overlap, and
+  // `total` is 7 on every page, not 13. A blank q is exactly the unfiltered list.
+  test("test_6_search_filters_before_paging_and_blank_q_lists_all", async () => {
+    await withScratchApp("s6page", async ({ app, client }) => {
+      expect((await getList(app.base)).res.status).toBe(200); // creates the table
+      const base = Date.parse("2026-06-04T00:00:00Z");
+      const N = 13;
+      const plan = Array.from({ length: N }, (_, k) => {
+        const minute = (k * 5) % N; // gcd(5,13)=1: every minute used once, insertion order != time order
+        const match = minute % 2 === 0; // minutes 0,2,...,12 match (7 rows); the newest row (12) matches
+        return {
+          title: (match ? "Apple note " : "pear note ") + minute,
+          body: match ? "fruit" : "no fruit here",
+          createdAt: new Date(base + minute * 60000).toISOString(),
+        };
+      });
+      // Make the two newest rows overall non-matching too, so page-then-filter would visibly differ.
+      plan.push({ title: "pear late 1", body: "x", createdAt: new Date(base + 100 * 60000).toISOString() });
+      plan.push({ title: "pear late 2", body: "y", createdAt: new Date(base + 101 * 60000).toISOString() });
+      const inserted = await insertNotes(client, plan);
+      const matching = inserted
+        .filter((r) => r.title.startsWith("Apple"))
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+        .map((r) => r.id);
+      expect(matching).toHaveLength(7);
+
+      const seen = [];
+      for (const offset of [0, 3, 6]) {
+        const { res, body } = await searchFor(app.base, "apple", "&limit=3&offset=" + offset);
+        expect(res.status, "offset=" + offset).toBe(200);
+        expect(body.total, "offset=" + offset).toBe(7);
+        expect(body.items.map((n) => n.id), "offset=" + offset).toEqual(matching.slice(offset, offset + 3));
+        seen.push(...body.items.map((n) => n.id));
+      }
+      expect(seen).toEqual(matching);
+      const past = await searchFor(app.base, "apple", "&limit=3&offset=9");
+      expect(past.res.status).toBe(200);
+      expect(past.body.items).toEqual([]);
+      expect(past.body.total).toBe(7);
+
+      // Blank q: the same response as GET /notes without q, with and without paging.
+      for (const extra of ["", "&limit=4&offset=2"]) {
+        const plain = await getList(app.base, extra ? "?" + extra.slice(1) : "");
+        expect(plain.res.status).toBe(200);
+        expect(plain.body.total).toBe(inserted.length);
+        for (const blank of ["?q=", "?q=%20%20", "?q=%09%20"]) {
+          const got = await getList(app.base, blank + extra);
+          expect(got.res.status, blank + extra).toBe(200);
+          expect(got.text, blank + extra).toBe(plain.text);
+        }
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+});

@@ -1,5 +1,8 @@
 import express from "express";
 import { readVersion } from "./version.js";
+import { createNotesRouter } from "./routes/notes.js";
+import { createNotesService } from "./service/notes.js";
+import { createNotesRepo } from "./repo/notes.js";
 
 const version = readVersion();
 
@@ -14,6 +17,11 @@ app.get("/healthz", (_req, res) => res.set("Cache-Control", "no-store").status(2
 // (docs/TECHNICAL.md Constraints) 여기에 붙는 필드는 곧 무인증 노출이다. 세 번째 키를 더하면
 // test_45_version_body_carries_no_third_field가 RED가 된다 — 늘리려면 그 가드부터 마주한다.
 app.get("/version", (_req, res) => res.status(200).json({ version, node: process.version }));
+// POST /notes (spec 001). Building the repo does not connect: the pool connects and the table is
+// created on the first request, so this process still boots and serves /healthz with no database
+// reachable (#76 dw5). Connection settings are pg's standard PG* environment variables.
+// No Cache-Control here — the /notes cache policy is undecided (test_8_no_store_scoped_to_healthz).
+app.use("/notes", createNotesRouter(createNotesService(createNotesRepo())));
 // PORT는 바인딩 전에 검증한다 (#59). 설정돼 있으면 [0,65535] 안의 10진 정수 문자열이어야 한다.
 // 검증이 없으면 `abc`·`-1` 같은 값은 listen()이 유닉스 소켓/파이프 경로로 받아 조용히 엉뚱한 곳에
 // 바인딩하고, `99999`는 Node의 ERR_SOCKET_BAD_PORT 스택 트레이스로 죽는다. 그래서 소켓 경로를

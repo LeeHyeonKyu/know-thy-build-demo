@@ -18,28 +18,21 @@
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 2 | 7 |
-| review rounds avg | 2 | 1.29 |
-| rounds/issue (plan/impl/review) | 1 / 2.5 / 2 | 0.86 / 1.43 / 1.29 |
-| escaped defects | 2 (#76×2) | 2 |
-| revert rate | 0.00 (0/2) | 0.00 (0/7) |
-| needs-human | 4 | 28 |
-| rejects by role | correctness 3, qa 1 | correctness 3, qa 1 |
-| reviewer overlap | 0.29 (2/7, runs 4) | 0.29 (2/7, runs 8) |
-| unique findings by role | correctness 3, qa 2 | correctness 3, qa 2 |
-| qa na ratio | 0.11 (1/9 claims, na-heavy 0/1 approvals) | 0.04 (2/47 claims, na-heavy 0/4 approvals) |
-| cost (usd) | 67.64 | 742.95 |
-| tokens | input 6262994 / output 168174 | input 18292976 / output 1423128 |
-| retro cost (usd) | 1.18 | 6.97 |
-| retro tokens | input 2 / output 1822 | input 12 / output 13688 |
+| merged | 0 | 7 |
+| review rounds avg | 0 | 1.29 |
+| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.86 / 1.43 / 1.29 |
+| escaped defects | 0 | 2 |
+| revert rate | 없음 | 0.00 (0/7) |
+| needs-human | 0 | 28 |
+| rejects by role | 없음 | correctness 3, qa 1 |
+| reviewer overlap | 없음 | 0.29 (2/7, runs 8) |
+| unique findings by role | 없음 | correctness 3, qa 2 |
+| qa na ratio | 없음 | 0.04 (2/47 claims, na-heavy 0/4 approvals) |
+| cost (usd) | 2.04 | 742.95 |
+| tokens | input 151586 / output 9408 | input 18292976 / output 1423128 |
+| retro cost (usd) | 0.00 | 6.97 |
+| retro tokens | input 0 / output 0 | input 12 / output 13688 |
 | full retros | — | 6 |
-
-### Rounds per issue (this window)
-
-| issue | plan | implement | review | escaped |
-| --- | --- | --- | --- | --- |
-| #76 | 1 | 4 | 3 | 2 |
-| #58 | 1 | 1 | 1 | 0 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -1247,64 +1240,33 @@
     ]
   },
   "stats": {
-    "merged": 2,
-    "review_rounds_avg": 2,
-    "plan_rounds_avg": 1,
-    "implement_rounds_avg": 2.5,
-    "rounds_per_issue": [
-      {
-        "issue": 76,
-        "plan": 1,
-        "implement": 4,
-        "review": 3
-      },
-      {
-        "issue": 58,
-        "plan": 1,
-        "implement": 1,
-        "review": 1
-      }
-    ],
-    "escaped_defects": 2,
-    "escaped_defects_detail": [
-      {
-        "issue": 76,
-        "count": 2
-      }
-    ],
+    "merged": 0,
+    "review_rounds_avg": 0,
+    "plan_rounds_avg": 0,
+    "implement_rounds_avg": 0,
+    "rounds_per_issue": [],
+    "escaped_defects": 0,
+    "escaped_defects_detail": [],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": 0,
-    "rejects_by_role": {
-      "correctness": 3,
-      "qa": 1
-    },
-    "review_runs": 4,
-    "findings_total": 7,
-    "overlapping_findings": 2,
-    "unique_findings_by_role": {
-      "correctness": 3,
-      "qa": 2
-    },
-    "overlap_ratio": 0.29,
-    "needs_human": 4,
-    "qa_approvals": 1,
-    "qa_claims_total": 8,
-    "qa_na_total": 1,
-    "qa_na_ratio": 0.11,
+    "revert_rate": null,
+    "rejects_by_role": {},
+    "review_runs": 0,
+    "findings_total": 0,
+    "overlapping_findings": 0,
+    "unique_findings_by_role": {},
+    "overlap_ratio": 0,
+    "needs_human": 0,
+    "qa_approvals": 0,
+    "qa_claims_total": 0,
+    "qa_na_total": 0,
+    "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 67.639509,
+      "cost_usd": 2.039798,
       "tokens": {
-        "input": 6262994,
-        "output": 168174
-      }
-    },
-    "retro_usage": {
-      "cost_usd": 1.184954,
-      "tokens": {
-        "input": 2,
-        "output": 1822
+        "input": 151586,
+        "output": 9408
       }
     }
   },

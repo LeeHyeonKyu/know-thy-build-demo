@@ -181,10 +181,26 @@ export function createListCache({ now = () => Date.now(), ttlMs = LIST_CACHE_TTL
   };
 }
 
+// Test-only reset (issue #7 ruling): empties the list cache of every live service in this process,
+// exactly as a successful create would. It has no HTTP surface and nothing in src/ calls it; the
+// integration tests reach it through a preload in the app process after writing rows by direct SQL
+// (a write the spec deliberately does not invalidate on). Services are held weakly, so a service
+// nobody references any more is not kept alive by this registry.
+const liveListCaches = new Set();
+
+export function clearListCaches() {
+  for (const ref of liveListCaches) {
+    const cache = ref.deref();
+    if (cache) cache.clear();
+    else liveListCaches.delete(ref);
+  }
+}
+
 const copyList = (list) => ({ items: list.items.map((n) => ({ ...n })), total: list.total });
 
 export function createNotesService(repo, { now } = {}) {
   const cache = createListCache({ now });
+  liveListCaches.add(new WeakRef(cache));
   return {
     async listNotes(query) {
       const page = parsePage(query);

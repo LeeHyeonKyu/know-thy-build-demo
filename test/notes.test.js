@@ -632,3 +632,51 @@ describe("issue #7 — GET /notes response cache without a database", () => {
     expect(repo.listCalls).toHaveLength(2);
   });
 });
+
+// Issue #7 ruling (2026-09-27): a test-only reset, exported from the service and with no HTTP
+// surface, that empties the list cache of every live service in this process. The integration
+// tests that write rows by direct SQL call it (through a preload in the app process) so their next
+// GET reads the database; the cache contract itself is unchanged.
+import { clearListCaches } from "../src/service/notes.js";
+
+describe("issue #7 — test-only list cache reset", () => {
+  test("test_7_clear_list_caches_resets_every_service_cache", async () => {
+    const clock = manualClock();
+    const repoA = versionedRepo();
+    const repoB = versionedRepo();
+    const baseA = await startCached(repoA, clock);
+    const baseB = await startCached(repoB, clock);
+
+    const firstA = await getNotes(baseA, "?limit=10");
+    const firstB = await getNotes(baseB, "?q=x");
+    expect(firstA.body.total).toBe(10);
+    expect(firstB.body.total).toBe(10);
+
+    // Data changes behind both caches (no POST); still inside the TTL, both are served stale.
+    repoA.version = 2;
+    repoB.version = 3;
+    clock.advance(1000);
+    expect((await getNotes(baseA, "?limit=10")).text).toBe(firstA.text);
+    expect((await getNotes(baseB, "?q=x")).text).toBe(firstB.text);
+    expect(repoA.listCalls).toHaveLength(1);
+    expect(repoB.listCalls).toHaveLength(1);
+
+    clearListCaches();
+
+    // Same clock, same queries: both services now read their repository again.
+    const afterA = await getNotes(baseA, "?limit=10");
+    const afterB = await getNotes(baseB, "?q=x");
+    expect(afterA.res.status).toBe(200);
+    expect(afterA.body.total).toBe(20);
+    expect(afterA.body.items[0].title).toBe("v2 l10 o0 q-");
+    expect(afterB.body.total).toBe(30);
+    expect(afterB.body.items[0].title).toBe("v3 l20 o0 qx");
+    expect(repoA.listCalls).toHaveLength(2);
+    expect(repoB.listCalls).toHaveLength(2);
+
+    // The reset empties the caches, it does not switch them off: the fresh answer is cached again.
+    repoA.version = 4;
+    expect((await getNotes(baseA, "?limit=10")).text).toBe(afterA.text);
+    expect(repoA.listCalls).toHaveLength(2);
+  });
+});

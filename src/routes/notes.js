@@ -14,10 +14,16 @@ export const MAX_BODY_BYTES = 16 * 1024 * 1024;
 // Process-wide bound on POST /notes body bytes in flight, counted AFTER decompression (#87). The
 // per-request cap stops one gzip bomb, but ~300 concurrent ~16 KB gzip bodies each inflating to
 // just under MAX_BODY_BYTES still exhausted the V8 heap. A request is charged for every inflated
-// byte it buffers and keeps that charge until its RESPONSE is over (finish or close) AND, if the
-// body was parsed, until the route handler is done with it — not merely until parsing ends or the
-// client hangs up, because a parsed 16 MiB note still sits in memory while it waits on Postgres.
-// A request whose next chunk would push the total past this bound is refused with 503 `overloaded`.
+// byte it buffers. A request that is refused (413, 503, decode error, abort) drops its buffer and
+// returns its charge at once. Otherwise it keeps that charge until its RESPONSE is over (finish or
+// close) AND, if the body was parsed, until the route handler is done with it — not merely until
+// parsing ends or the client hangs up, because a parsed 16 MiB note still sits in memory while it
+// waits on Postgres.
+// When a chunk would push the total past this bound, requests are refused with 503 `overloaded`
+// in arrival order, youngest first: the youngest request still reading its body is refused (and
+// its charge freed) until the chunk fits or the youngest is the one that sent it. So the oldest
+// reader always makes progress. Refusing whoever happened to send the overflowing chunk instead
+// starved everyone under interleaved uploads: each request held a partial, doomed slice (review qa1).
 // It must stay >= MAX_BODY_BYTES so an idle process still admits one full-size note.
 // What is NOT bounded here: the copies JSON.parse and the driver make on top of the raw bytes, so
 // the real peak is a small multiple of this number (plan open_risks).
@@ -25,6 +31,14 @@ export const MAX_INFLIGHT_BODY_BYTES = 4 * MAX_BODY_BYTES;
 export const OVERLOADED_RETRY_AFTER_SECONDS = 1;
 
 let inflightBodyBytes = 0;
+// Requests still reading their body, in arrival order (a Set iterates in insertion order). Each
+// entry is the function that refuses that request as overloaded.
+const readers = new Set();
+const youngestReader = () => {
+  let last;
+  for (const refuse of readers) last = refuse;
+  return last;
+};
 
 const bodyError = (status, type, message) => Object.assign(new Error(message), { status, type });
 
@@ -71,8 +85,9 @@ function readJsonBody(req, res, next) {
     req.pipe(source);
   }
 
-  // The charge is returned exactly once, when the response is over — whatever path got it there
-  // (201, 400, 413, 503, a handler exception, or a client that hung up mid-upload). If the body
+  // The charge is returned exactly once: at once if the body is refused while being read (413,
+  // 503, a decode error, a client that hung up mid-upload), otherwise when the response is over
+  // (201, a parse-error 400, a db_unavailable 503, a handler exception). If the body
   // was parsed and handed to the route handler, the response being over is not enough: a client
   // that hangs up after a complete upload closes `res` while its parsed note still waits on
   // Postgres (review cf1). Then the charge also waits for the handler to call
@@ -97,6 +112,7 @@ function readJsonBody(req, res, next) {
   const settle = (err) => {
     if (settled) return;
     settled = true;
+    readers.delete(refuse);
     if (!err) {
       let body;
       try {
@@ -116,7 +132,13 @@ function readJsonBody(req, res, next) {
     }
     // Stop inflating, drop what was buffered, and read off the rest of the upload before
     // answering so the client actually receives the error (as body-parser did).
+    // The dropped bytes are no longer held, so their charge goes back NOW, not when the response
+    // is over: that waits for the rest of the upload to drain, and under interleaved uploads every
+    // refused request would keep its dead slice until the end, starving the live ones until all
+    // of them were refused too (review qa1). The drained remainder is discarded, never charged.
     chunks.length = 0;
+    inflightBodyBytes -= charged;
+    charged = 0;
     if (source !== req) {
       req.unpipe(source);
       source.destroy();
@@ -132,6 +154,8 @@ function readJsonBody(req, res, next) {
     req.once("close", answer);
     req.resume();
   };
+  const refuse = () => settle(bodyError(503, "entity.overloaded", "too many request body bytes in flight"));
+  readers.add(refuse);
 
   source.on("data", (chunk) => {
     if (settled) return;
@@ -139,8 +163,12 @@ function readJsonBody(req, res, next) {
     if (charged + chunk.length > MAX_BODY_BYTES) {
       return settle(bodyError(413, "entity.too.large", "request entity too large"));
     }
-    if (inflightBodyBytes + chunk.length > MAX_INFLIGHT_BODY_BYTES) {
-      return settle(bodyError(503, "entity.overloaded", "too many request body bytes in flight"));
+    // Over budget: refuse the youngest reader (freeing its charge) until this chunk fits. If this
+    // request is itself the youngest, it is the one refused.
+    while (inflightBodyBytes + chunk.length > MAX_INFLIGHT_BODY_BYTES) {
+      const youngest = youngestReader();
+      if (youngest === refuse || youngest === undefined) return refuse();
+      youngest();
     }
     inflightBodyBytes += chunk.length;
     charged += chunk.length;

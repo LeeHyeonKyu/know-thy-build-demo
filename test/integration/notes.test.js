@@ -1371,3 +1371,88 @@ describe("issue #87 rework — a client that hangs up after its upload does not 
     });
   }, BURST_TIMEOUT_MS);
 });
+
+// One raw-socket POST /notes whose upload the caller paces. `Connection: close`, so the answer is
+// everything the server sends before it closes; it is parsed into {status, body} or {failure}.
+async function openPacedUpload(url, contentLength) {
+  const socket = connect(Number(url.port), url.hostname);
+  const received = [];
+  let error;
+  socket.on("data", (chunk) => received.push(chunk));
+  socket.on("error", (err) => { error = err; });
+  const closed = once(socket, "close");
+  await once(socket, "connect");
+  socket.write(
+    "POST /notes HTTP/1.1\r\nHost: " + url.host + "\r\nContent-Type: application/json\r\n" +
+      "Connection: close\r\nContent-Length: " + contentLength + "\r\n\r\n",
+  );
+  const answer = closed.then(() => {
+    const raw = Buffer.concat(received).toString("utf8");
+    const status = Number(/^HTTP\/1\.1 (\d{3})/.exec(raw)?.[1]);
+    if (!status) return { failure: "no HTTP answer" + (error ? " (" + (error.code || error.message) + ")" : "") };
+    const text = raw.slice(raw.indexOf("\r\n\r\n") + 4);
+    let body;
+    try { body = JSON.parse(text); } catch { body = undefined; }
+    return { status, body, headers: raw.slice(0, raw.indexOf("\r\n\r\n")) };
+  });
+  return { socket, answer };
+}
+
+describe("issue #87 rework 2 — interleaved legitimate uploads are not all refused (qa1)", () => {
+  // qa1: many ordinary clients upload a valid, UNCOMPRESSED near-cap note at the same time, their
+  // bytes interleaved round-robin (what concurrent TCP uploads look like — nobody finishes much
+  // before anybody else). More clients than the budget holds, so some must be refused 503
+  // overloaded; but the budget still has room for `fits` full notes, and those must be served.
+  // An implementation where a refused request keeps its (already dropped) bytes charged until its
+  // upload has been drained starves everyone: every live request's slice is stuck behind the dead
+  // ones, and all N answers are 503 with zero rows written, while /healthz stays 200.
+  test("test_87_interleaved_legitimate_near_cap_uploads_are_not_all_refused", async () => {
+    const clients = 16;
+    const slice = 8 * 1024;
+    const fits = Math.floor(MAX_INFLIGHT_BODY_BYTES / NEAR_CAP);
+    expect(fits, "near-cap notes the budget holds at once").toBeGreaterThanOrEqual(1);
+    expect(clients, "more clients than the budget holds").toBeGreaterThan(fits);
+    const title = uniqueMarker("dw87-qa1");
+    const head = Buffer.from('{"title":' + JSON.stringify(title) + ',"body":"');
+    const tail = Buffer.from('"}');
+    const note = Buffer.alloc(NEAR_CAP, 0x6e);
+    head.copy(note, 0);
+    tail.copy(note, NEAR_CAP - tail.length);
+    await withScratchAppEnv("interleaved", {}, async ({ app, client }) => {
+      const url = new URL(app.base);
+      const uploads = [];
+      let during;
+      try {
+        for (let i = 0; i < clients; i += 1) uploads.push(await openPacedUpload(url, note.length));
+        for (let offset = 0; offset < note.length; offset += slice) {
+          const piece = note.subarray(offset, Math.min(offset + slice, note.length));
+          const waits = [];
+          for (const { socket } of uploads) {
+            if (socket.destroyed) continue;
+            if (!socket.write(piece)) waits.push(Promise.race([once(socket, "drain"), once(socket, "close")]));
+          }
+          await Promise.all(waits);
+          if (!during && offset >= note.length / 2) {
+            during = { health: await getWithin(app.base, "/healthz"), version: await getWithin(app.base, "/version") };
+          }
+        }
+      } finally {
+        for (const { socket } of uploads) socket.end();
+      }
+      const results = await Promise.all(uploads.map((u) => u.answer));
+      const counts = tally(results);
+      const summary = JSON.stringify(counts) + "; app stderr: " + app.out.stderr.slice(-1500);
+      expect(results.filter((r) => r.failure), "dropped requests: " + summary).toHaveLength(0);
+      for (const r of results) {
+        expect([201, 503], summary).toContain(r.status);
+        if (r.status === 503) expect(r.body?.error?.code, summary).toBe("overloaded");
+      }
+      const created = results.filter((r) => r.status === 201).length;
+      expect(created, "legitimate notes served out of " + clients + " interleaved uploads: " + summary).toBeGreaterThanOrEqual(fits);
+      const { rows } = await client.query("select count(*)::int as n from notes where title = $1", [title]);
+      expect(rows[0].n, summary).toBe(created);
+      expectServing(app, during, "during the uploads");
+      expect(app.dead()).toBe(false);
+    });
+  }, BURST_TIMEOUT_MS);
+});

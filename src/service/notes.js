@@ -138,22 +138,76 @@ function classifyStorageError(err) {
   return err;
 }
 
-export function createNotesService(repo) {
+// GET /notes response cache (spec 004): in process memory, fixed 5000 ms TTL, cleared as a whole by
+// a successful create. Single process by design (spec Excludes: no Redis, no partial invalidation,
+// no size limit). Writes that bypass createNote (direct SQL, another process) show up once the
+// entry expires.
+export const LIST_CACHE_TTL_MS = 5000;
+
+// The cache key is the page the repository is asked for, not the raw URL: two query strings that
+// normalise to the same {limit, offset, q} ask the database the same question, and any difference
+// in limit, offset or q is a different key.
+export function listCacheKey({ limit, offset, q = null }) {
+  return JSON.stringify([limit, offset, q]);
+}
+
+// A per-service cache (never module-level: each service instance, and so each test, owns its own).
+// `now` is the injected clock (default Date.now, read at call time so fake timers also reach it).
+// An entry is fresh while now - storedAt < ttlMs. `generation` goes up on every clear; a read that
+// started under an older generation is not stored, so a GET in flight during a successful POST
+// cannot put the pre-POST list back after the clear (plan d5).
+export function createListCache({ now = () => Date.now(), ttlMs = LIST_CACHE_TTL_MS } = {}) {
+  const entries = new Map();
+  let generation = 0;
+  return {
+    get(key) {
+      const entry = entries.get(key);
+      if (!entry) return undefined;
+      if (now() - entry.storedAt >= ttlMs) {
+        entries.delete(key);
+        return undefined;
+      }
+      return entry.value;
+    },
+    generation: () => generation,
+    set(key, value, startedGeneration) {
+      if (startedGeneration !== generation) return;
+      entries.set(key, { value, storedAt: now() });
+    },
+    clear() {
+      generation += 1;
+      entries.clear();
+    },
+  };
+}
+
+const copyList = (list) => ({ items: list.items.map((n) => ({ ...n })), total: list.total });
+
+export function createNotesService(repo, { now } = {}) {
+  const cache = createListCache({ now });
   return {
     async listNotes(query) {
       const page = parsePage(query);
       const q = normalizeQuery(query?.q);
+      // `q` is only passed when there is a filter, so a blank search asks for exactly the 002 page.
+      const request = q === null ? page : { ...page, q };
+      const key = listCacheKey(request);
+      const hit = cache.get(key);
+      if (hit) return copyList(hit);
+      const startedGeneration = cache.generation();
       let result;
       try {
-        // `q` is only passed when there is a filter, so a blank search asks for exactly the 002 page.
-        result = await repo.listNotes(q === null ? page : { ...page, q });
+        result = await repo.listNotes(request);
       } catch (err) {
+        // Failures (503/500) are never cached: the next request asks the database again.
         throw classifyStorageError(err);
       }
-      return {
+      const list = {
         items: result.items.map((n) => ({ id: n.id, title: n.title, body: n.body, created_at: n.created_at })),
         total: result.total,
       };
+      cache.set(key, list, startedGeneration);
+      return copyList(list);
     },
 
     async createNote(input) {
@@ -167,6 +221,8 @@ export function createNotesService(repo) {
         }
         throw err;
       }
+      // Only a stored note clears the cache; a rejected or failed create leaves it as it was.
+      cache.clear();
       return { id: created.id, title: created.title, body: created.body, created_at: created.created_at };
     },
   };

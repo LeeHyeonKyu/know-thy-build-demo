@@ -621,3 +621,153 @@ describe("issue #76 rework 2 — a timed-out write answers 503 and leaves no row
     }
   }, 120000);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Issue #5 — GET /notes (spec docs/features/002-list-notes.md) against the real entrypoint and
+// the compose Postgres.
+//
+// Isolation (docs/QA.md DB isolation, plan dissent d2): `total` and the empty list are statements
+// about the WHOLE table, so a marker filter cannot isolate them, and a BEGIN/ROLLBACK cannot wrap
+// the app's own pool. Every case therefore gets a throwaway database of its own and an app process
+// pointed at it (the same technique as test_76_timed_out_insert_answers_503_and_writes_no_row).
+// Rows written by the #76 tests — or by a concurrent new-test-repeat run — live in other databases
+// and cannot move `total`. The database starts with no `notes` table at all, so the first GET also
+// proves the cold-start path (plan d6: GET before any POST is 200, not a 42P01 500).
+//
+// Rows are inserted with an explicit created_at by SQL, not through POST: the repository stamps
+// now() and cannot be told a time, and dw2's rubric requires a REAL tie in the database (plan d1).
+async function withScratchApp(label, fn) {
+  const dbName = "fq5_" + label + "_" + randomUUID().replace(/-/g, "");
+  await db.query("create database " + dbName);
+  const client = new pg.Client({ ...DB, database: dbName });
+  let app;
+  try {
+    await client.connect();
+    app = await startApp({ ...pgEnv(DB.host, DB.port), PGDATABASE: dbName });
+    return await fn({ app, client });
+  } finally {
+    await app?.stop();
+    await client.end().catch(() => {});
+    await db.query("drop database if exists " + dbName + " with (force)");
+  }
+}
+
+// Inserts rows in the given order and returns them with their assigned ids.
+async function insertAt(client, rows) {
+  const out = [];
+  for (const { title, createdAt } of rows) {
+    const note = makeNote({ title });
+    const { rows: r } = await client.query(
+      "insert into notes (title, body, created_at) values ($1, $2, $3) returning id",
+      [note.title, note.body, createdAt],
+    );
+    out.push({ id: Number(r[0].id), title, createdAt });
+  }
+  return out;
+}
+
+const getList = (base, search = "") => send(base, "/notes" + search);
+
+describe("issue #5 — GET /notes against the compose Postgres", () => {
+  // dw5: no notes → 200 and exactly {"items":[],"total":0} (total a number, not "0"), not 404 and
+  // not a 500 on a database where the table has never been created.
+  test("test_5_empty_list_returns_zero_total", async () => {
+    await withScratchApp("empty", async ({ app }) => {
+      for (let i = 0; i < 2; i += 1) {
+        const { res, body } = await getList(app.base);
+        expect(res.status, "call " + i).toBe(200);
+        expect(res.headers.get("content-type")).toMatch(/application\/json/);
+        expect(body).toStrictEqual({ items: [], total: 0 });
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  // dw1: three notes at different times, inserted in an order that is NOT their time order, so
+  // neither "id DESC" nor "insertion order" nor "created_at ASC" produces the expected list.
+  test("test_5_list_notes_newest_first_with_total", async () => {
+    await withScratchApp("order", async ({ app, client }) => {
+      expect((await getList(app.base)).res.status).toBe(200); // creates the table
+      const [middle, newest, oldest] = await insertAt(client, [
+        { title: "middle", createdAt: "2026-03-01T10:00:00Z" },
+        { title: "newest", createdAt: "2026-03-01T12:00:00Z" },
+        { title: "oldest", createdAt: "2026-03-01T08:00:00Z" },
+      ]);
+
+      const { res, body } = await getList(app.base);
+      expect(res.status).toBe(200);
+      // dw1 rubric: the body is exactly {items,total}.
+      expect(Object.keys(body).sort()).toEqual(["items", "total"]);
+      expect(body.total).toBe(3); // a number, not pg's bigint string "3" (plan d7)
+      expect(body.items.map((n) => n.id)).toEqual([newest.id, middle.id, oldest.id]);
+      expect(body.items[0]).toMatchObject({ title: "newest", created_at: "2026-03-01T12:00:00.000Z" });
+      expect(body.items.map((n) => n.created_at)).toEqual([
+        "2026-03-01T12:00:00.000Z",
+        "2026-03-01T10:00:00.000Z",
+        "2026-03-01T08:00:00.000Z",
+      ]);
+    });
+  }, CASE_TIMEOUT_MS);
+
+  // dw2: several rows share one created_at in the database (checked there, not in JSON, which
+  // only has millisecond precision). They come back id DESC, between a newer and an older row,
+  // and three calls return the same order.
+  test("test_5_same_created_at_orders_by_id_desc", async () => {
+    await withScratchApp("tie", async ({ app, client }) => {
+      expect((await getList(app.base)).res.status).toBe(200); // creates the table
+      const tie = "2026-04-01T09:30:00.123456Z";
+      const inserted = await insertAt(client, [
+        { title: "older", createdAt: "2026-04-01T09:00:00Z" },
+        { title: "tie-a", createdAt: tie },
+        { title: "newer", createdAt: "2026-04-01T10:00:00Z" },
+        { title: "tie-b", createdAt: tie },
+        { title: "tie-c", createdAt: tie },
+        { title: "tie-d", createdAt: tie },
+      ]);
+      const byTitle = Object.fromEntries(inserted.map((r) => [r.title, r.id]));
+      const { rows } = await client.query("select count(distinct created_at)::int as n from notes where title like 'tie-%'");
+      expect(rows[0].n, "the tie rows must share one created_at in the database").toBe(1);
+
+      const expected = [byTitle.newer, byTitle["tie-d"], byTitle["tie-c"], byTitle["tie-b"], byTitle["tie-a"], byTitle.older];
+      for (let i = 0; i < 3; i += 1) {
+        const { res, body } = await getList(app.base);
+        expect(res.status).toBe(200);
+        expect(body.items.map((n) => n.id), "call " + i).toEqual(expected);
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  // dw6: 25 notes, inserted in a shuffled time order (a fixed permutation, not random). Page 1
+  // (default limit 20) and page 2 (offset=20) together are the full newest-first list with no gap
+  // and no overlap; page 2 starts at the 21st newest. An offset past the end is 200, empty items,
+  // and the real total.
+  test("test_5_offset_pages_and_past_total_is_empty", async () => {
+    await withScratchApp("pages", async ({ app, client }) => {
+      expect((await getList(app.base)).res.status).toBe(200); // creates the table
+      const N = 25;
+      const base = Date.parse("2026-05-01T00:00:00Z");
+      const plan = Array.from({ length: N }, (_, k) => {
+        const minute = (k * 7) % N; // gcd(7,25)=1: a bijection, so every minute is used once
+        return { title: "n" + String(minute).padStart(2, "0"), createdAt: new Date(base + minute * 60000).toISOString() };
+      });
+      const inserted = await insertAt(client, plan);
+      const newestFirst = [...inserted].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).map((r) => r.id);
+
+      const page1 = await getList(app.base);
+      expect(page1.res.status).toBe(200);
+      expect(page1.body.total).toBe(N);
+      expect(page1.body.items.map((n) => n.id)).toEqual(newestFirst.slice(0, 20));
+
+      const page2 = await getList(app.base, "?offset=20");
+      expect(page2.res.status).toBe(200);
+      expect(page2.body.total).toBe(N);
+      expect(page2.body.items.map((n) => n.id)).toEqual(newestFirst.slice(20));
+      expect(page2.body.items[0].id).toBe(newestFirst[20]);
+      expect([...page1.body.items, ...page2.body.items].map((n) => n.id)).toEqual(newestFirst);
+
+      const past = await getList(app.base, "?offset=100");
+      expect(past.res.status).toBe(200);
+      expect(past.body.items).toEqual([]);
+      expect(past.body.total).toBe(N);
+    });
+  }, CASE_TIMEOUT_MS);
+});

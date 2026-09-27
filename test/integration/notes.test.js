@@ -1459,3 +1459,158 @@ describe("issue #87 rework 2 — interleaved legitimate uploads are not all refu
     });
   }, BURST_TIMEOUT_MS);
 });
+
+// A raw-socket request that writes `text` (headers and maybe part of a body) and then goes silent:
+// the client never writes, ends or destroys it again, so whatever happens to it is the server's
+// doing. Records what the server sent and when the connection closed.
+async function openSilentRequest(url, ...parts) {
+  const socket = connect(Number(url.port), url.hostname);
+  const state = { socket, received: "", closed: false, openedAt: 0, closedAt: undefined };
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk) => { state.received += chunk; });
+  socket.on("error", () => {});
+  socket.on("close", () => {
+    state.closed = true;
+    state.closedAt = performance.now();
+  });
+  await once(socket, "connect");
+  state.openedAt = performance.now();
+  for (const part of parts) socket.write(part);
+  return state;
+}
+const gzipPostHead = (url, length) =>
+  "POST /notes HTTP/1.1\r\nHost: " + url.host + "\r\nContent-Type: application/json\r\n" +
+  "Content-Encoding: gzip\r\nContent-Length: " + length + "\r\n\r\n";
+
+// How long a fresh POST may keep being refused while silent uploads hold the budget: the server's
+// idle threshold for "stalled" plus room for a loaded runner — and well under the 30 s
+// requestTimeout, so a pass cannot come from Node closing the stalled sockets on its own.
+const STALLED_SERVED_BOUND_MS = 20000;
+
+describe("issue #87 rework 3 — silent partial uploads cannot hold the budget (qa1)", () => {
+  // dw4: `fits` raw sockets each send a near-cap gzip body minus its last bytes and then go
+  // silent without closing. Together they fill the budget (a near-cap probe is refused as
+  // overloaded — observed from outside). While they are still held open by the client, a fresh
+  // legitimate near-cap note must get through: the server gives up on a STALLED reader (closes its
+  // connection) instead of refusing the newer request forever. On a youngest-first policy every
+  // fresh attempt is 503 overloaded until Node's own request timeout, which this bound never reaches.
+  test("test_87_stalled_partial_uploads_do_not_block_fresh_post", async () => {
+    const fits = Math.floor(MAX_INFLIGHT_BODY_BYTES / NEAR_CAP);
+    expect(fits, "near-cap requests the budget holds at once").toBeGreaterThanOrEqual(1);
+    const stalledGz = await gzipUnterminated(NEAR_CAP);
+    const freshTitle = uniqueMarker("dw87-stall-fresh");
+    const freshGz = await gzipNote(freshTitle, NEAR_CAP);
+    await withScratchAppEnv("stalled", {}, async ({ app, client }) => {
+      const url = new URL(app.base);
+      const stalled = [];
+      try {
+        for (let i = 0; i < fits; i += 1) {
+          stalled.push(await openSilentRequest(url, gzipPostHead(url, stalledGz.length), stalledGz.subarray(0, stalledGz.length - 16)));
+        }
+        // The silent uploads occupy the budget: a near-cap probe (invalid JSON, so it would be a
+        // 400 if admitted) is refused as overloaded.
+        await vi.waitFor(
+          async () => {
+            const probe = await postGzip(app.base, stalledGz);
+            if (probe.status !== 503) throw new Error("budget not occupied by the stalled uploads yet: " + probe.status);
+            expect(probe.body?.error?.code).toBe("overloaded");
+          },
+          { timeout: 30000, interval: 50 },
+        );
+        expect(stalled.filter((s) => s.closed), "no stalled upload is closed before the fresh POST").toHaveLength(0);
+        const healthWhileStalled = await getWithin(app.base, "/healthz");
+
+        // A fresh legitimate near-cap note, retried (condition wait) until it is served.
+        const attempts = [];
+        await vi.waitFor(
+          async () => {
+            const r = await postGzip(app.base, freshGz);
+            attempts.push(r);
+            if (r.status !== 201) {
+              throw new Error("fresh near-cap POST refused while silent uploads hold the budget: " + JSON.stringify(tally(attempts)));
+            }
+          },
+          { timeout: STALLED_SERVED_BOUND_MS, interval: 250 },
+        );
+        const summary = JSON.stringify(tally(attempts)) + "; app stderr: " + app.out.stderr.slice(-1500);
+        for (const r of attempts.slice(0, -1)) {
+          expect(r.status, "a refused attempt: " + summary).toBe(503);
+          expect(r.body?.error?.code, summary).toBe("overloaded");
+        }
+        expect(await rowsTitledIn(client, freshTitle), "the fresh note was persisted").toBe(1);
+
+        // The server made room by closing a stalled connection, answering it as a client error —
+        // not by closing all of them at once (that would be a timeout, not eviction).
+        await vi.waitFor(
+          () => {
+            if (!stalled.some((s) => s.closed)) throw new Error("no stalled upload was closed by the server");
+          },
+          { timeout: 5000, interval: 20 },
+        );
+        const closed = stalled.filter((s) => s.closed);
+        expect(closed.length, "stalled uploads the server closed").toBeGreaterThanOrEqual(1);
+        expect(closed.length, "the server closed every stalled upload at once: " + summary).toBeLessThan(fits);
+        for (const s of closed) expect(s.received, "answer on an evicted stalled upload").toMatch(/^HTTP\/1\.1 4\d\d /);
+
+        expect(healthWhileStalled.status).toBe(200);
+        expect(healthWhileStalled.body).toMatchObject({ ok: true });
+        const healthAfter = await getWithin(app.base, "/healthz");
+        expect(healthAfter.status).toBe(200);
+        expect(app.dead()).toBe(false);
+      } finally {
+        for (const s of stalled) s.socket.destroy();
+      }
+    });
+  }, BURST_TIMEOUT_MS);
+
+  // dw5: the entrypoint's server closes silent requests on its own, budget or not. One connection
+  // sends POST /notes headers and a few body bytes, another only part of its headers; neither ever
+  // sends more. Configured: requestTimeout 30 s, headersTimeout 10 s, connection check every 1 s.
+  // Stated margin: 5 s for a loaded runner. Node's defaults (300 s / 60 s, checked every 30 s)
+  // leave both open far past these bounds.
+  test("test_87_stalled_uploads_closed_within_timeout", async () => {
+    const CHECK_INTERVAL_MS = 1000;
+    const MARGIN_MS = 5000;
+    const HEADERS_BOUND_MS = 10000 + CHECK_INTERVAL_MS + MARGIN_MS;
+    const REQUEST_BOUND_MS = 30000 + CHECK_INTERVAL_MS + MARGIN_MS;
+    const app = await startApp(pgEnv(DB.host, DB.port));
+    const url = new URL(app.base);
+    const silent = [];
+    try {
+      const bodyStall = await openSilentRequest(
+        url,
+        "POST /notes HTTP/1.1\r\nHost: " + url.host + "\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n",
+        '{"title":"stalled","body":"',
+      );
+      silent.push(bodyStall);
+      const headStall = await openSilentRequest(url, "POST /notes HTTP/1.1\r\nHost: " + url.host + "\r\nContent-Type: appl");
+      silent.push(headStall);
+
+      await vi.waitFor(
+        () => {
+          if (!headStall.closed) throw new Error("partial-headers connection still open");
+        },
+        { timeout: HEADERS_BOUND_MS, interval: 100 },
+      );
+      expect(headStall.closedAt - headStall.openedAt, "partial headers closed within headersTimeout + check + margin").toBeLessThanOrEqual(HEADERS_BOUND_MS);
+      await vi.waitFor(
+        () => {
+          if (!bodyStall.closed) throw new Error("partial-body connection still open");
+        },
+        { timeout: REQUEST_BOUND_MS, interval: 100 },
+      );
+      expect(bodyStall.closedAt - bodyStall.openedAt, "partial body closed within requestTimeout + check + margin").toBeLessThanOrEqual(REQUEST_BOUND_MS);
+
+      const health = await getWithin(app.base, "/healthz");
+      expect(health.status).toBe(200);
+      expect(app.dead()).toBe(false);
+    } finally {
+      for (const s of silent) s.socket.destroy();
+      await app.stop();
+    }
+  }, 120000);
+});
+
+async function rowsTitledIn(client, title) {
+  return (await client.query("select count(*)::int as n from notes where title = $1", [title])).rows[0].n;
+}

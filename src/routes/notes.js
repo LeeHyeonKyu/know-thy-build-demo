@@ -12,8 +12,30 @@ export const MAX_BODY_BYTES = 16 * 1024 * 1024;
 
 const sendError = (res, status, code, message) => res.status(status).json({ error: { code, message } });
 
+// One note as GET /notes lists it: the same four fields and created_at format POST /notes returns.
+const toNoteJson = (note) => ({
+  id: note.id,
+  title: note.title,
+  body: note.body,
+  created_at: note.created_at instanceof Date ? note.created_at.toISOString() : note.created_at,
+});
+
 export function createNotesRouter(service) {
   const router = express.Router();
+
+  // GET /notes?limit=&offset= (spec 002): 200 {items,total}, newest first.
+  router.get("/", async (req, res) => {
+    try {
+      const { items, total } = await service.listNotes(req.query);
+      res.status(200).json({ items: items.map(toNoteJson), total });
+    } catch (err) {
+      if (err instanceof NotesError && STATUS_BY_CODE[err.code]) {
+        return sendError(res, STATUS_BY_CODE[err.code], err.code, err.message);
+      }
+      console.error("GET /notes failed: " + (err?.stack || err));
+      return sendError(res, 500, "internal_error", "internal error");
+    }
+  });
 
   // The body is parsed as JSON whatever the Content-Type says: spec 001's curl one-liner
   // (`curl -d '{...}'`) labels its JSON application/x-www-form-urlencoded. Anything that is not

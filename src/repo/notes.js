@@ -51,6 +51,33 @@ export function createNotesRepo({ pool = createPool() } = {}) {
       const row = rows[0];
       return { id: Number(row.id), title: row.title, body: row.body, created_at: row.created_at };
     },
+
+    // One page, newest first, plus the table's total (spec 002). ensureSchema() runs here too, so a
+    // GET on a fresh database before any POST is an empty page, not a 42P01 500 (plan d6).
+    // Page and count come from ONE statement, so they share one snapshot: a POST landing between
+    // two separate queries cannot make `total` disagree with the page (plan d8). The left join keeps
+    // one row even when the page is empty (empty table, or offset past the end), so `total` is
+    // always read from the database rather than inferred.
+    async listNotes({ limit, offset }) {
+      await ensureSchema();
+      const { rows } = await pool.query(
+        `with page as (
+           select id, title, body, created_at from notes
+           order by created_at desc, id desc
+           limit $1 offset $2
+         )
+         select (select count(*) from notes) as total, page.id, page.title, page.body, page.created_at
+         from (select 1) as one left join page on true
+         order by page.created_at desc, page.id desc`,
+        [limit, offset],
+      );
+      // count(*) is a bigint, which pg returns as a string; the API contract is a number (plan d7).
+      const total = Number(rows[0].total);
+      const items = rows
+        .filter((row) => row.id !== null)
+        .map((row) => ({ id: Number(row.id), title: row.title, body: row.body, created_at: row.created_at }));
+      return { items, total };
+    },
   };
 }
 

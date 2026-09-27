@@ -256,3 +256,116 @@ describe("issue #76 rework 2 — bounded body buffering and server-side statemen
     expect(text).not.toContain(secretTitle);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// Issue #5 — GET /notes (spec docs/features/002-list-notes.md), DB-free unit level.
+// The route and service are the production modules; the repository is a fake that records the
+// page it was asked for, so the effective limit/offset is observed as a side effect, not recomputed.
+
+function fakeListRepo(result = { items: [], total: 0 }) {
+  const calls = [];
+  return {
+    calls,
+    async insertNote() {
+      throw new Error("insertNote must not be called by GET /notes");
+    },
+    async listNotes(page) {
+      calls.push(page);
+      if (result instanceof Error) throw result;
+      return typeof result === "function" ? result(page) : result;
+    },
+  };
+}
+
+async function getNotes(base, search = "") {
+  const res = await fetch(base + "/notes" + search);
+  const text = await res.text();
+  let body = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = null;
+  }
+  return { res, text, body };
+}
+
+describe("issue #5 — GET /notes paging rules without a database", () => {
+  // dw3: missing limit → 20, in-range kept, over the cap → 100; offset defaults to 0 and is passed
+  // through. Each request is checked by what the repository was actually asked for.
+  test("test_5_limit_default_and_cap", async () => {
+    const cases = [
+      { search: "", page: { limit: 20, offset: 0 } },
+      { search: "?limit=5", page: { limit: 5, offset: 0 } },
+      { search: "?limit=5&offset=7", page: { limit: 5, offset: 7 } },
+      { search: "?offset=40", page: { limit: 20, offset: 40 } },
+      { search: "?limit=1", page: { limit: 1, offset: 0 } },
+      { search: "?limit=100", page: { limit: 100, offset: 0 } },
+      { search: "?limit=101", page: { limit: 100, offset: 0 } },
+      { search: "?limit=1000", page: { limit: 100, offset: 0 } },
+      { search: "?limit=99999999999999999999999", page: { limit: 100, offset: 0 } },
+    ];
+    for (const { search, page } of cases) {
+      const repo = fakeListRepo();
+      const base = await startWith(repo);
+      const { res } = await getNotes(base, search);
+      expect(res.status, "GET /notes" + search).toBe(200);
+      expect(repo.calls, "GET /notes" + search).toEqual([page]);
+    }
+  });
+
+  // dw4: a negative or non-integer limit is 400 in the API's error format, and storage is never
+  // asked. '1.5' and '10abc' are the inputs a parseInt-based check lets through (plan d9); '0' is
+  // not a positive integer (spec Key States message, plan d3).
+  test("test_5_invalid_limit_returns_400", async () => {
+    for (const raw of ["-1", "abc", "1.5", "10abc", "0", ""]) {
+      const repo = fakeListRepo();
+      const base = await startWith(repo);
+      const { res, body } = await getNotes(base, "?limit=" + encodeURIComponent(raw));
+      expect(res.status, "limit=" + JSON.stringify(raw)).toBe(400);
+      expect(res.headers.get("content-type")).toMatch(/application\/json/);
+      expect(body?.error?.code, "limit=" + JSON.stringify(raw)).toBe("invalid_request");
+      expect(body?.error?.message).toContain("limit");
+      expect(repo.calls, "limit=" + JSON.stringify(raw)).toHaveLength(0);
+    }
+  });
+
+  // Plan d4: a negative, non-integer or out-of-range offset is refused before it reaches SQL
+  // (where it would be a Postgres error and a 500).
+  test("test_5_invalid_offset_returns_400", async () => {
+    for (const raw of ["-5", "x", "2.5", "99999999999999999999999"]) {
+      const repo = fakeListRepo();
+      const base = await startWith(repo);
+      const { res, body } = await getNotes(base, "?offset=" + encodeURIComponent(raw));
+      expect(res.status, "offset=" + JSON.stringify(raw)).toBe(400);
+      expect(body?.error?.code).toBe("invalid_request");
+      expect(body?.error?.message).toContain("offset");
+      expect(repo.calls).toHaveLength(0);
+    }
+  });
+
+  // The repository's page is passed through as {items,total}; created_at is serialized the same
+  // way POST /notes serializes it, and total stays a number.
+  test("test_5_route_passes_repo_page_through", async () => {
+    const createdAt = new Date("2026-02-03T04:05:06.789Z");
+    const repo = fakeListRepo({ items: [{ id: 9, title: "t9", body: "b9", created_at: createdAt }], total: 42 });
+    const base = await startWith(repo);
+    const { res, body } = await getNotes(base, "?limit=1&offset=3");
+    expect(res.status).toBe(200);
+    expect(body.total).toBe(42);
+    expect(body.items).toHaveLength(1);
+    expect(body.items[0]).toMatchObject({ id: 9, title: "t9", body: "b9", created_at: "2026-02-03T04:05:06.789Z" });
+  });
+
+  // Plan d5: the database being down on GET is the same 503 db_unavailable as on POST, not a 500.
+  test("test_5_list_db_unavailable_maps_to_503", async () => {
+    const base = await startWith(fakeListRepo(new Error("Connection terminated unexpectedly")));
+    const down = await getNotes(base);
+    expect(down.res.status).toBe(503);
+    expect(down.body?.error?.code).toBe("db_unavailable");
+
+    const base2 = await startWith(fakeListRepo(new Error("boom")));
+    const other = await getNotes(base2);
+    expect(other.res.status).toBe(500);
+    expect(other.body?.error?.code).toBe("internal_error");
+  });
+});

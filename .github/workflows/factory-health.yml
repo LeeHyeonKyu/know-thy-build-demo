@@ -27,7 +27,7 @@ jobs:
     # `claude -p`를 띄우지 않는 결정적 잡이다(집계와 렌더링뿐) — 스테이지의 상한이 필요 없다.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # 기록은 records 브랜치에 있고 판단의 재료(하네스·CHARTER·설치 매니페스트)는 기본 브랜치의
           # 현재 상태다 — 회고와 같은 이유로 기본 브랜치를 본다.

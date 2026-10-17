@@ -11,11 +11,11 @@
     "e2e": "playwright test"
   },
   "devDependencies": {
-    "@playwright/test": "^1.55.0",
+    "@playwright/test": "^1.64.0",
     "vitest": "^3.2.0"
   },
   "dependencies": {
-    "express": "^5.1.0",
-    "pg": "^8.23.0"
+    "express": "^5.3.0",
+    "pg": "^8.23.1"
   }
 }

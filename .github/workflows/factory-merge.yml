@@ -70,7 +70,7 @@ jobs:
             exit 1
           fi
           echo "factory: merge-token check ok (two-actor declared: ${TWO_ACTOR_DECLARED:-unset}, merge token present: $MERGE_TOKEN_PRESENT)"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.FACTORY_BOT_TOKEN }}

@@ -80,6 +80,7 @@ reason: "object면 무엇이 잘못됐고 무엇이면 accept인지"
   보여준다. 제안: 새로 만들지 말고 `non_goals`에 '세 번째 CSV 경로를 만들지 않는다'를 명시하고, 이번 이슈를
   '기존 두 경로를 하나로 부르는 진입점 추가'로 좁힌다."
 - "위치: 이슈 #207(`factory:flaky`, `test_sync_retry`). 주장: **테스트 문제가 아니라 제품의 경쟁 조건**이다.
+- 위치: 새 동작 때문에 깨지는 기존 테스트 줄이다. #45는 `test/smoke.test.js:228,240,260,272,308`의 `expect(body).toEqual({ version: expect.any(String) })`, #7은 `test/integration/notes.test.js`가 직접 SQL로 행을 넣은 뒤 같은 GET을 반복하는 689/696·745/755 등이다. 주장: 이 계획대로 만들면 load-bearing 테스트가 RED가 된다. #45에서는 `node` 필드가 키 집합을 깨고, #7에서는 5초…
   근거: 실패 로그 3건이 전부 `retry()`가 이전 시도의 응답을 받기 전에 두 번째 요청을 보내는 순간에 발생하며
   (`src/sync/retry.ts:44`에 취소 처리 없음), main에서도 5회 중 1회 재현된다. 테스트를 안정화하는 done_when은
   이 결함을 덮는다 — done_when은 '동시 재시도에서 중복 요청이 0건'이어야 하고 테스트 반복 30회는 그 다음이다."

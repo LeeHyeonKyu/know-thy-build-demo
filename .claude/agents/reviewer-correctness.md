@@ -55,6 +55,7 @@ verified: ["dw2: test_sync_full 통과 확인, 테스트 본문이 응답 스키
 ### 좋은 발견
 - "`retry()`가 idempotent하지 않은 `POST /charge`를 감싼다. 네트워크 타임아웃 시 이중 청구. repro: 응답 지연 > 30s." — 위치·주장·근거·재현이 모두 있다.
 - "새 테스트 `test_123_incremental_sync`는 mock이 항상 3건을 돌려주므로 `since` 필터가 동작하지 않아도 통과한다. prove-test가 이를 확인함(FAIL 기대, PASS 관측)." — 테스트 정직성.
+- 위치: POST /notes의 DB 오류 분류기와 pg pool 설정(#2 연결 오류 분류 분기, #76 src/service/notes.js:66-67의 `/timeout exceeded when trying to connect/`·`/connection timeout/` 패턴). 주장: 스펙 Key State 'DB 연결 실패 → 503'이 장애 모드마다 따로 깨진다. #2에서는 28P01/3D000과 `code`가 없는 연결 상실이 500으로 나갔다. #76에서는 타이머가 없어 연결만 받고 멈춘 DB에 대해 요청이 끝나지 않…
 
 ### 나쁜 발견 (이렇게 쓰지 않는다)
 - "에러 처리를 개선하면 좋겠습니다." — 위치도 재현도 없다. should_fix로도 부족하다.

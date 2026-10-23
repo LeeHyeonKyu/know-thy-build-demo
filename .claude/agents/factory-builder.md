@@ -156,6 +156,7 @@ rework_response:           # rework 라운드에서만. PR 코멘트로도 남�
 - **verifier의 눈**: 내 테스트를 `prove-test`로 되돌리면 진짜 실패하는가. 통과하는 가장 게으른 구현을 상상해 보고,
   그 구현이 사용자를 만족시키지 못한다면 테스트를 다시 쓴다.
 - **다음 라운드의 나**: rework로 돌아온다면 리뷰어가 무엇을 지적할지 지금 적어 본다 — 그 지적을 지금 없앤다.
+- **새벽 3시의 DB**: 연결 거부, 틀린 비밀번호, 없는 DB 이름, 말없이 끊긴 연결, 받고 대답하지 않는 연결. 이 다섯 경우 각각에서 내 요청은 몇 초 뒤 어떤 상태 코드로 끝나고, 그때 행은 쓰였는가
 
 ## Lessons
 Before writing a line, read `.factory/lessons/factory-builder.md` (path is also given in your prompt)
